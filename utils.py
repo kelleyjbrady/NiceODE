@@ -1,6 +1,9 @@
 from scipy.integrate import solve_ivp
 import numpy as np
 from tqdm import tqdm
+from scipy.optimize import minimize
+from joblib import dump, load
+from functools import partial
 
 def one_compartment_model(t, y, k, Vd, dose):
     """
@@ -25,7 +28,7 @@ def one_compartment_model(t, y, k, Vd, dose):
     dCdt = -(k/Vd) * C  # Calculate the rate of change
     return dCdt
 
-def objective_function(params, data, subject_id = 'SUBJID', dose = 'DOSR', time = 'TIME', conc_at_time = 'DV'):
+def objective_function(params, data, subject_id_c = 'SUBJID', dose_c = 'DOSR', time_c = 'TIME', conc_at_time_c = 'DV'):
   """
   Calculates the sum of squared errors (SSE) between observed and predicted drug 
   concentrations.
@@ -45,19 +48,85 @@ def objective_function(params, data, subject_id = 'SUBJID', dose = 'DOSR', time 
   k, Vd = params  # Unpack parameters
   #Vd = Vd + 1e-6 if Vd == 0 else Vd  # Add a small value to Vd to avoid division by zero (commented out)
   predictions = []
-  for subject in tqdm(data[subject_id].unique()):  # Loop through each subject in the dataset
-      d = data.loc[data[subject_id] == subject, dose]  # Extract dose information for the subject
+  for subject in tqdm(data[subject_id_c].unique()):  # Loop through each subject in the dataset
+      d = data.loc[data[subject_id_c] == subject, dose_c]  # Extract dose information for the subject
       d = d.drop_duplicates()  # Ensure only one dose value is used
       dose = d.values[0]  # Get the dose value
-      subject_data = data[data[subject_id] == subject]  # Get data for the current subject
-      initial_conc = subject_data[conc_at_time].values[0]  # Get the initial concentration
+      subject_data = data[data[subject_id_c] == subject]  # Get data for the current subject
+      initial_conc = subject_data[conc_at_time_c].values[0]  # Get the initial concentration
 
       # Solve the differential equation for the current subject
-      sol = solve_ivp(one_compartment_model, [subject_data[time].min(), subject_data[time].max()], [initial_conc], 
-                      t_eval=subject_data[time], args=(k, Vd, dose))
+      sol = solve_ivp(one_compartment_model, [subject_data[time_c].min(), subject_data[time_c].max()], [initial_conc], 
+                      t_eval=subject_data[time_c], args=(k, Vd, dose))
       
       predictions.extend(sol.y[0])  # Add the predictions for this subject to the list
 
-  residuals = data[conc_at_time] - predictions  # Calculate the difference between observed and predicted values
+  residuals = data[conc_at_time_c] - predictions  # Calculate the difference between observed and predicted values
   sse = np.sum(residuals**2)  # Calculate the sum of squared errors
   return sse
+
+def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename, *args, **kwargs):
+    """
+    Optimizes a function using scipy.optimize.minimize() with checkpointing every n iterations,
+    using joblib for saving and loading checkpoints.
+
+    Args:
+        func: The objective function to be minimized.
+        x0: The initial guess.
+        n_checkpoint: The number of iterations between checkpoints.
+        checkpoint_filename: The filename to save checkpoints to.
+        *args: Additional positional arguments to be passed to minimize().
+        **kwargs: Additional keyword arguments to be passed to minimize().
+
+    Returns:
+        The optimization result from scipy.optimize.minimize().
+    """
+
+    iteration = 0
+    
+    # Try to load a previous checkpoint if it exists
+    try:
+        checkpoint = load(checkpoint_filename)
+        x0 = checkpoint['x']
+        iteration = checkpoint['iteration']
+        print(f"Resuming optimization from iteration {iteration}")
+    except FileNotFoundError:
+        print("No checkpoint found, starting from initial guess.")
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}, starting from initial guess.")
+
+    def callback_with_checkpoint(xk, checkpoint_filename):
+        nonlocal iteration
+        iteration += 1
+        print(iteration)
+        if iteration % n_checkpoint == 0:
+            checkpoint = {
+                'x': xk,
+                'iteration': iteration
+            }
+            checkpoint_filename = checkpoint_filename.replace('.jb', f'_{iteration}.jb')
+            dump(checkpoint, checkpoint_filename)
+            print(f"Iteration {iteration}: Checkpoint saved to {checkpoint_filename}")
+        print('no log')
+
+    # Ensure callback is not already in kwargs
+    if 'callback' not in kwargs:
+        kwargs['callback'] = partial(callback_with_checkpoint, checkpoint_filename = checkpoint_filename)
+    else:
+        # If callback exists, combine it with the existing one
+        user_callback = kwargs['callback']
+        def combined_callback(xk):
+            callback_with_checkpoint(xk, checkpoint_filename)
+            user_callback(xk)
+
+        kwargs['callback'] = combined_callback
+    
+    result = minimize(func, x0, *args, **kwargs)
+    
+    # Remove checkpoint file at end.
+    #try:
+    #    os.remove(checkpoint_filename)
+    #except:
+    #    pass
+
+    return result
