@@ -4,6 +4,18 @@ from tqdm import tqdm
 from scipy.optimize import minimize
 from joblib import dump, load
 from functools import partial
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def plot_subject_levels(df:pd.DataFrame,x = 'TIME' ,y = 'DV', subject = 'SUBJID', ax = None):
+    if ax is None:
+        fig, ax = plt.subplots(1)
+    for c in df.columns:
+        df.loc[df[c] == '.', c] = pd.NA
+    df[y] = df[y].astype(pd.Float32Dtype())
+    df[x] = df[x].astype(pd.Float32Dtype())
+    sns.lineplot(data = df, x = x, y = y, hue = subject, ax = ax)
 
 def one_compartment_model(t, y, k, Vd, dose):
     """
@@ -130,3 +142,38 @@ def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename,
     #    pass
 
     return result
+
+def stack_ivp_predictions(ivp_predictions, time_c = 'TIME', pred_DV_c = 'Pred_DV', subject_id_c = 'SUBJID'):
+    dfs = []
+    for subject in ivp_predictions:
+        loop_df = pd.DataFrame()
+        time_vector = ivp_predictions[subject].t
+        preds_vector = ivp_predictions[subject].y[0]
+        loop_df[time_c] = time_vector
+        loop_df[pred_DV_c] = preds_vector
+        loop_df[subject_id_c] = subject
+        dfs.append(loop_df)
+    return pd.concat(dfs)
+
+def merge_ivp_predictions(df, ivp_predictions, time_c = 'TIME', pred_DV_c = 'Pred_DV', subject_id_c = 'SUBJID'):
+    df = df.copy()
+    result_df = stack_ivp_predictions(ivp_predictions, time_c, pred_DV_c, subject_id_c)
+    merge_df = df.merge(result_df, how = 'left', on = [subject_id_c, time_c])
+    return merge_df
+
+def generate_ivp_predictions(optimized_result, df, subject_id_c = 'SUBJID', dose_c = 'DOSR', time_c = 'TIME', conc_at_time_c = 'DV'):
+    predictions = {}
+    est_k, est_vd = optimized_result.x
+    data = df.copy()
+    for subject in data[subject_id_c].unique():
+        d = data.loc[data[subject_id_c] == subject, dose_c]
+        d =  d.drop_duplicates()
+        dose = d.values[0]
+        subject_data = data[data[subject_id_c] == subject]
+
+        initial_conc = subject_data[conc_at_time_c].values[0]
+        #the initial value is initial_conc in this setup. If absorbtion was being modeled it would be [dose/est_vd]
+        sol = solve_ivp(one_compartment_model, [subject_data[time_c].min(), subject_data[time_c].max()], [initial_conc],
+                        t_eval=subject_data[time_c], args=(est_k, est_vd, dose))
+        predictions[subject] = sol
+    return predictions
