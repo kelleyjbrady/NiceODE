@@ -7,6 +7,7 @@ from functools import partial
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from copy import deepcopy
 
 def plot_subject_levels(df:pd.DataFrame,x = 'TIME' ,y = 'DV', subject = 'SUBJID', ax = None):
     if ax is None:
@@ -43,10 +44,17 @@ def one_compartment_model(t, y, k, Vd, dose):
 
 
 def arbitrary_objective_function(params, data, subject_id_c = 'SUBJID',conc_at_time_c ='DV',
-                                 time_c = 'TIME',
+                                 time_c = 'TIME', population_coeff = ['k', 'vd'],
                                  dep_vars = {'k':['mgkg', 'age'], 'vd':['mgkg', 'age']}
                                  ):
+    for c in population_coeff:
+        if c not in (i for i in dep_vars):
+            dep_vars[c] = []
+    assert population_coeff == [i for i in dep_vars]
     k_pop, Vd_pop, *other = params
+    population_coeff = {} #overwrite the list with a dict in the same order
+    for idx, coeff in enumerate(dep_vars):
+        population_coeff[coeff] = params[idx]
     betas = {}
     params = []
     other_params_idx = 0
@@ -63,10 +71,7 @@ def arbitrary_objective_function(params, data, subject_id_c = 'SUBJID',conc_at_t
         subject_filt =  data[subject_id_c] == subject
         subject_data = data.loc[subject_filt, :].copy()
         initial_conc = subject_data[conc_at_time_c].values[0]
-        subject_coeff = {
-            'k':k_pop, 
-            'vd':Vd_pop
-        }
+        subject_coeff = deepcopy(population_coeff)
         subject_coeff_history = [subject_coeff]
         for model_param in betas: #for each of the coeff to be input to the model
             for param_col in betas[model_param]: #for each of the columns in the data which contribute to `model_param`
@@ -76,9 +81,10 @@ def arbitrary_objective_function(params, data, subject_id_c = 'SUBJID',conc_at_t
                 subject_coeff_history.append(subject_coeff)
         subject_coeffs_history[subject] = subject_coeff_history
         subject_coeff = {model_param:np.exp(subject_coeff[model_param]) for model_param in subject_coeff}
+        subject_coeff = [subject_coeff[i] for i in subject_coeff]
         sol = solve_ivp(one_compartment_model, [subject_data[time_c].min(), subject_data[time_c].max()],
                         [initial_conc], 
-                      t_eval=subject_data[time_c], args=(subject_coeff['k'], subject_coeff['vd'], 1))
+                      t_eval=subject_data[time_c], args=(*subject_coeff, 1))
         predictions.extend(sol.y[0])
     residuals = data[conc_at_time_c] - predictions  # Calculate the difference between observed and predicted values
     sse = np.sum(residuals**2)  # Calculate the sum of squared errors
