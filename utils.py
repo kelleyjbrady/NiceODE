@@ -40,6 +40,21 @@ def one_compartment_model(t, y, k, Vd, dose):
     dCdt = -(k/Vd) * C  # Calculate the rate of change
     return dCdt
 
+
+def arbitrary_objective_function(params, data, subject_id_c = 'SUBJID',
+                                 dep_vars = {'k':['mgkg', 'age'], 'vd':['mgkg', 'age']}
+                                 ):
+    k_pop, Vd_pop, *other = params
+    beta_names = []
+    for model_param in dep_vars:
+        beta_names.extend([f'{model_param}_i' for i in dep_vars[model_param]])
+    betas = {}
+    for pair in zip(other, beta_names):
+        betas[pair[1]] = pair[0]
+    for subject in tqdm(data[subject_id_c].unique()):
+        
+    
+
 def objective_function(params, data, subject_id_c = 'SUBJID', dose_c = 'DOSR', time_c = 'TIME', conc_at_time_c = 'DV'):
   """
   Calculates the sum of squared errors (SSE) between observed and predicted drug 
@@ -76,6 +91,48 @@ def objective_function(params, data, subject_id_c = 'SUBJID', dose_c = 'DOSR', t
   residuals = data[conc_at_time_c] - predictions  # Calculate the difference between observed and predicted values
   sse = np.sum(residuals**2)  # Calculate the sum of squared errors
   return sse
+
+
+def objective_function__mgkg_age(params, data, subject_id_c = 'SUBJID', dose_c = 'DOSR', time_c = 'TIME', conc_at_time_c = 'DV', mgkg_c = 'MGKG', age_c = 'AGE'):
+    """
+    Calculates the sum of squared errors (SSE) between observed and predicted drug 
+    concentrations.
+
+    This function simulates drug concentrations for each subject in the dataset using 
+    a one-compartment model and compares the predictions to the actual observations. 
+    The SSE is used as a measure of the goodness of fit for the given model parameters.
+
+    Args:
+    params (tuple): Tuple containing the model parameters (k, Vd).
+    data (DataFrame): Pandas DataFrame containing the pharmacokinetic data, with columns
+                        for 'SUBJID', 'DOSR', 'DV' (observed concentration), and 'TIME'.
+
+    Returns:
+    float: The sum of squared errors (SSE).
+    """
+    k_pop, Vd_pop, k_beta_age, k_beta_mgkg, Vd_beta_age, Vd_beta_mgkg = params # Unpack parameters
+    #Vd = Vd + 1e-6 if Vd == 0 else Vd  # Add a small value to Vd to avoid division by zero (commented out)
+    predictions = []
+    for subject in data[subject_id_c].unique(): # Loop through each subject in the dataset
+        subject_filt =  data[subject_id_c] == subject
+        subject_data = data.loc[subject_filt, :].copy()
+        
+        mgkg = subject_data[mgkg_c].values[0]  # Extract dose information for the subject
+        age = subject_data[age_c].values[0]
+          # Get data for the current subject
+        initial_conc = subject_data[conc_at_time_c].values[0]  # Get the initial concentration
+        with np.errstate(over='ignore'):
+            k_i = np.exp(k_pop + (k_beta_age * age) + (k_beta_mgkg * mgkg))
+            Vd_i = np.exp(Vd_pop + (Vd_beta_age * age) + (Vd_beta_mgkg * mgkg))
+        # Solve the differential equation for the current subject
+        sol = solve_ivp(one_compartment_model, [subject_data[time_c].min(), subject_data[time_c].max()], [initial_conc], 
+                        t_eval=subject_data[time_c], args=(k_i, Vd_i, mgkg))
+        
+        predictions.extend(sol.y[0])  # Add the predictions for this subject to the list
+
+    residuals = data[conc_at_time_c] - predictions  # Calculate the difference between observed and predicted values
+    sse = np.sum(residuals**2)  # Calculate the sum of squared errors
+    return sse
 
 def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename, *args, **kwargs):
     """
