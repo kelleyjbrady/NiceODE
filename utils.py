@@ -41,18 +41,50 @@ def one_compartment_model(t, y, k, Vd, dose):
     return dCdt
 
 
-def arbitrary_objective_function(params, data, subject_id_c = 'SUBJID',
+
+def arbitrary_objective_function(params, data, subject_id_c = 'SUBJID',conc_at_time_c ='DV',
+                                 time_c = 'TIME',
                                  dep_vars = {'k':['mgkg', 'age'], 'vd':['mgkg', 'age']}
                                  ):
     k_pop, Vd_pop, *other = params
-    beta_names = []
-    for model_param in dep_vars:
-        beta_names.extend([f'{model_param}_i' for i in dep_vars[model_param]])
     betas = {}
-    for pair in zip(other, beta_names):
-        betas[pair[1]] = pair[0]
+    params = []
+    other_params_idx = 0
+    for model_param in dep_vars:
+        #beta_names.extend([f'{model_param}_i' for i in dep_vars[model_param]])
+        betas[model_param] = {}
+        for param_col in dep_vars[model_param]:
+            betas[model_param][param_col] = other[other_params_idx]
+            params.append(param_col)
+            other_params_idx = other_params_idx + 1
+    subject_coeffs_history = {}
+    predictions = []
     for subject in tqdm(data[subject_id_c].unique()):
-        
+        subject_filt =  data[subject_id_c] == subject
+        subject_data = data.loc[subject_filt, :].copy()
+        initial_conc = subject_data[conc_at_time_c].values[0]
+        subject_coeff = {
+            'k':k_pop, 
+            'vd':Vd_pop
+        }
+        subject_coeff_history = [subject_coeff]
+        for model_param in betas: #for each of the coeff to be input to the model
+            for param_col in betas[model_param]: #for each of the columns in the data which contribute to `model_param`
+                param_beta = betas[model_param][param_col]
+                param_value = subject_data[param_col].values[0]
+                subject_coeff[model_param] = subject_coeff[model_param] + (param_beta*param_value)
+                subject_coeff_history.append(subject_coeff)
+        subject_coeffs_history[subject] = subject_coeff_history
+        subject_coeff = {model_param:np.exp(subject_coeff[model_param]) for model_param in subject_coeff}
+        sol = solve_ivp(one_compartment_model, [subject_data[time_c].min(), subject_data[time_c].max()],
+                        [initial_conc], 
+                      t_eval=subject_data[time_c], args=(subject_coeff['k'], subject_coeff['vd'], 1))
+        predictions.extend(sol.y[0])
+    residuals = data[conc_at_time_c] - predictions  # Calculate the difference between observed and predicted values
+    sse = np.sum(residuals**2)  # Calculate the sum of squared errors
+    return sse
+    
+#j = arbitrary_objective_function(params = (1,2,3,4,5,6), data = pd.DataFrame())        
     
 
 def objective_function(params, data, subject_id_c = 'SUBJID', dose_c = 'DOSR', time_c = 'TIME', conc_at_time_c = 'DV'):
