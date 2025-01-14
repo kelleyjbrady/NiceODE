@@ -48,6 +48,24 @@ def one_compartment_model(t, y, k, Vd, dose):
 @dataclass
 class ObjectiveFunctionColumn:
     column_name: str
+    allometric_norm_value:float = None
+    model_method: str = 'linear'
+    def __post_init__(self):
+        # Define the allowed methods. Using a dictionary for better lookup performance
+        # if the list becomes very large. You can also use a set.
+        allowed_methods = ['linear', 'allometric']
+
+        if self.model_method not in allowed_methods:
+            raise ValueError(f"""Method '{self.model_method.__name__}' is not an allowed method. Allowed methods are: {
+                             [method.__name__ for method in allowed_methods]}""")
+        if self.model_method == 'allometric' and self.allometric_norm_value is None:
+            raise ValueError(f"""Method '{self.model_method.__name__}' is not allowed without providing the `allometric_norm_value`""")
+
+@dataclass 
+class ObjectiveFunctionBeta:
+    column_name:str
+    value:np.float64
+    allometric_norm_value:float = None
     model_method: str = 'linear'
     def __post_init__(self):
         # Define the allowed methods. Using a dictionary for better lookup performance
@@ -58,17 +76,15 @@ class ObjectiveFunctionColumn:
             raise ValueError(f"""Method '{self.model_method.__name__}' is not an allowed method. Allowed methods are: {
                              [method.__name__ for method in allowed_methods]}""")
 
-@dataclass 
-class ObjectiveFunctionBeta:
-    column_name:str
-    model_method: str = 'linear'
-    value:np.float64
+    
     
 
 def arbitrary_objective_function(params, data, subject_id_c='SUBJID', conc_at_time_c='DV',
                                  time_c='TIME', population_coeff=['k', 'vd'],
                                  dep_vars={'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
-                                           'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]}
+                                           'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]}, 
+                                 verbose = False, 
+                                 parallel = False
                                  ):
     for c in population_coeff:
         if c not in (i for i in dep_vars):
@@ -87,17 +103,21 @@ def arbitrary_objective_function(params, data, subject_id_c='SUBJID', conc_at_ti
         betas[model_param] = {}
         for param_col_obj in dep_vars[model_param]:
             param_col = param_col_obj.column_name
-            betas[model_param][param_col] =  ObjectiveFunctionBeta(column_name=param_col, model_method=param_col_obj.model_method, value = other[other_params_idx] )
+            betas[model_param][param_col] =  ObjectiveFunctionBeta(column_name=param_col, model_method=param_col_obj.model_method,
+                                                                   value = other[other_params_idx],
+                                                                   allometric_norm_value=param_col_obj.allometric_norm_value )
             params.append(param_col)
             other_params_idx = other_params_idx + 1
     subject_coeffs_history = {}
     predictions = []
-    for subject in tqdm(data[subject_id_c].unique()):
+    subject_iter_obj = tqdm(data[subject_id_c].unique()) if verbose else data[subject_id_c].unique()
+    for subject in subject_iter_obj:
         subject_filt = data[subject_id_c] == subject
         subject_data = data.loc[subject_filt, :].copy()
         initial_conc = subject_data[conc_at_time_c].values[0]
         subject_coeff = deepcopy(population_coeff)
         subject_coeff_history = [subject_coeff]
+        allometric_effects = []
         for model_param in betas:  # for each of the coeff to be input to the model
             # for each of the columns in the data which contribute to `model_param`
             for param_col in betas[model_param]:
@@ -105,8 +125,20 @@ def arbitrary_objective_function(params, data, subject_id_c='SUBJID', conc_at_ti
                 param_beta = param_beta_obj.value
                 param_beta_method = param_beta_obj.model_method
                 param_value = subject_data[param_col].values[0]
-                subject_coeff[model_param] = subject_coeff[model_param] + \
-                    (param_beta*param_value)
+                if param_beta_method == 'linear':
+                    subject_coeff[model_param] = subject_coeff[model_param] + \
+                        (param_beta*param_value)
+                    subject_coeff_history.append(subject_coeff)
+                elif param_beta_method == 'allometric':
+                    norm_val = param_beta_obj.allometric_norm_value
+                    param_value = 1e-6 if param_value == 0 else param_value
+                    norm_val = 1e-6 if norm_val == 0 else norm_val
+                    allometric_effects.append(
+                        #(param_value/70)**(param_beta)                       
+                        np.sign(param_value/norm_val) * ((np.abs(param_value/norm_val))**param_beta)
+                    )
+            for allometic_effect in allometric_effects:
+                subject_coeff[model_param] = subject_coeff[model_param] * allometic_effect
                 subject_coeff_history.append(subject_coeff)
         subject_coeffs_history[subject] = subject_coeff_history
         subject_coeff = {model_param: np.exp(
