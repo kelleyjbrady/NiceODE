@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from copy import deepcopy
 from dataclasses import dataclass
+from sklearn.base import BaseEstimator, RegressorMixin
 
 
 def plot_subject_levels(df: pd.DataFrame, x='TIME', y='DV', subject='SUBJID', ax=None):
@@ -77,7 +78,108 @@ class ObjectiveFunctionBeta:
                              [method.__name__ for method in allowed_methods]}""")
 
     
+class OneCompartmentModel(RegressorMixin, BaseEstimator):
     
+    def __init__(
+        self, 
+        groupby_col:str = 'SUBJID', 
+        conc_at_time_col:str = 'DV', 
+        time_c = 'TIME', 
+        population_coeff:list = ['k', 'vd'], 
+        dep_vars:dict = {'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
+                                           'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]}, 
+        verbose = False
+        
+    ):
+        self.groupby_col = groupby_col
+        self.conc_at_time_col = conc_at_time_col
+        self.time_c = time_c
+        self.verbose = verbose
+        
+        for c in population_coeff:
+            if c not in (i for i in dep_vars):
+                dep_vars[c] = []
+        assert population_coeff == [i for i in dep_vars]
+        self.population_coeff = population_coeff
+        self.dep_vars = dep_vars
+        
+    def _unpack_validate_params(self,params ):
+        population_coeff = deepcopy(self.population_coeff)
+        dep_vars = deepcopy(self.dep_vars)
+        for c in population_coeff:
+            if c not in (i for i in dep_vars):
+                dep_vars[c] = []
+        assert population_coeff == [i for i in dep_vars]
+        # change how this in unpacked to be based on the length of `population_coeff`
+        population_coeff = {}  # overwrite the list with a dict in the same order
+        for idx, coeff in enumerate(dep_vars):
+            population_coeff[coeff] = params[idx]
+        self.population_coeff = deepcopy(population_coeff)
+        self.dep_vars = deepcopy(dep_vars)
+    
+    def _populate_model_betas(self, other_params):
+        dep_vars = self.dep_vars
+        betas = {}
+        params = []
+        other_params_idx = 0
+        for model_param in dep_vars:
+            # beta_names.extend([f'{model_param}_i' for i in dep_vars[model_param]])
+            betas[model_param] = {}
+            for param_col_obj in dep_vars[model_param]:
+                param_col = param_col_obj.column_name
+                betas[model_param][param_col] =  ObjectiveFunctionBeta(column_name=param_col,
+                                                                       model_method=param_col_obj.model_method,
+                                                                        value = other_params[other_params_idx],
+                                                                        allometric_norm_value=param_col_obj.allometric_norm_value )
+                params.append(param_col)
+                other_params_idx = other_params_idx + 1
+        return deepcopy(betas)
+    
+    def predict(self, data):
+        subject_coeffs_history = {}
+        predictions = []
+        subject_iter_obj = tqdm(data[subject_id_c].unique()) if verbose else data[subject_id_c].unique()
+        for subject in subject_iter_obj:
+            subject_filt = data[subject_id_c] == subject
+            subject_data = data.loc[subject_filt, :].copy()
+            initial_conc = subject_data[conc_at_time_c].values[0]
+            subject_coeff = deepcopy(population_coeff)
+            subject_coeff_history = [subject_coeff]
+            allometric_effects = []
+            for model_param in betas:  # for each of the coeff to be input to the model
+                # for each of the columns in the data which contribute to `model_param`
+                for param_col in betas[model_param]:
+                    param_beta_obj = betas[model_param][param_col]
+                    param_beta = param_beta_obj.value
+                    param_beta_method = param_beta_obj.model_method
+                    param_value = subject_data[param_col].values[0]
+                    if param_beta_method == 'linear':
+                        subject_coeff[model_param] = subject_coeff[model_param] + \
+                            (param_beta*param_value)
+                        subject_coeff_history.append(subject_coeff)
+                    elif param_beta_method == 'allometric':
+                        norm_val = param_beta_obj.allometric_norm_value
+                        param_value = 1e-6 if param_value == 0 else param_value
+                        norm_val = 1e-6 if norm_val == 0 else norm_val
+                        allometric_effects.append(
+                            #(param_value/70)**(param_beta)                       
+                            np.sign(param_value/norm_val) * ((np.abs(param_value/norm_val))**param_beta)
+                        )
+                for allometic_effect in allometric_effects:
+                    subject_coeff[model_param] = subject_coeff[model_param] * allometic_effect
+                    subject_coeff_history.append(subject_coeff)
+            subject_coeffs_history[subject] = subject_coeff_history
+            subject_coeff = {model_param: np.exp(
+                subject_coeff[model_param]) for model_param in subject_coeff}
+            subject_coeff = [subject_coeff[i] for i in subject_coeff]
+            sol = solve_ivp(one_compartment_model, [subject_data[time_c].min(), subject_data[time_c].max()],
+                            [initial_conc],
+                            t_eval=subject_data[time_c], args=(*subject_coeff, 1))
+            predictions.extend(sol.y[0])
+        
+        
+        
+       
 
 def arbitrary_objective_function(params, data, subject_id_c='SUBJID', conc_at_time_c='DV',
                                  time_c='TIME', population_coeff=['k', 'vd'],
