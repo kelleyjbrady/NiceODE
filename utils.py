@@ -194,6 +194,32 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.dep_vars = deepcopy(self.dep_vars)
         return deepcopy(betas)
 
+    def _subject_iterator(self, data):
+        data_out = {}
+        subject_id_c = self.groupby_col
+        data_out['subject_id_c'] = self.groupby_col
+        conc_at_time_c = self.conc_at_time_col
+        data_out['conc_at_time_c'] = self.conc_at_time_col
+        verbose = self.verbose
+        subject_coeff = self.population_coeff
+        data_out['subject_coeff'] = self.population_coeff
+        data_out['betas'] = self.betas
+        data_out['time_c'] = self.time_col
+        subs = data[subject_id_c].unique()
+        for subject in subs:
+            subject_filt = data[subject_id_c] == subject
+            subject_data = data.loc[subject_filt, :].copy()
+            initial_conc = subject_data[conc_at_time_c].values[0]
+            #subject_coeff = deepcopy(population_coeff)
+            subject_coeff = {
+                obj.coeff_name: obj.optimization_history[-1] for obj in subject_coeff}
+            subject_coeff_history = [subject_coeff]
+            data_out['subject_data'] = subject_data
+            data_out['initial_conc'] = initial_conc
+            yield data_out
+
+            
+    
     def predict(self, data, return_df=False):
         subject_id_c = self.groupby_col
         conc_at_time_c = self.conc_at_time_col
