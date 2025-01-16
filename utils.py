@@ -341,9 +341,10 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         other_params = params[n_pop_coeff:]
         _betas = self._populate_model_betas(other_params)
         preds = np.concatenate(self._predict_parallel(data = data)) if parallel else self._predict_alt(data=data)
-        residuals = data[self.conc_at_time_col] - preds
-        sse = np.sum(residuals**2)
-        return sse
+        #residuals = data[self.conc_at_time_col] - preds
+        #sse = np.sum(residuals**2)
+        error = mean_squared_error(data[self.conc_at_time_col], preds)
+        return error
 
     def fit(self, data, parallel = False):
         # bounds = [(None, None) for i in range(len(self.dep_vars) + len(self.population_coeff))]
