@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.metrics import mean_squared_error
 from typing import List, Dict
+from joblib import Parallel, delayed
+from numba import njit
 
 
 def plot_subject_levels(df: pd.DataFrame, x='TIME', y='DV', subject='SUBJID', ax=None):
@@ -23,7 +25,7 @@ def plot_subject_levels(df: pd.DataFrame, x='TIME', y='DV', subject='SUBJID', ax
     df[x] = df[x].astype(pd.Float32Dtype())
     sns.lineplot(data=df, x=x, y=y, hue=subject, ax=ax)
 
-
+@njit
 def one_compartment_model(t, y, k, Vd, dose):
     """
     Defines the differential equation for a one-compartment pharmacokinetic model.
@@ -197,27 +199,81 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
     def _subject_iterator(self, data):
         data_out = {}
         subject_id_c = self.groupby_col
-        data_out['subject_id_c'] = self.groupby_col
+        data_out['subject_id_c'] = deepcopy(self.groupby_col)
         conc_at_time_c = self.conc_at_time_col
-        data_out['conc_at_time_c'] = self.conc_at_time_col
+        data_out['conc_at_time_c'] = deepcopy(self.conc_at_time_col)
+        data_out['pk_model_function'] = deepcopy(self.pk_model_function)
         verbose = self.verbose
-        subject_coeff = self.population_coeff
-        data_out['subject_coeff'] = self.population_coeff
-        data_out['betas'] = self.betas
-        data_out['time_c'] = self.time_col
+        
+        #data_out['subject_coeff'] = deepcopy(self.population_coeff)
+        data_out['betas'] = deepcopy(self.betas)
+        data_out['time_c'] = deepcopy(self.time_col)
         subs = data[subject_id_c].unique()
         for subject in subs:
             subject_filt = data[subject_id_c] == subject
             subject_data = data.loc[subject_filt, :].copy()
             initial_conc = subject_data[conc_at_time_c].values[0]
+            subject_coeff = deepcopy(self.population_coeff)
             #subject_coeff = deepcopy(population_coeff)
             subject_coeff = {
                 obj.coeff_name: obj.optimization_history[-1] for obj in subject_coeff}
-            subject_coeff_history = [subject_coeff]
-            data_out['subject_data'] = subject_data
-            data_out['initial_conc'] = initial_conc
-            yield data_out
+            #subject_coeff_history = [subject_coeff]
+            data_out['subject_coeff'] = deepcopy(subject_coeff)
+            data_out['subject_data'] = deepcopy(subject_data)
+            data_out['initial_conc'] = deepcopy(initial_conc)
+            yield deepcopy(data_out)
 
+    def _predict_inner(self, data_out):
+        subject_data = data_out['subject_data']
+        initial_conc = data_out['initial_conc']
+        subject_coeff = data_out['subject_coeff']
+        betas = data_out['betas']
+        time_c = data_out['time_c']
+        pk_model_function = data_out['pk_model_function']
+        #conc_at_time_c = data_out['conc_at_time_c']
+        allometric_effects = []
+        for model_param in betas:
+            for param_col in betas[model_param]:
+                param_beta_obj = betas[model_param][param_col]
+                param_beta = param_beta_obj.value
+                param_beta_method = param_beta_obj.model_method
+                param_value = subject_data[param_col].values[0]
+                if param_beta_method == 'linear':
+                    subject_coeff[model_param] = subject_coeff[model_param] + \
+                        (param_beta*param_value)
+                   # subject_coeff_history.append(subject_coeff)
+                elif param_beta_method == 'allometric':
+                    norm_val = param_beta_obj.allometric_norm_value
+                    param_value = 1e-6 if param_value == 0 else param_value
+                    norm_val = 1e-6 if norm_val == 0 else norm_val
+                    allometric_effects.append(
+                        # (param_value/70)**(param_beta)
+                        np.sign(param_value/norm_val) * \
+                        ((np.abs(param_value/norm_val))**param_beta)
+                    )
+            for allometic_effect in allometric_effects:
+                subject_coeff[model_param] = subject_coeff[model_param] * \
+                    allometic_effect
+                #subject_coeff_history.append(subject_coeff)
+        #subject_coeffs_history[subject] = subject_coeff_history
+        subject_coeff = {model_param: np.exp(
+            subject_coeff[model_param]) for model_param in subject_coeff}
+        subject_coeff = [subject_coeff[i] for i in subject_coeff]
+        sol = solve_ivp(pk_model_function, [subject_data[time_c].min(), subject_data[time_c].max()],
+                        [initial_conc],
+                        t_eval=subject_data[time_c], args=(*subject_coeff, 1))
+        return sol.y[0]
+    
+    def _predict_parallel(self, data):
+        predictions = Parallel(n_jobs=-1)(delayed(self._predict_inner)(data_out) for data_out in self._subject_iterator(data))
+        return predictions
+    
+    def _predict_alt(self, data):
+        predictions = []
+        for subject_data in self._subject_iterator(data):
+            subject_preds = self._predict_inner(subject_data)
+            predictions.extend(subject_preds)
+        return predictions
             
     
     def predict(self, data, return_df=False):
@@ -279,19 +335,20 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
     # def score(self, y_true, y_pred, sample_weight=None, multioutput='uniform_average', method = mean_squared_error, *kwargs):
     #    return method(y_true, y_pred, sample_weight, multioutput, *kwargs)
 
-    def _objective_function(self, params, data):
+    def _objective_function(self, params, data, parallel = False):
         self._unpack_validate_params(params)
         n_pop_coeff = len(self.population_coeff)
         other_params = params[n_pop_coeff:]
         _betas = self._populate_model_betas(other_params)
-        preds = self.predict(data=data)
+        preds = np.concatenate(self._predict_parallel(data = data)) if parallel else self._predict_alt(data=data)
         residuals = data[self.conc_at_time_col] - preds
         sse = np.sum(residuals**2)
         return sse
 
-    def fit(self, data):
+    def fit(self, data, parallel = False):
         # bounds = [(None, None) for i in range(len(self.dep_vars) + len(self.population_coeff))]
-        self.fit_result_ = optimize_with_checkpoint_joblib(self._objective_function,
+        objective_function = partial(self._objective_function, parallel = parallel)
+        self.fit_result_ = optimize_with_checkpoint_joblib(objective_function,
                                                            self.init_vals,
                                                            n_checkpoint=5,
                                                            checkpoint_filename='check_test.jb',
