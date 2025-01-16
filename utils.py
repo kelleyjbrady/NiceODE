@@ -212,35 +212,30 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         return deepcopy(betas)
 
     def _subject_iterator(self, data):
-        
-        groupby_col = self.groupby_col
-        #data_out['subject_id_c'] = self.groupby_col
-        conc_at_time_col = self.conc_at_time_col
-        #data_out['conc_at_time_c'] = self.conc_at_time_col
-        pk_model_function = self.pk_model_function
-        #data_out['pk_model_function'] = self.pk_model_function
+        data_out = {}
+        subject_id_c = self.groupby_col
+        data_out['subject_id_c'] = deepcopy(self.groupby_col)
+        conc_at_time_c = self.conc_at_time_col
+        data_out['conc_at_time_c'] = deepcopy(self.conc_at_time_col)
+        data_out['pk_model_function'] = deepcopy(self.pk_model_function)
         verbose = self.verbose
         
-        subject_coeff = deepcopy(self.population_coeff)
-        betas = deepcopy(self.betas)
-        time_c = self.time_col
-        subs = data[groupby_col].unique()
+        #data_out['subject_coeff'] = deepcopy(self.population_coeff)
+        data_out['betas'] = deepcopy(self.betas)
+        data_out['time_c'] = deepcopy(self.time_col)
+        subs = data[subject_id_c].unique()
         for subject in subs:
-            data_out = {}
-            subject_filt = data[groupby_col] == subject
+            subject_filt = data[subject_id_c] == subject
             subject_data = data.loc[subject_filt, :].copy()
-            initial_conc = subject_data[conc_at_time_col].values[0]
+            initial_conc = subject_data[conc_at_time_c].values[0]
+            subject_coeff = deepcopy(self.population_coeff)
+            #subject_coeff = deepcopy(population_coeff)
             subject_coeff = {
                 obj.coeff_name: obj.optimization_history[-1] for obj in subject_coeff}
             #subject_coeff_history = [subject_coeff]
             data_out['subject_coeff'] = deepcopy(subject_coeff)
             data_out['subject_data'] = deepcopy(subject_data)
             data_out['initial_conc'] = deepcopy(initial_conc)
-            data_out['subject_id_c'] = groupby_col
-            data_out['conc_at_time_c'] = conc_at_time_col
-            data_out['pk_model_function'] = pk_model_function
-            data_out['time_c'] = time_c
-            data_out['betas'] = deepcopy(betas)
             yield deepcopy(data_out)
 
     def _predict_inner(self, data_out):
