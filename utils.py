@@ -51,12 +51,13 @@ def one_compartment_model(t, y, k, Vd, dose):
 @dataclass
 class ObjectiveFunctionColumn:
     column_name: str
-    allometric_norm_value:float = None
+    allometric_norm_value: float = None
     model_method: str = 'linear'
-    optimization_init_val:np.float64 = 0.0
-    optimization_history:list[np.float64] = field(default_factory=list)
-    optimization_lower_bound:np.float64 = None
-    optimization_upper_bound:np.float64 = None
+    optimization_init_val: np.float64 = 0.0
+    optimization_history: list[np.float64] = field(default_factory=list)
+    optimization_lower_bound: np.float64 = None
+    optimization_upper_bound: np.float64 = None
+
     def __post_init__(self):
         # Define the allowed methods. Using a dictionary for better lookup performance
         # if the list becomes very large. You can also use a set.
@@ -66,28 +67,33 @@ class ObjectiveFunctionColumn:
             raise ValueError(f"""Method '{self.model_method.__name__}' is not an allowed method. Allowed methods are: {
                              [method.__name__ for method in allowed_methods]}""")
         if self.model_method == 'allometric' and self.allometric_norm_value is None:
-            raise ValueError(f"""Method '{self.model_method.__name__}' is not allowed without providing the `allometric_norm_value`""")
+            raise ValueError(f"""Method '{
+                             self.model_method.__name__}' is not allowed without providing the `allometric_norm_value`""")
 
-@dataclass 
+
+@dataclass
 class PopulationCoeffcient:
-    coeff_name:str
-    optimization_init_val:np.float64
-    log_transform_init_val:bool = True
-    optimization_history:list[np.float64] = field(default_factory=list)
-    optimization_lower_bound:np.float64 = None
-    optimization_upper_bound:np.float64 = None
+    coeff_name: str
+    optimization_init_val: np.float64
+    log_transform_init_val: bool = True
+    optimization_history: list[np.float64] = field(default_factory=list)
+    optimization_lower_bound: np.float64 = None
+    optimization_upper_bound: np.float64 = None
+
     def __post_init__(self):
-        self.optimization_init_val = (np.log(self.optimization_init_val) if self.log_transform_init_val 
+        self.optimization_init_val = (np.log(self.optimization_init_val) if self.log_transform_init_val
                                       else self.optimization_init_val)
 
-@dataclass 
+
+@dataclass
 class ObjectiveFunctionBeta:
-    column_name:str
-    value:np.float64
-    allometric_norm_value:float = None
+    column_name: str
+    value: np.float64
+    allometric_norm_value: float = None
     model_method: str = 'linear'
-    optimization_lower_bound:np.float64 = None
-    optimization_upper_bound:np.float64 = None
+    optimization_lower_bound: np.float64 = None
+    optimization_upper_bound: np.float64 = None
+
     def __post_init__(self):
         # Define the allowed methods. Using a dictionary for better lookup performance
         # if the list becomes very large. You can also use a set.
@@ -97,70 +103,75 @@ class ObjectiveFunctionBeta:
             raise ValueError(f"""Method '{self.model_method.__name__}' is not an allowed method. Allowed methods are: {
                              [method.__name__ for method in allowed_methods]}""")
 
-    
+
 class OneCompartmentModel(RegressorMixin, BaseEstimator):
-    
+
     def __init__(
-        self, 
-        groupby_col:str = 'SUBJID', 
-        conc_at_time_col:str = 'DV', 
-        time_col = 'TIME', 
-        pk_model_function = one_compartment_model,
-        population_coeff:List[PopulationCoeffcient] = [PopulationCoeffcient('k', 0.6), PopulationCoeffcient('vd', 2.0)], 
-        dep_vars:Dict[str, ObjectiveFunctionColumn] = {'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
-                                           'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]}, 
-        verbose = False
-        
+        self,
+        groupby_col: str = 'SUBJID',
+        conc_at_time_col: str = 'DV',
+        time_col='TIME',
+        pk_model_function=one_compartment_model,
+        population_coeff: List[PopulationCoeffcient] = [
+            PopulationCoeffcient('k', 0.6), PopulationCoeffcient('vd', 2.0)],
+        dep_vars: Dict[str, ObjectiveFunctionColumn] = {'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
+                                                        'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]},
+        verbose=False
+
     ):
         self.groupby_col = groupby_col
         self.conc_at_time_col = conc_at_time_col
         self.time_col = time_col
         self.verbose = verbose
         self.pk_model_function = pk_model_function
-        #not sure if the section below needs to be in two places
+        # not sure if the section below needs to be in two places
         for coef_obj in population_coeff:
             c = coef_obj.coeff_name
             if c not in (i for i in dep_vars):
                 dep_vars[c] = []
-        assert [i.coeff_name for i in population_coeff] == [i for i in dep_vars]
-        ## END section
+        assert [i.coeff_name for i in population_coeff] == [
+            i for i in dep_vars]
+        # END section
         self.population_coeff = population_coeff
         self.dep_vars = dep_vars
         self.init_vals = self._unpack_init_vals()
         self.bounds = self._unpack_upper_lower_bounds()
-    
+
     def _unpack_init_vals(self,):
-        init_vals = [obj.optimization_init_val for obj in self.population_coeff]
+        init_vals = [
+            obj.optimization_init_val for obj in self.population_coeff]
         for model_coeff in self.dep_vars:
             coeff_dep_vars = self.dep_vars[model_coeff]
             init_vals.extend([coeff_obj.optimization_init_val for coeff_obj in coeff_dep_vars
-                              if isinstance(coeff_obj,ObjectiveFunctionColumn)])
+                              if isinstance(coeff_obj, ObjectiveFunctionColumn)])
         self.n_optimized_coeff = len(init_vals)
         return np.array(init_vals)
+
     def _unpack_upper_lower_bounds(self,):
         bounds = [(obj.optimization_lower_bound, obj.optimization_upper_bound)
                   for obj in self.population_coeff]
         for model_coeff in self.dep_vars:
             coeff_dep_vars = self.dep_vars[model_coeff]
             bounds.extend([(obj.optimization_lower_bound, obj.optimization_upper_bound) for obj in coeff_dep_vars
-                              if isinstance(obj,ObjectiveFunctionColumn)]) 
+                           if isinstance(obj, ObjectiveFunctionColumn)])
         return deepcopy(bounds)
-        
-    def _unpack_validate_params(self,params ):
+
+    def _unpack_validate_params(self, params):
         population_coeff = deepcopy(self.population_coeff)
         dep_vars = deepcopy(self.dep_vars)
         for coeff_obj in population_coeff:
             if coeff_obj.coeff_name not in (i for i in dep_vars):
                 dep_vars[coeff_obj.coeff_name] = []
-        #Ensure the dep vars correspond to the pop coeff in the correct order
-        assert [i.coeff_name for i in population_coeff] == [i for i in dep_vars]
+        # Ensure the dep vars correspond to the pop coeff in the correct order
+        assert [i.coeff_name for i in population_coeff] == [
+            i for i in dep_vars]
         # change how this in unpacked to be based on the length of `population_coeff`
-        #population_coeff_alt = {}  # overwrite the list with a dict in the same order
+        # population_coeff_alt = {}  # overwrite the list with a dict in the same order
         for idx, coeff_obj in enumerate(population_coeff):
-            coeff_obj.optimization_history.append(params[idx])  
+            coeff_obj.optimization_history.append(params[idx])
         self.population_coeff = deepcopy(population_coeff)
         self.dep_vars = deepcopy(dep_vars)
-    
+
     def _populate_model_betas(self, other_params):
         dep_vars = self.dep_vars
         betas = {}
@@ -171,18 +182,19 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             betas[model_param] = {}
             for param_col_obj in dep_vars[model_param]:
                 param_col = param_col_obj.column_name
-                betas[model_param][param_col] =  ObjectiveFunctionBeta(column_name=param_col,
-                                                                       model_method=param_col_obj.model_method,
-                                                                        value = other_params[other_params_idx],
-                                                                        allometric_norm_value=param_col_obj.allometric_norm_value )
-                param_col_obj.optimization_history.append(other_params[other_params_idx])
+                betas[model_param][param_col] = ObjectiveFunctionBeta(column_name=param_col,
+                                                                      model_method=param_col_obj.model_method,
+                                                                      value=other_params[other_params_idx],
+                                                                      allometric_norm_value=param_col_obj.allometric_norm_value)
+                param_col_obj.optimization_history.append(
+                    other_params[other_params_idx])
                 params.append(param_col)
                 other_params_idx = other_params_idx + 1
         self.betas = deepcopy(betas)
         self.dep_vars = deepcopy(self.dep_vars)
         return deepcopy(betas)
-    
-    def predict(self, data, return_df = False):
+
+    def predict(self, data, return_df=False):
         subject_id_c = self.groupby_col
         conc_at_time_c = self.conc_at_time_col
         verbose = self.verbose
@@ -191,13 +203,15 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         time_c = self.time_col
         subject_coeffs_history = {}
         predictions = []
-        subject_iter_obj = tqdm(data[subject_id_c].unique()) if verbose else data[subject_id_c].unique()
+        subject_iter_obj = tqdm(data[subject_id_c].unique(
+        )) if verbose else data[subject_id_c].unique()
         for subject in subject_iter_obj:
             subject_filt = data[subject_id_c] == subject
             subject_data = data.loc[subject_filt, :].copy()
             initial_conc = subject_data[conc_at_time_c].values[0]
             subject_coeff = deepcopy(population_coeff)
-            subject_coeff = {obj.coeff_name:obj.optimization_history[-1] for obj in subject_coeff}
+            subject_coeff = {
+                obj.coeff_name: obj.optimization_history[-1] for obj in subject_coeff}
             subject_coeff_history = [subject_coeff]
             allometric_effects = []
             for model_param in betas:  # for each of the coeff to be input to the model
@@ -216,11 +230,13 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                         param_value = 1e-6 if param_value == 0 else param_value
                         norm_val = 1e-6 if norm_val == 0 else norm_val
                         allometric_effects.append(
-                            #(param_value/70)**(param_beta)                       
-                            np.sign(param_value/norm_val) * ((np.abs(param_value/norm_val))**param_beta)
+                            # (param_value/70)**(param_beta)
+                            np.sign(param_value/norm_val) * \
+                            ((np.abs(param_value/norm_val))**param_beta)
                         )
                 for allometic_effect in allometric_effects:
-                    subject_coeff[model_param] = subject_coeff[model_param] * allometic_effect
+                    subject_coeff[model_param] = subject_coeff[model_param] * \
+                        allometic_effect
                     subject_coeff_history.append(subject_coeff)
             subject_coeffs_history[subject] = subject_coeff_history
             subject_coeff = {model_param: np.exp(
@@ -234,9 +250,9 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                 data['pred_y'] = predictions
                 predictions = data.copy()
         return predictions
-    #def score(self, y_true, y_pred, sample_weight=None, multioutput='uniform_average', method = mean_squared_error, *kwargs):
+    # def score(self, y_true, y_pred, sample_weight=None, multioutput='uniform_average', method = mean_squared_error, *kwargs):
     #    return method(y_true, y_pred, sample_weight, multioutput, *kwargs)
-    
+
     def _objective_function(self, params, data):
         self._unpack_validate_params(params)
         n_pop_coeff = len(self.population_coeff)
@@ -246,66 +262,63 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         residuals = data[self.conc_at_time_col] - preds
         sse = np.sum(residuals**2)
         return sse
-        
+
     def fit(self, data):
-        #bounds = [(None, None) for i in range(len(self.dep_vars) + len(self.population_coeff))]
+        # bounds = [(None, None) for i in range(len(self.dep_vars) + len(self.population_coeff))]
         self.fit_result_ = optimize_with_checkpoint_joblib(self._objective_function,
-                                                 self.init_vals,
-                                                 n_checkpoint=5,
-                                                 checkpoint_filename='check_test.jb', 
-                                                 args = (data,), 
-                                                 bounds = self.bounds
-                                                 )
+                                                           self.init_vals,
+                                                           n_checkpoint=5,
+                                                           checkpoint_filename='check_test.jb',
+                                                           args=(data,),
+                                                           bounds=self.bounds
+                                                           )
         res_df = []
         written_indep_var_rows = 0
         for idx, model_coeff_obj in enumerate(self.population_coeff):
             fit_res_0 = self.fit_result_['x'][idx]
             fit_res_1 = model_coeff_obj.optimization_history[-1]
-            #assert fit_res_0 == fit_res_1
+            # assert fit_res_0 == fit_res_1
             res_df.append(
                 {
-                    'population_coeff':True,
+                    'population_coeff': True,
                     'model_coeff': model_coeff_obj.coeff_name,
-                    'model_coeff_indep_var':None,
-                    'log_coeff':fit_res_0,
-                    'log_coeff_history_final':fit_res_1, 
-                    'coeff_estimates_equal':fit_res_0 == fit_res_1,
-                    'coeff':np.exp(fit_res_0)
+                    'model_coeff_indep_var': None,
+                    'log_coeff': fit_res_0,
+                    'log_coeff_history_final': fit_res_1,
+                    'coeff_estimates_equal': fit_res_0 == fit_res_1,
+                    'coeff': np.exp(fit_res_0)
                 }
             )
             written_indep_var_rows = written_indep_var_rows + 1
-        
+
         for idx, model_coeff_name in enumerate(self.dep_vars):
             coeff_indep_vars = self.dep_vars[model_coeff_name]
             for indep_var_obj in coeff_indep_vars:
                 fit_res_0 = self.fit_result_['x'][written_indep_var_rows]
                 fit_res_1 = indep_var_obj.optimization_history[-1]
-                #assert fit_res_0 == fit_res_1
+                # assert fit_res_0 == fit_res_1
                 res_df.append({
-                    'population_coeff':False,
+                    'population_coeff': False,
                     'model_coeff': model_coeff_name,
-                    'model_coeff_indep_var':indep_var_obj.column_name,
-                    'log_coeff':fit_res_0,
-                    'log_coeff_history_final':fit_res_1, 
-                    'coeff_estimates_equal':fit_res_0 == fit_res_1,
-                    'coeff':np.exp(fit_res_0)
-                    }
+                    'model_coeff_indep_var': indep_var_obj.column_name,
+                    'log_coeff': fit_res_0,
+                    'log_coeff_history_final': fit_res_1,
+                    'coeff_estimates_equal': fit_res_0 == fit_res_1,
+                    'coeff': np.exp(fit_res_0)
+                }
                 )
                 written_indep_var_rows = written_indep_var_rows + 1
         self.fit_result_summary_ = pd.DataFrame(res_df)
-            
-        return deepcopy(self)
-        
-        
-        
-       
 
-def arbitrary_objective_function(params, data, model_function = one_compartment_model, subject_id_c='SUBJID', conc_at_time_c='DV',
+        return deepcopy(self)
+
+
+def arbitrary_objective_function(params, data, model_function=one_compartment_model, subject_id_c='SUBJID', conc_at_time_c='DV',
                                  time_c='TIME', population_coeff=['k', 'vd'],
                                  dep_vars={'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
-                                           'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]}, 
-                                 verbose = False, 
-                                 parallel = False
+                                           'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]},
+                                 verbose=False,
+                                 parallel=False
                                  ):
     for c in population_coeff:
         if c not in (i for i in dep_vars):
@@ -324,14 +337,15 @@ def arbitrary_objective_function(params, data, model_function = one_compartment_
         betas[model_param] = {}
         for param_col_obj in dep_vars[model_param]:
             param_col = param_col_obj.column_name
-            betas[model_param][param_col] =  ObjectiveFunctionBeta(column_name=param_col, model_method=param_col_obj.model_method,
-                                                                   value = other[other_params_idx],
-                                                                   allometric_norm_value=param_col_obj.allometric_norm_value )
+            betas[model_param][param_col] = ObjectiveFunctionBeta(column_name=param_col, model_method=param_col_obj.model_method,
+                                                                  value=other[other_params_idx],
+                                                                  allometric_norm_value=param_col_obj.allometric_norm_value)
             params.append(param_col)
             other_params_idx = other_params_idx + 1
     subject_coeffs_history = {}
     predictions = []
-    subject_iter_obj = tqdm(data[subject_id_c].unique()) if verbose else data[subject_id_c].unique()
+    subject_iter_obj = tqdm(data[subject_id_c].unique(
+    )) if verbose else data[subject_id_c].unique()
     for subject in subject_iter_obj:
         subject_filt = data[subject_id_c] == subject
         subject_data = data.loc[subject_filt, :].copy()
@@ -355,11 +369,13 @@ def arbitrary_objective_function(params, data, model_function = one_compartment_
                     param_value = 1e-6 if param_value == 0 else param_value
                     norm_val = 1e-6 if norm_val == 0 else norm_val
                     allometric_effects.append(
-                        #(param_value/70)**(param_beta)                       
-                        np.sign(param_value/norm_val) * ((np.abs(param_value/norm_val))**param_beta)
+                        # (param_value/70)**(param_beta)
+                        np.sign(param_value/norm_val) * \
+                        ((np.abs(param_value/norm_val))**param_beta)
                     )
             for allometic_effect in allometric_effects:
-                subject_coeff[model_param] = subject_coeff[model_param] * allometic_effect
+                subject_coeff[model_param] = subject_coeff[model_param] * \
+                    allometic_effect
                 subject_coeff_history.append(subject_coeff)
         subject_coeffs_history[subject] = subject_coeff_history
         subject_coeff = {model_param: np.exp(
