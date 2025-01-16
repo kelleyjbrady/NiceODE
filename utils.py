@@ -14,6 +14,7 @@ from sklearn.metrics import mean_squared_error
 from typing import List, Dict
 from joblib import Parallel, delayed
 from numba import njit
+from scipy.special import huber
 
 
 def plot_subject_levels(df: pd.DataFrame, x='TIME', y='DV', subject='SUBJID', ax=None):
@@ -105,7 +106,17 @@ class ObjectiveFunctionBeta:
             raise ValueError(f"""Method '{self.model_method.__name__}' is not an allowed method. Allowed methods are: {
                              [method.__name__ for method in allowed_methods]}""")
 
+def sum_of_squares_loss(y_true, y_pred):
+    return np.sum((y_true - y_pred)**2)
 
+def mean_squared_error_loss(y_true, y_pred):
+    return np.mean((y_true - y_pred)**2)
+
+
+def huber_loss(y_true, y_pred, delta=1.0):
+    resid = y_pred - y_true
+    loss = huber(delta = delta, r = resid)
+    return np.mean(loss)
 class OneCompartmentModel(RegressorMixin, BaseEstimator):
 
     def __init__(
@@ -118,6 +129,8 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             PopulationCoeffcient('k', 0.6), PopulationCoeffcient('vd', 2.0)],
         dep_vars: Dict[str, ObjectiveFunctionColumn] = {'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
                                                         'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]},
+        loss_function = mean_squared_error,
+        loss_params = {},
         verbose=False
 
     ):
@@ -126,6 +139,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.time_col = time_col
         self.verbose = verbose
         self.pk_model_function = pk_model_function
+        self.loss_function = loss_function
         # not sure if the section below needs to be in two places
         for coef_obj in population_coeff:
             c = coef_obj.coeff_name
@@ -138,6 +152,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.dep_vars = dep_vars
         self.init_vals = self._unpack_init_vals()
         self.bounds = self._unpack_upper_lower_bounds()
+        self.loss_params = loss_params
 
     def _unpack_init_vals(self,):
         init_vals = [
@@ -197,30 +212,35 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         return deepcopy(betas)
 
     def _subject_iterator(self, data):
-        data_out = {}
-        subject_id_c = self.groupby_col
-        data_out['subject_id_c'] = deepcopy(self.groupby_col)
-        conc_at_time_c = self.conc_at_time_col
-        data_out['conc_at_time_c'] = deepcopy(self.conc_at_time_col)
-        data_out['pk_model_function'] = deepcopy(self.pk_model_function)
+        
+        groupby_col = self.groupby_col
+        #data_out['subject_id_c'] = self.groupby_col
+        conc_at_time_col = self.conc_at_time_col
+        #data_out['conc_at_time_c'] = self.conc_at_time_col
+        pk_model_function = self.pk_model_function
+        #data_out['pk_model_function'] = self.pk_model_function
         verbose = self.verbose
         
-        #data_out['subject_coeff'] = deepcopy(self.population_coeff)
-        data_out['betas'] = deepcopy(self.betas)
-        data_out['time_c'] = deepcopy(self.time_col)
-        subs = data[subject_id_c].unique()
+        subject_coeff = deepcopy(self.population_coeff)
+        betas = deepcopy(self.betas)
+        time_c = self.time_col
+        subs = data[groupby_col].unique()
         for subject in subs:
-            subject_filt = data[subject_id_c] == subject
+            data_out = {}
+            subject_filt = data[groupby_col] == subject
             subject_data = data.loc[subject_filt, :].copy()
-            initial_conc = subject_data[conc_at_time_c].values[0]
-            subject_coeff = deepcopy(self.population_coeff)
-            #subject_coeff = deepcopy(population_coeff)
+            initial_conc = subject_data[conc_at_time_col].values[0]
             subject_coeff = {
                 obj.coeff_name: obj.optimization_history[-1] for obj in subject_coeff}
             #subject_coeff_history = [subject_coeff]
             data_out['subject_coeff'] = deepcopy(subject_coeff)
             data_out['subject_data'] = deepcopy(subject_data)
             data_out['initial_conc'] = deepcopy(initial_conc)
+            data_out['subject_id_c'] = groupby_col
+            data_out['conc_at_time_c'] = conc_at_time_col
+            data_out['pk_model_function'] = pk_model_function
+            data_out['time_c'] = time_c
+            data_out['betas'] = deepcopy(betas)
             yield deepcopy(data_out)
 
     def _predict_inner(self, data_out):
@@ -258,10 +278,10 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         #subject_coeffs_history[subject] = subject_coeff_history
         subject_coeff = {model_param: np.exp(
             subject_coeff[model_param]) for model_param in subject_coeff}
-        subject_coeff = [subject_coeff[i] for i in subject_coeff]
-        sol = solve_ivp(pk_model_function, [subject_data[time_c].min(), subject_data[time_c].max()],
-                        [initial_conc],
-                        t_eval=subject_data[time_c], args=(*subject_coeff, 1))
+        subject_coeff = [np.float64(subject_coeff[i]) for i in subject_coeff]
+        sol = solve_ivp(pk_model_function, np.array([subject_data[time_c].min(), subject_data[time_c].max()]),
+                        np.array([initial_conc]),
+                        t_eval=np.array(subject_data[time_c]), args=(*subject_coeff, 1 ))
         return sol.y[0]
     
     def _predict_parallel(self, data):
@@ -343,7 +363,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         preds = np.concatenate(self._predict_parallel(data = data)) if parallel else self._predict_alt(data=data)
         #residuals = data[self.conc_at_time_col] - preds
         #sse = np.sum(residuals**2)
-        error = mean_squared_error(data[self.conc_at_time_col], preds)
+        error = self.loss_function(data[self.conc_at_time_col], preds, **self.loss_params)
         return error
 
     def fit(self, data, parallel = False):
