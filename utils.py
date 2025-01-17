@@ -115,7 +115,7 @@ def mean_squared_error_loss(y_true, y_pred):
 
 def huber_loss(y_true, y_pred, delta=1.0):
     resid = y_pred - y_true
-    loss = huber(delta = delta, r = resid)
+    loss = huber(delta, resid)
     return np.mean(loss)
 class OneCompartmentModel(RegressorMixin, BaseEstimator):
 
@@ -290,7 +290,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
     
     def _predict_parallel(self, data):
         predictions = Parallel(n_jobs=-1)(delayed(self._predict_inner)(data_out) for data_out in self._subject_iterator(data))
-        return predictions
+        return np.concatenate(predictions)
     
     def _predict_alt(self, data):
         predictions = []
@@ -300,61 +300,14 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         return predictions
             
     
-    def predict(self, data, return_df=False):
-        subject_id_c = self.groupby_col
-        conc_at_time_c = self.conc_at_time_col
-        verbose = self.verbose
-        population_coeff = self.population_coeff
-        betas = self.betas
-        time_c = self.time_col
-        subject_coeffs_history = {}
-        predictions = []
-        subject_iter_obj = tqdm(data[subject_id_c].unique(
-        )) if verbose else data[subject_id_c].unique()
-        for subject in subject_iter_obj:
-            subject_filt = data[subject_id_c] == subject
-            subject_data = data.loc[subject_filt, :].copy()
-            initial_conc = subject_data[conc_at_time_c].values[0]
-            subject_coeff = deepcopy(population_coeff)
-            subject_coeff = {
-                obj.coeff_name: obj.optimization_history[-1] for obj in subject_coeff}
-            subject_coeff_history = [subject_coeff]
-            allometric_effects = []
-            for model_param in betas:  # for each of the coeff to be input to the model
-                # for each of the columns in the data which contribute to `model_param`
-                for param_col in betas[model_param]:
-                    param_beta_obj = betas[model_param][param_col]
-                    param_beta = param_beta_obj.value
-                    param_beta_method = param_beta_obj.model_method
-                    param_value = subject_data[param_col].values[0]
-                    if param_beta_method == 'linear':
-                        subject_coeff[model_param] = subject_coeff[model_param] + \
-                            (param_beta*param_value)
-                        subject_coeff_history.append(subject_coeff)
-                    elif param_beta_method == 'allometric':
-                        norm_val = param_beta_obj.allometric_norm_value
-                        param_value = 1e-6 if param_value == 0 else param_value
-                        norm_val = 1e-6 if norm_val == 0 else norm_val
-                        allometric_effects.append(
-                            # (param_value/70)**(param_beta)
-                            np.sign(param_value/norm_val) * \
-                            ((np.abs(param_value/norm_val))**param_beta)
-                        )
-                for allometic_effect in allometric_effects:
-                    subject_coeff[model_param] = subject_coeff[model_param] * \
-                        allometic_effect
-                    subject_coeff_history.append(subject_coeff)
-            subject_coeffs_history[subject] = subject_coeff_history
-            subject_coeff = {model_param: np.exp(
-                subject_coeff[model_param]) for model_param in subject_coeff}
-            subject_coeff = [subject_coeff[i] for i in subject_coeff]
-            sol = solve_ivp(self.pk_model_function, [subject_data[time_c].min(), subject_data[time_c].max()],
-                            [initial_conc],
-                            t_eval=subject_data[time_c], args=(*subject_coeff, 1))
-            predictions.extend(sol.y[0])
-            if return_df:
-                data['pred_y'] = predictions
-                predictions = data.copy()
+    def predict(self, data, parallel = True, return_df=False):
+        if parallel:
+            predictions = self._predict_parallel(data)
+        else:
+            predictions = self._predict_alt(data)
+        if return_df:
+            data['pred_y'] = predictions
+            predictions = data.copy()
         return predictions
     # def score(self, y_true, y_pred, sample_weight=None, multioutput='uniform_average', method = mean_squared_error, *kwargs):
     #    return method(y_true, y_pred, sample_weight, multioutput, *kwargs)
@@ -364,7 +317,8 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         n_pop_coeff = len(self.population_coeff)
         other_params = params[n_pop_coeff:]
         _betas = self._populate_model_betas(other_params)
-        preds = np.concatenate(self._predict_parallel(data = data)) if parallel else self._predict_alt(data=data)
+        #preds = np.concatenate(self._predict_parallel(data = data)) if parallel else self._predict_alt(data=data)
+        preds = self.predict(data, parallel = parallel)
         #residuals = data[self.conc_at_time_col] - preds
         #sse = np.sum(residuals**2)
         error = self.loss_function(data[self.conc_at_time_col], preds, **self.loss_params)
