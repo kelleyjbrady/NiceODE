@@ -212,23 +212,32 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         return deepcopy(betas)
 
     def _subject_iterator(self, data):
-        data_out = {}
+        #data_out = {}
         subject_id_c = self.groupby_col
-        data_out['subject_id_c'] = deepcopy(self.groupby_col)
+        #data_out['subject_id_c'] = deepcopy(self.groupby_col)
         conc_at_time_c = self.conc_at_time_col
-        data_out['conc_at_time_c'] = deepcopy(self.conc_at_time_col)
-        data_out['pk_model_function'] = deepcopy(self.pk_model_function)
+        #data_out['conc_at_time_c'] = deepcopy(self.conc_at_time_col)
+        #data_out['pk_model_function'] = deepcopy(self.pk_model_function)
+        pk_model_function = deepcopy(self.pk_model_function)
         verbose = self.verbose
         
-        #data_out['subject_coeff'] = deepcopy(self.population_coeff)
-        data_out['betas'] = deepcopy(self.betas)
-        data_out['time_c'] = deepcopy(self.time_col)
+        population_coeff = deepcopy(self.population_coeff)
+        #data_out['betas'] = deepcopy(self.betas)
+        #data_out['time_c'] = deepcopy(self.time_col)
+        betas = deepcopy(self.betas)
+        time_col = deepcopy(self.time_col)
         subs = data[subject_id_c].unique()
         for subject in subs:
+            data_out = {}
+            data_out['subject_id_c'] = subject_id_c 
+            data_out['conc_at_time_c'] = conc_at_time_c
+            data_out['pk_model_function'] = pk_model_function
+            data_out['time_c'] = time_col
+            data_out['betas'] = deepcopy(betas)
             subject_filt = data[subject_id_c] == subject
             subject_data = data.loc[subject_filt, :].copy()
             initial_conc = subject_data[conc_at_time_c].values[0]
-            subject_coeff = deepcopy(self.population_coeff)
+            subject_coeff = deepcopy(population_coeff)
             #subject_coeff = deepcopy(population_coeff)
             subject_coeff = {
                 obj.coeff_name: obj.optimization_history[-1] for obj in subject_coeff}
