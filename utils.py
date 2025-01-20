@@ -155,15 +155,31 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.loss_params = loss_params
 
     def _unpack_init_vals(self,):
+        #unpack the population coeffs
         init_vals = [
             obj.optimization_init_val for obj in self.population_coeff]
+        init_vals_pd = []
+        for pop_coeff in self.population_coeff:
+            init_vals_pd.append({
+                'model_coeff': pop_coeff.coeff_name,
+                'population_coeff':True, 
+                'init_val':pop_coeff.optimization_init_val
+            })
+        #unpack the dep vars for the population coeffs
         for model_coeff in self.dep_vars:
             coeff_dep_vars = self.dep_vars[model_coeff]
             init_vals.extend([coeff_obj.optimization_init_val for coeff_obj in coeff_dep_vars
                               if isinstance(coeff_obj, ObjectiveFunctionColumn)])
+            for coeff_dep_var in coeff_dep_vars:
+                init_vals_pd.append({
+                    'model_coeff': model_coeff,
+                    'population_coeff':False, 
+                    'init_val':coeff_dep_var.optimization_init_val
+                })
+        self.init_vals_pd = pd.DataFrame(init_vals_pd)
         self.n_optimized_coeff = len(init_vals)
         return np.array(init_vals)
-
+    
     def _unpack_upper_lower_bounds(self,):
         bounds = [(obj.optimization_lower_bound, obj.optimization_upper_bound)
                   for obj in self.population_coeff]
@@ -190,13 +206,17 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.dep_vars = deepcopy(dep_vars)
 
     def _populate_model_betas(self, other_params):
+        self.n_model_vars = len([i for i in self.dep_vars])
+        self.n_dep_vars_per_model_var = {i:len(self.dep_vars[i]) for i in self.dep_vars}
         dep_vars = self.dep_vars
         betas = {}
+        betas_np = {}
         params = []
         other_params_idx = 0
         for model_param in dep_vars:
             # beta_names.extend([f'{model_param}_i' for i in dep_vars[model_param]])
             betas[model_param] = {}
+            betas_np[model_param] = {}
             for param_col_obj in dep_vars[model_param]:
                 param_col = param_col_obj.column_name
                 betas[model_param][param_col] = ObjectiveFunctionBeta(column_name=param_col,
