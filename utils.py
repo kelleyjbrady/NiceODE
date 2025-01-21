@@ -15,6 +15,9 @@ from typing import List, Dict
 from joblib import Parallel, delayed
 from numba import njit
 from scipy.special import huber
+import re
+import os
+import warnings
 
 
 def plot_subject_levels(df: pd.DataFrame, x='TIME', y='DV', subject='SUBJID', ax=None):
@@ -162,8 +165,11 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         for pop_coeff in self.population_coeff:
             init_vals_pd.append({
                 'model_coeff': pop_coeff.coeff_name,
+                'model_coeff_dep_var':None,
                 'population_coeff':True, 
-                'init_val':pop_coeff.optimization_init_val
+                'init_val':pop_coeff.optimization_init_val,
+                'allometric':False,
+                'allometric_norm_value':None
             })
         #unpack the dep vars for the population coeffs
         for model_coeff in self.dep_vars:
@@ -173,8 +179,11 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             for coeff_dep_var in coeff_dep_vars:
                 init_vals_pd.append({
                     'model_coeff': model_coeff,
+                    'model_coeff_dep_var': coeff_dep_var.column_name,
                     'population_coeff':False, 
-                    'init_val':coeff_dep_var.optimization_init_val
+                    'init_val':coeff_dep_var.optimization_init_val,
+                    'allometric': True if coeff_dep_var.model_method == 'allometric' else False,
+                    'allometric_norm_value':coeff_dep_var.allometric_norm_value
                 })
         self.init_vals_pd = pd.DataFrame(init_vals_pd)
         self.n_optimized_coeff = len(init_vals)
@@ -183,6 +192,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
     def _unpack_upper_lower_bounds(self,):
         bounds = [(obj.optimization_lower_bound, obj.optimization_upper_bound)
                   for obj in self.population_coeff]
+        
         for model_coeff in self.dep_vars:
             coeff_dep_vars = self.dep_vars[model_coeff]
             bounds.extend([(obj.optimization_lower_bound, obj.optimization_upper_bound) for obj in coeff_dep_vars
@@ -205,6 +215,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.population_coeff = deepcopy(population_coeff)
         self.dep_vars = deepcopy(dep_vars)
 
+    
     def _populate_model_betas(self, other_params):
         self.n_model_vars = len([i for i in self.dep_vars])
         self.n_dep_vars_per_model_var = {i:len(self.dep_vars[i]) for i in self.dep_vars}
@@ -302,15 +313,34 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         #subject_coeffs_history[subject] = subject_coeff_history
         subject_coeff = {model_param: np.exp(
             subject_coeff[model_param]) for model_param in subject_coeff}
-        subject_coeff = [np.float64(subject_coeff[i]) for i in subject_coeff]
-        sol = solve_ivp(pk_model_function, np.array([subject_data[time_c].min(), subject_data[time_c].max()]),
-                        np.array([initial_conc]),
-                        t_eval=np.array(subject_data[time_c]), args=(*subject_coeff, 1 ))
+        subject_coeff = np.array([np.float64(subject_coeff[i]) for i in subject_coeff])
+        #subject_coeff[subject_coeff < 1e-6] = 1e-6
+        subject_coeff = subject_coeff.tolist()
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", RuntimeWarning)
+                sol = solve_ivp(pk_model_function, np.array([subject_data[time_c].min(), subject_data[time_c].max()]),
+                            np.array([initial_conc]),
+                            t_eval=np.array(subject_data[time_c]), args=(*subject_coeff, 1 ))
+        except (ZeroDivisionError, RuntimeWarning) as e:
+            self.ivp_error_params_ = {
+            'f':deepcopy(pk_model_function),
+            'tspan': np.array([subject_data[time_c].min(), subject_data[time_c].max()]),
+            'init_conc':np.array([initial_conc]),
+            't_eval':np.array(subject_data[time_c]), 
+            'args': "args=(*subject_coeff, 1 )",
+            'args0':subject_coeff
+            
+            }
+            raise ZeroDivisionError
         return sol.y[0]
     
-    def _predict_parallel(self, data):
-        predictions = Parallel(n_jobs=-1)(delayed(self._predict_inner)(data_out) for data_out in self._subject_iterator(data))
+    def _predict_parallel(self, data, parallel_n_jobs = -1):
+        predictions = Parallel(n_jobs=parallel_n_jobs)(delayed(self._predict_inner)(data_out) for data_out in self._subject_iterator(data))
         return np.concatenate(predictions)
+    
+    
     
     def _predict_alt(self, data):
         predictions = []
@@ -320,9 +350,9 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         return predictions
             
     
-    def predict(self, data, parallel = True, return_df=False):
+    def predict(self, data, parallel = True, parallel_n_jobs = -1, return_df=False):
         if parallel:
-            predictions = self._predict_parallel(data)
+            predictions = self._predict_parallel(data, parallel_n_jobs=parallel_n_jobs)
         else:
             predictions = self._predict_alt(data)
         if return_df:
@@ -332,26 +362,27 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
     # def score(self, y_true, y_pred, sample_weight=None, multioutput='uniform_average', method = mean_squared_error, *kwargs):
     #    return method(y_true, y_pred, sample_weight, multioutput, *kwargs)
 
-    def _objective_function(self, params, data, parallel = False):
+    def _objective_function(self, params, data, parallel = False, parallel_n_jobs = -1):
         self._unpack_validate_params(params)
         n_pop_coeff = len(self.population_coeff)
         other_params = params[n_pop_coeff:]
         _betas = self._populate_model_betas(other_params)
         #preds = np.concatenate(self._predict_parallel(data = data)) if parallel else self._predict_alt(data=data)
-        preds = self.predict(data, parallel = parallel)
+        preds = self.predict(data, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
         #residuals = data[self.conc_at_time_col] - preds
         #sse = np.sum(residuals**2)
         error = self.loss_function(data[self.conc_at_time_col], preds, **self.loss_params)
         return error
 
-    def fit(self, data, parallel = False):
+    def fit(self, data, parallel = False, parallel_n_jobs = -1 , warm_start = False, checkpoint_filename='check_test.jb'):
         # bounds = [(None, None) for i in range(len(self.dep_vars) + len(self.population_coeff))]
-        objective_function = partial(self._objective_function, parallel = parallel)
+        objective_function = partial(self._objective_function, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
         self.fit_result_ = optimize_with_checkpoint_joblib(objective_function,
                                                            self.init_vals,
                                                            n_checkpoint=5,
-                                                           checkpoint_filename='check_test.jb',
+                                                           checkpoint_filename=checkpoint_filename,
                                                            args=(data,),
+                                                           warm_start=warm_start,
                                                            bounds=self.bounds
                                                            )
         res_df = []
@@ -566,7 +597,7 @@ def objective_function__mgkg_age(params, data, subject_id_c='SUBJID', dose_c='DO
     return sse
 
 
-def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename, *args, **kwargs):
+def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename, *args, warm_start = False, **kwargs):
     """
     Optimizes a function using scipy.optimize.minimize() with checkpointing every n iterations,
     using joblib for saving and loading checkpoints.
@@ -586,31 +617,43 @@ def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename,
     iteration = 0
 
     # Try to load a previous checkpoint if it exists
+    check_name = checkpoint_filename.replace('.jb', '')
+    if not os.path.exists('logs'):
+        os.mkdir('logs')    
+    checkpoints = [i.replace('.jb', '') for i in os.listdir('logs') if check_name in i]
+    max_check_idx = [i.split('__')[-1] for i in checkpoints if len(i.split('__')) > 1]
     try:
-        checkpoint = load(checkpoint_filename)
-        x0 = checkpoint['x']
-        iteration = checkpoint['iteration']
-        print(f"Resuming optimization from iteration {iteration}")
-    except FileNotFoundError:
-        print("No checkpoint found, starting from initial guess.")
-    except Exception as e:
-        print(f"Error loading checkpoint: {e}, starting from initial guess.")
+        max_check_idx = [int(i) for i in max_check_idx]
+    except ValueError:
+        max_check_idx = []
+    max_check_idx = f"__{np.max(max_check_idx)}" if len(max_check_idx) > 1 else ''
+    checkpoint_filename = os.path.join('logs',check_name + f'{max_check_idx}.jb')
+    if warm_start:
+        try:
+            checkpoint = load(checkpoint_filename)
+            x0 = checkpoint['x']
+            iteration = checkpoint['iteration']
+            print(f"Resuming optimization from iteration {iteration}")
+        except FileNotFoundError:
+            print("No checkpoint found, starting from initial guess.")
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}, starting from initial guess.")
 
     def callback_with_checkpoint(xk, checkpoint_filename):
         nonlocal iteration
         iteration += 1
-        print(iteration)
+        #print(iteration)
         if iteration % n_checkpoint == 0:
             checkpoint = {
                 'x': xk,
                 'iteration': iteration
             }
             checkpoint_filename = checkpoint_filename.replace(
-                '.jb', f'_{iteration}.jb')
+                '.jb', f'__{iteration}.jb')
             dump(checkpoint, checkpoint_filename)
             print(f"Iteration {iteration}: Checkpoint saved to {
                   checkpoint_filename}")
-        print('no log')
+        #print('no log')
 
     # Ensure callback is not already in kwargs
     if 'callback' not in kwargs:
