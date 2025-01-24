@@ -18,6 +18,13 @@ from scipy.special import huber
 import re
 import os
 import warnings
+import pymc as pm
+import arviz as az
+import pytensor
+import pytensor.tensor as pt
+
+def softplus(x):
+    return np.log(1 + np.exp(x))
 
 
 def plot_subject_levels(df: pd.DataFrame, x='TIME', y='DV', subject='SUBJID', ax=None):
@@ -30,6 +37,10 @@ def plot_subject_levels(df: pd.DataFrame, x='TIME', y='DV', subject='SUBJID', ax
     sns.lineplot(data=df, x=x, y=y, hue=subject, ax=ax)
 
 @njit
+def numba_one_compartment_model(t, y, k, Vd, dose):
+    return one_compartment_model(t, y, k, Vd, dose)
+
+
 def one_compartment_model(t, y, k, Vd, dose):
     """
     Defines the differential equation for a one-compartment pharmacokinetic model.
@@ -134,6 +145,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                                                         'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]},
         loss_function = mean_squared_error,
         loss_params = {},
+        optimizer_tol = None,
         verbose=False
 
     ):
@@ -156,6 +168,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.init_vals = self._unpack_init_vals()
         self.bounds = self._unpack_upper_lower_bounds()
         self.loss_params = loss_params
+        self.optimzer_tol = optimizer_tol
 
     def _unpack_init_vals(self,):
         #unpack the population coeffs
@@ -187,7 +200,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                 })
         self.init_vals_pd = pd.DataFrame(init_vals_pd)
         self.n_optimized_coeff = len(init_vals)
-        return np.array(init_vals)
+        return np.array(init_vals, dtype = np.float64)
     
     def _unpack_upper_lower_bounds(self,):
         bounds = [(obj.optimization_lower_bound, obj.optimization_upper_bound)
@@ -242,6 +255,79 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.dep_vars = deepcopy(self.dep_vars)
         return deepcopy(betas)
 
+    def _pymc_model(self, data):
+        params = self.init_vals
+        self._unpack_validate_params(params)
+
+        
+        
+        with pm.Model() as model:
+            # Priors for population parameters
+            pm_pop_coeff = {}
+            for pop_coeff in self.population_coeff:
+                #k_pop = pm.Normal("k_pop", mu=0, sigma=1)  # Adjust priors as needed
+                #vd_pop = pm.Normal("vd_pop", mu=0, sigma=1)
+                pm_pop_coeff[pop_coeff.coeff_name] = pm.Normal(f"{pop_coeff.coeff_name}_pop", mu=0, sigma=1)
+
+
+            # Model betas (coefficients for dependent variables)
+            pm_betas = {}
+            for model_param in self.dep_vars:
+                pm_betas[model_param] = {}
+                for param_col_obj in self.dep_vars[model_param]:
+                    param_col = param_col_obj.column_name
+                    pm_betas[model_param][param_col] = pm.Normal(f"beta_{model_param}_{param_col}", mu=0, sigma=1)
+
+            # Calculate subject-specific parameters
+            subject_params = {}
+            for subject in data[self.groupby_col].unique():
+                subject_data = data[data[self.groupby_col] == subject].iloc[0]
+                subject_params[subject] = {}
+                for model_param in self.dep_vars:
+                    param_value = subject_params[subject][model_param] = deepcopy(pm_pop_coeff[model_param])
+                    for param_col_obj in self.dep_vars[model_param]:
+                        param_col = param_col_obj.column_name
+                        beta = pm_betas[model_param][param_col]
+                        covariate_value = subject_data[param_col]
+                        param_value += beta * covariate_value
+                
+                    subject_params[subject][model_param] = pm.math.exp(subject_params[subject][model_param]) + 1e-6
+                    #subject_params[subject]['vd'] = pm.math.exp(subject_params[subject]['vd']) + 1e-6
+            
+            # Define the likelihood
+            y_pred = []
+            for subject in data[self.groupby_col].unique():
+                subject_data = data[data[self.groupby_col] == subject]
+                initial_conc = subject_data[self.conc_at_time_col].values[0]
+
+                sol = solve_ivp(self.pk_model_function,
+                                [subject_data[self.time_col].min(), subject_data[self.time_col].max()],
+                                [initial_conc],
+                                t_eval=subject_data[self.time_col],
+                                args=(subject_params[subject]['k'], subject_params[subject]['vd'], 1))
+                
+                y_pred_subject = pm.Normal("y_pred_subject", mu=sol.y[0], sigma=0.1, observed=subject_data[self.conc_at_time_col])
+                y_pred.append(y_pred_subject)
+
+        return model
+
+
+
+    def fit_pymc(self, data, **kwargs):
+        model = self._pymc_model(data)
+        with model:
+            self.trace_ = pm.sample(**kwargs)  # Perform sampling
+            self.idata_ = az.from_pymc3(self.trace_) # Convert to InferenceData object for ArviZ analysis
+
+
+        # Extract posterior means for predictions (example)
+        self.posterior_means_ = {
+            param: self.trace_[param].mean(axis=0) for param in self.trace_.varnames
+        }
+
+        return self
+
+    
     def _subject_iterator(self, data):
         #data_out = {}
         subject_id_c = self.groupby_col
@@ -313,16 +399,16 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         #subject_coeffs_history[subject] = subject_coeff_history
         subject_coeff = {model_param: np.exp(
             subject_coeff[model_param]) for model_param in subject_coeff}
-        subject_coeff = np.array([np.float64(subject_coeff[i]) for i in subject_coeff])
+        subject_coeff = np.array([subject_coeff[i] for i in subject_coeff])+1e-6
         #subject_coeff[subject_coeff < 1e-6] = 1e-6
         subject_coeff = subject_coeff.tolist()
 
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", RuntimeWarning)
-                sol = solve_ivp(pk_model_function, np.array([subject_data[time_c].min(), subject_data[time_c].max()]),
-                            np.array([initial_conc]),
-                            t_eval=np.array(subject_data[time_c]), args=(*subject_coeff, 1 ))
+                sol = solve_ivp(pk_model_function, np.array([subject_data[time_c].min(), subject_data[time_c].max()], dtype = np.float64),
+                            np.array([initial_conc], dtype = np.float64),
+                            t_eval=np.array(subject_data[time_c], dtype = np.float64), args=(*subject_coeff, 1 ))
         except (ZeroDivisionError, RuntimeWarning) as e:
             self.ivp_error_params_ = {
             'f':deepcopy(pk_model_function),
@@ -334,7 +420,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             
             }
             raise ZeroDivisionError
-        return sol.y[0]
+        return sol.y[0].astype(np.float64)
     
     def _predict_parallel(self, data, parallel_n_jobs = -1):
         predictions = Parallel(n_jobs=parallel_n_jobs)(delayed(self._predict_inner)(data_out) for data_out in self._subject_iterator(data))
@@ -363,6 +449,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
     #    return method(y_true, y_pred, sample_weight, multioutput, *kwargs)
 
     def _objective_function(self, params, data, parallel = False, parallel_n_jobs = -1):
+        params = np.array(params, dtype = np.float64)
         self._unpack_validate_params(params)
         n_pop_coeff = len(self.population_coeff)
         other_params = params[n_pop_coeff:]
@@ -383,6 +470,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                                                            checkpoint_filename=checkpoint_filename,
                                                            args=(data,),
                                                            warm_start=warm_start,
+                                                           tol = self.optimzer_tol,
                                                            bounds=self.bounds
                                                            )
         res_df = []
@@ -597,7 +685,7 @@ def objective_function__mgkg_age(params, data, subject_id_c='SUBJID', dose_c='DO
     return sse
 
 
-def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename, *args, warm_start = False, **kwargs):
+def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename, *args, warm_start = False, tol = None, **kwargs):
     """
     Optimizes a function using scipy.optimize.minimize() with checkpointing every n iterations,
     using joblib for saving and loading checkpoints.
@@ -669,7 +757,7 @@ def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename,
 
         kwargs['callback'] = combined_callback
 
-    result = minimize(func, x0, *args, **kwargs)
+    result = minimize(func, x0, *args, tol = tol, **kwargs)
 
     # Remove checkpoint file at end.
     # try:
