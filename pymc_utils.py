@@ -89,8 +89,8 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
         #for sub in coords['subject']:
         #    one_subject_tps = np.array(pm_subj_df.loc[pm_subj_df['SUBJID'] == 1.0, 'subj_tp'].values[0])
         #    sub_tps[sub] = pm.Data(f"subject{sub}_timepoints", one_subject_tps)
-        #subject_max_tp = pm.Data('subject_tp_max', pm_subj_df['subj_tp_max'].values, dims = 'subject')
-        #subject_min_tp = pm.Data('subject_tp_min', pm_subj_df['subj_tp_min'].values, dims = 'subject')
+        subject_max_tp_data = pm.Data('subject_tp_max', pm_subj_df['subj_tp_max'].values, dims = 'subject')
+        subject_min_tp_data = pm.Data('subject_tp_min', pm_subj_df['subj_tp_min'].values, dims = 'subject')
 
         subject_data = {}
         betas = {}
@@ -143,6 +143,14 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
             pm_model_params.append(
                 pm.Deterministic(f"{coeff_name}_i", model_coeff, dims = 'subject')
             )
+        
+        theta_matrix = pt.concatenate([param.reshape((1, -1)) for param in pm_model_params], axis=0).T
+        ode_sol = jax_odeint_op(subject_init_conc.astype('float64'),
+                                subject_min_tp_data.astype('float64'),
+                                subject_max_tp_data.astype('float64'),
+                                theta_matrix.astype('float64'),
+                                tp_data.astype('float64'),
+                                time_mask_data.astype('float64'))
 
         sigma_obs = pm.HalfNormal("sigma_obs", sigma=1)
         pm.LogNormal("obs", mu=all_conc_pm, sigma=sigma_obs, observed=data_obs)
