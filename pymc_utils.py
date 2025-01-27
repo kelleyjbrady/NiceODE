@@ -31,7 +31,7 @@ def one_compartment_model(t, y, *theta ):
 
 
 class JaxOdeintOp(Op):
-    itypes = [pt.dvector, pt.dscalar, pt.dscalar, pt.dmatrix, pt.dmatrix, pt.dmatrix]
+    itypes = [pt.dvector, pt.dvector, pt.dvector, pt.dmatrix, pt.dmatrix, pt.dmatrix]
     # y0 (n_compartments,), t0 (scalar), tf (scalar), theta (n_subjects, n_params), all_t (n_subjects, max_time_points), mask (n_subjects, max_time_points)
     otypes = [pt.dmatrix]
 
@@ -45,13 +45,15 @@ class JaxOdeintOp(Op):
         def solve_for_subject(y0_i, theta_i, t_i, mask_i):
             # Select valid times using the mask, replace invalid with the first time point
             times = jnp.where(mask_i, t_i, t_i[0])
-
+            t0_i = jnp.min(times)
+            tf_i = jnp.max(times)
             # Solve ODE using odeint
-            solution = odeint(self.func, y0_i, jnp.array([t0, tf]), *theta_i, t_eval=times)
+            solution = odeint(self.func, y0_i, jnp.array([t0_i, tf_i]), *theta_i, t_eval=times)
             return solution
 
         # Vectorize across subjects using jax.vmap
         subject_solutions = jax.vmap(solve_for_subject)(y0, theta, all_t, time_mask)
+        print("Shape of subject_solutions (inside JaxOdeintOp):", subject_solutions.shape)
 
         # Store the result, ensuring the correct data type
         outputs[0][0] = np.asarray(subject_solutions, dtype=all_t.dtype)
@@ -62,14 +64,16 @@ class JaxOdeintOp(Op):
         n_subjects = input_shapes[3][0]  # theta
         n_time_points = input_shapes[4][1]  # all_t
         n_compartments = input_shapes[0][0]  # y0
-        return [(n_subjects, n_time_points, n_compartments)]
+        #return [(n_subjects, n_time_points, n_compartments)]
+        return [(n_subjects, n_time_points)]
+
 
 def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars): 
     
     pm_df['tmp'] = 1
     time_mask_df = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'tmp').fillna(0)
     time_mask = time_mask_df.to_numpy().astype(bool)
-    all_sub_tp_alt = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'TIME').fillna(-1).values
+    all_sub_tp_alt = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'TIME').fillna(-1).astype(np.float64).to_numpy()
     
     coords = {'subject':list(pm_subj_df['SUBJID'].values), 
           'obs_id': list(pm_df.index.values)
@@ -144,14 +148,25 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
                 pm.Deterministic(f"{coeff_name}_i", model_coeff, dims = 'subject')
             )
         
+        
+        print(f"Shape of intial conc: {subject_init_conc.shape.eval()}")
+        print(f"Shape of subject min tp: {subject_min_tp_data.shape.eval()}")
+        print(f"Shape of subject max tp: {subject_max_tp_data.shape.eval()}")
         theta_matrix = pt.concatenate([param.reshape((1, -1)) for param in pm_model_params], axis=0).T
+        print("Shape of theta_matrix:", theta_matrix.shape.eval())
         ode_sol = jax_odeint_op(subject_init_conc.astype('float64'),
                                 subject_min_tp_data.astype('float64'),
                                 subject_max_tp_data.astype('float64'),
                                 theta_matrix.astype('float64'),
                                 tp_data.astype('float64'),
                                 time_mask_data.astype('float64'))
-
+        #time_mask_data_reshaped = time_mask_data.reshape(n_subjects, max_time_points, 1)
+        filtered_ode_sol = ode_sol[time_mask_data].flatten()
         sigma_obs = pm.HalfNormal("sigma_obs", sigma=1)
-        pm.LogNormal("obs", mu=all_conc_pm, sigma=sigma_obs, observed=data_obs)
+        #print("Shape of ode_sol (in PyMC model):", ode_sol.shape)
+        # or
+        #print("Shape of ode_sol (in PyMC model):", pt.shape(ode_sol).eval())
+        pm.LogNormal("obs", mu=filtered_ode_sol, sigma=sigma_obs, observed=data_obs)
+        
+
     return model
