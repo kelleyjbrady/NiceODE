@@ -24,15 +24,15 @@ def one_compartment_model(t, y, *theta ):
       float: The rate of change of drug concentration (dC/dt).
     """
     k, Vd = theta
-    C = y[0]  # Extract concentration from the state vector
+    C = y#[0]  # Extract concentration from the state vector
     dCdt = -(k/Vd) * C  # Calculate the rate of change
     return jnp.array(dCdt)
 
 
 
 class JaxOdeintOp(Op):
-    itypes = [pt.dvector, pt.dvector, pt.dvector, pt.dmatrix, pt.dmatrix, pt.dmatrix]
-    # y0 (n_compartments,), t0 (scalar), tf (scalar), theta (n_subjects, n_params), all_t (n_subjects, max_time_points), mask (n_subjects, max_time_points)
+    itypes = [pt.dvector, pt.dvector, pt.dvector, pt.dmatrix, pt.dmatrix]
+    # y0 (n_compartments,), t0 (scalar), tf (scalar), theta (n_subjects, n_params), all_t (n_subjects, max_time_points)
     otypes = [pt.dmatrix]
 
     def __init__(self, func):
@@ -45,12 +45,13 @@ class JaxOdeintOp(Op):
         def solve_for_subject(y0_i, theta_i, t_i):
 
             # Solve ODE using odeint
+            y0_i = jnp.atleast_1d(y0_i)
             solution = odeint(self.func, y0_i, t_i, *theta_i, )
             return solution
 
         # Vectorize across subjects using jax.vmap
         subject_solutions = jax.vmap(solve_for_subject)(y0, theta, all_t)
-        print("Shape of subject_solutions (inside JaxOdeintOp):", subject_solutions.shape)
+        #print("Shape of subject_solutions (inside JaxOdeintOp):", subject_solutions.shape)
 
         # Store the result, ensuring the correct data type
         outputs[0][0] = np.asarray(subject_solutions, dtype=all_t.dtype)
@@ -70,7 +71,8 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
     pm_df['tmp'] = 1
     time_mask_df = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'tmp').fillna(0)
     time_mask = time_mask_df.to_numpy().astype(bool)
-    all_sub_tp_alt = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'TIME').fillna(-1).astype(np.float64).to_numpy()
+    all_sub_tp_alt = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'TIME')    
+    all_sub_tp = np.tile(all_sub_tp_alt.columns, (len(time_mask_df),1))
     
     coords = {'subject':list(pm_subj_df['SUBJID'].values), 
           'obs_id': list(pm_df.index.values)
@@ -83,7 +85,7 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
         
         data_obs = pm.Data('dv', pm_df['DV'].values, dims = 'obs_id')
         time_mask_data = pm.Data('time_mask', time_mask, dims = ('subject', 'time'))
-        tp_data = pm.Data('timepoints', all_sub_tp_alt, dims = ('subject', 'time'))
+        tp_data = pm.Data('timepoints', all_sub_tp, dims = ('subject', 'time'))
         subject_init_conc = pm.Data('c0', pm_subj_df['DV'].values, dims = 'subject')
         #subject_tps = pm.MutableData('subject_tp', pm_subj_df['subj_tp'].values, dims = 'subject')
         #sub_tps = {}
@@ -103,7 +105,7 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
             if coeff_name not in seen_coeff:
                 betas[coeff_name] = {}
                 subject_data[coeff_name] = {}
-            betas[coeff_name].update({beta_name:pm.Normal(f"beta_{coeff_name}_{beta_name}", mu = 0, sigma = 1)})
+            betas[coeff_name].update({beta_name:pm.Normal(f"beta_{coeff_name}_{beta_name}", mu = 0, sigma = 10)})
             subject_data[coeff_name].update(
                 {beta_name:pm.Data(f"data_{coeff_name}_{beta_name}", pm_subj_df[beta_name].values,
                                         dims = 'subject'
@@ -119,12 +121,12 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
         pm_model_params = []
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
-            pop_coeff_init = 0
-            while pop_coeff_init == 0:
-                pop_coeff_init = np.random.rand()
+            #pop_coeff_init = 0
+            #while pop_coeff_init == 0:
+            #    pop_coeff_init = np.random.rand()
                 
             #ensure that neither init value is zero, I think that can make the graphviz fail
-            population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = 0, sigma = 1, initval=pop_coeff_init)
+            population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = 0, sigma = 1)
             
             pop_coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 1)
             pop_coeff_intercept_sigma[coeff_name] = pm.HalfNormal(f"{coeff_name}_intercept_sigma", sigma = 10)
@@ -140,9 +142,9 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
                 print(f"Shape of betas[{coeff_name}][{beta_name}]: {betas[coeff_name][beta_name].shape.eval()}")
                 print(f"Shape of pm_subj_df[{beta_name}]: {subject_data[coeff_name][beta_name].shape.eval()}")
                 #print(f"Shape of pm_subj_df[{beta_name}][{sub_idx}]: {pm_subj_df[beta_name][sub_idx].shape}")
-                model_coeff = pm.math.exp((model_coeff + betas[coeff_name][beta_name] * subject_data[coeff_name][beta_name]))
+                model_coeff = (model_coeff + betas[coeff_name][beta_name] * subject_data[coeff_name][beta_name])
             pm_model_params.append(
-                pm.Deterministic(f"{coeff_name}_i", model_coeff, dims = 'subject')
+                pm.Deterministic(f"{coeff_name}_i", pm.math.exp(model_coeff), dims = 'subject')
             )
         
         
@@ -156,9 +158,10 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
                                 subject_max_tp_data.astype('float64'),
                                 theta_matrix.astype('float64'),
                                 tp_data.astype('float64'),
-                                time_mask_data.astype('float64'))
+                                )
         #time_mask_data_reshaped = time_mask_data.reshape(n_subjects, max_time_points, 1)
         filtered_ode_sol = ode_sol[time_mask_data].flatten()
+        sol = pm.Deterministic("sol", filtered_ode_sol)
         sigma_obs = pm.HalfNormal("sigma_obs", sigma=1)
         #print("Shape of ode_sol (in PyMC model):", ode_sol.shape)
         # or
