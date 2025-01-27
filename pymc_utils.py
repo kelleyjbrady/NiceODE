@@ -40,19 +40,16 @@ class JaxOdeintOp(Op):
         self.grad_op = None  # Define grad_op if you need gradients
 
     def perform(self, node, inputs, outputs):
-        y0, t0, tf, theta, all_t, time_mask = inputs
+        y0, t0, tf, theta, all_t = inputs
 
-        def solve_for_subject(y0_i, theta_i, t_i, mask_i):
-            # Select valid times using the mask, replace invalid with the first time point
-            times = jnp.where(mask_i, t_i, t_i[0])
-            t0_i = jnp.min(times)
-            tf_i = jnp.max(times)
+        def solve_for_subject(y0_i, theta_i, t_i):
+
             # Solve ODE using odeint
-            solution = odeint(self.func, y0_i, jnp.array([t0_i, tf_i]), *theta_i, t_eval=times)
+            solution = odeint(self.func, y0_i, t_i, *theta_i, )
             return solution
 
         # Vectorize across subjects using jax.vmap
-        subject_solutions = jax.vmap(solve_for_subject)(y0, theta, all_t, time_mask)
+        subject_solutions = jax.vmap(solve_for_subject)(y0, theta, all_t)
         print("Shape of subject_solutions (inside JaxOdeintOp):", subject_solutions.shape)
 
         # Store the result, ensuring the correct data type
