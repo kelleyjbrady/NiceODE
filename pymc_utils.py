@@ -143,57 +143,7 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
             pm_model_params.append(
                 pm.Deterministic(f"{coeff_name}_i", model_coeff, dims = 'subject')
             )
-        all_conc = [] 
-        print(coords['subject'])
-        for sub_idx, subject_id in enumerate(coords['subject']):
-            print(subject_id)
-            subject_data = pm_df.loc[pm_df['SUBJID'] == subject_id, :]
-            print(subject_data.shape)
-            #initial_conc = subject_init_conc[sub_idx]
-            initial_conc = subject_data['DV'].values[0]#.item()
-            t_eval = subject_data['TIME'].values
-            #t_eval = sub_tps[subject]
-            #t_span = [subject_min_tp[sub_idx], subject_max_tp[sub_idx]]
-            t_span = [np.min(subject_data['TIME'].values), np.max(subject_data['TIME'].values)]
-            theta = [i[sub_idx] for i in pm_model_params]
-            if old_subj_loop:
-                
-                def create_forward_model(subject_id_val, t_span, t_eval, initial_conc):
-                    @as_op(itypes=[pt.dscalar for i in pm_model_params], otypes=[pt.dvector])
-                    #@functools.wraps(pytensor_forward_model_matrix)
-                    def pytensor_forward_model_matrix(*args):
-                        #print(subject_id_val)
-                        theta = [i for i in args]
-                        sol = solve_ivp(one_compartment_model, t_span, [initial_conc], t_eval=t_eval, args=(theta,) )
-                        #print("sol.status:", sol.status)  # Print the status code
-                        #print("sol.message:", sol.message) # Print the status message
-                        ode_sol = sol.y[0]
-                        #print("\nShape of ode_sol within function:", ode_sol.shape)
-                        #print("\nValues of ode_sol within function:", ode_sol)
-                        return ode_sol
-                    return pytensor_forward_model_matrix
-            pytensor_forward_model_matrix = create_forward_model(subject_id, t_span, t_eval, initial_conc, )
-            
-            #theta = pytensor.printing.Print("\nShape of theta before stack")(pt.shape(theta))
-            #theta = pm.math.stack(theta)
-            #theta = pytensor.printing.Print("\nShape of theta after stack")(pt.shape(theta))
-            #print
-            if old_subj_loop:
-                ode_sol = pytensor_forward_model_matrix(*theta) #issue could be that this is not the same length for each subject
-            else:
-                sol = solve_ivp(one_compartment_model, t_span, [initial_conc], t_eval=t_eval, args=(*theta,) )
-                #print(sol)
-                ode_sol = sol#.y[0] 
-            #if pt_printing:
-                #_ = pytensor.printing.Print("Shape of ode_sol")(pt.shape(ode_sol))
-                #ode_sol = pytensor.printing.Print("ode_sol Values:")(ode_sol)
-            all_conc.append(ode_sol)
-        all_conc = pt.concatenate(all_conc, axis=0)
-        all_conc_pm = pm.Deterministic('all_conc', all_conc)
-        #if pt_printing:
-        #    all_conc = pytensor.printing.Print("Shape of all_conc")(
-        #    pt.shape(all_conc)
-        #)
+
         sigma_obs = pm.HalfNormal("sigma_obs", sigma=1)
         pm.LogNormal("obs", mu=all_conc_pm, sigma=sigma_obs, observed=data_obs)
     return model
