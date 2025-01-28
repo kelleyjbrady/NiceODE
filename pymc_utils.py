@@ -59,14 +59,14 @@ class DiffraxJaxOp(Op):
               saveat=self.saveat,
               stepsize_controller=self.stepsize_controller
           )
-          return sol.ys.T
+          return sol.ys.T, args
 
       return jax.jit(jax_sol_op)
     
     def setup_vjp_op(self):
         def vjp_sol_op(y0, args, g):
             _, vjp_fn = jax.vjp(self.jax_op, y0, args)
-            (result,) = vjp_fn(g)
+            (result, _) = vjp_fn(g)
             return result
         return jax.jit(vjp_sol_op)
 
@@ -87,15 +87,21 @@ class DiffraxJaxOp(Op):
         args = jnp.asarray(args)
         print(f"In perform: y0.shape = {y0.shape}, y0.dtype = {y0.dtype}")
         print(f"In perform: args.shape = {args.shape}, args.dtype = {args.dtype}")
-        result = self.jax_op(y0, args)
+        result, args_out = self.jax_op(y0, args)
         outputs[0][0] = np.asarray(result, dtype="float64")
+        outputs[1][0] = np.asarray(args_out, dtype="float64")
     
     def grad(self, inputs, output_gradients):
         (y0, args) = inputs
-        (gz,) = output_gradients
+        (gz,_) = output_gradients
         return [
             self.vjp_op(y0, args, gz)[0],
-            grad_not_implemented(self, 1, args)
+            pm.gradient_not_implemented(
+            op=self,
+            x_pos=1,
+            x=args,
+            msg="Gradient w.r.t. args not implemented",
+        )
         ]
 
 class DiffraxVJPOp(Op):
@@ -325,6 +331,8 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
             filtered_ode_sol_c = np.copy(filtered_ode_sol)
             sol = pm.Deterministic("sol", filtered_ode_sol_c)
         else:
+            print("Shape of evaluated time_mask_data:", time_mask_data.shape.eval())
+            print("Shape of evaluated ode_sol:", ode_sol.shape.eval())
             filtered_ode_sol = ode_sol[time_mask_data].flatten()
             sol = pm.Deterministic("sol", filtered_ode_sol)
         sigma_obs = pm.HalfNormal("sigma_obs", sigma=1)
