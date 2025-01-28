@@ -293,12 +293,19 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
         print(f"Shape of subject max tp: {subject_max_tp_data.shape.eval()}")
         theta_matrix = pt.concatenate([param.reshape((1, -1)) for param in pm_model_params], axis=0).T
         print("Shape of theta_matrix:", theta_matrix.shape.eval())
-        ode_sol = jax_odeint_op(subject_init_conc.astype('float64'),
-                                subject_min_tp_data.astype('float64'),
-                                subject_max_tp_data.astype('float64'),
-                                theta_matrix.astype('float64'),
-                                tp_data.astype('float64'),
-                                )
+        use_diffrax = True
+        if use_diffrax:
+            diffrax_op = DiffraxJaxOp(one_compartment_diffrax, tp_data[0,:])
+            vjp_op = DiffraxVJPOp(diffrax_op.jax_op)
+            diffrax_op.vjp_op = vjp_op
+            ode_sol = diffrax_op(pm_subj_df["DV"].values.astype("float64"), theta_matrix.astype("float64"))
+        else:
+            ode_sol = jax_odeint_op(subject_init_conc.astype('float64'),
+                                    subject_min_tp_data.astype('float64'),
+                                    subject_max_tp_data.astype('float64'),
+                                    theta_matrix.astype('float64'),
+                                    tp_data.astype('float64'),
+                                    )
         #time_mask_data_reshaped = time_mask_data.reshape(n_subjects, max_time_points, 1)
         #tmp_ode_sol = pm.Deterministic("tmp_sol", ode_sol)
         filtered_ode_sol = ode_sol[time_mask_data].flatten()
