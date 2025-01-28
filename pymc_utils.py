@@ -5,6 +5,126 @@ import jax
 from jax.experimental.ode import odeint
 import numpy as np
 import pymc as pm
+import diffrax
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pymc as pm
+from pytensor.gradient import grad_not_implemented
+from pytensor.graph.op import Apply, Op
+from pytensor.tensor.type import TensorType
+import pytensor.tensor as pt
+
+# One-compartment model using diffrax
+def one_compartment_diffrax(t, y, args):
+    k, Vd = args
+    C = y
+    dCdt = -(k / Vd) * C
+    return dCdt
+
+class DiffraxJaxOp(Op):
+    __props__ = ("term", "solver", "t0", "t1", "dt0", "saveat", "stepsize_controller")
+
+    itypes = [pt.dvector, pt.dvector]
+    otypes = [pt.dmatrix]
+
+    def __init__(self, func, timepoints):
+        if not callable(func):
+            raise ValueError("`func` must be a callable object.")
+        if not isinstance(timepoints, (list, tuple, np.ndarray)) or len(timepoints) < 2:
+            raise ValueError("`timepoints` must be a list, tuple, or array with at least two elements.")
+
+        self._func = func
+        self._t0 = timepoints
+        self._t1 = timepoints
+        self._dt0 = (self._t1 - self._t0) / jnp.shape(timepoints)
+        self._term = diffrax.ODETerm(self._func)
+        self._solver = diffrax.Dopri5()
+        self._saveat = diffrax.SaveAt(ts=timepoints)
+        self._stepsize_controller = diffrax.PIDController(rtol=1e-5, atol=1e-5)
+
+        self.jax_op = self.setup_jax_op()
+        self.vjp_op = self.setup_vjp_op()
+
+    def setup_jax_op(self):
+      def jax_sol_op(y0, args):
+          sol = diffrax.diffeqsolve(
+              self.term,
+              self.solver,
+              t0=self.t0,
+              t1=self.t1,
+              dt0=self.dt0,
+              y0=y0,
+              args=args,
+              saveat=self.saveat,
+              stepsize_controller=self.stepsize_controller
+          )
+          return sol.ys.T
+
+      return jax.jit(jax_sol_op)
+    
+    def setup_vjp_op(self):
+        def vjp_sol_op(y0, args, g):
+            _, vjp_fn = jax.vjp(self.jax_op, y0, args)
+            (result,) = vjp_fn(g)
+            return result
+        return jax.jit(vjp_sol_op)
+
+    def make_node(self, y0, args):
+        inputs = [
+            pt.as_tensor_variable(y0),
+            pt.as_tensor_variable(args),
+        ]
+        outputs = [
+            pt.matrix(dtype="float64"),
+        ]
+        return Apply(self, inputs, outputs)
+
+    def perform(self, node, inputs, outputs):
+        y0, args = inputs
+        # Convert NumPy arrays to JAX DeviceArrays
+        y0 = jnp.asarray(y0)
+        args = jnp.asarray(args)
+        result = self.jax_op(y0, args)
+        outputs[0][0] = np.asarray(result, dtype="float64")
+    
+    def grad(self, inputs, output_gradients):
+        (y0, args) = inputs
+        (gz,) = output_gradients
+        return [
+            self.vjp_op(y0, args, gz)[0],
+            grad_not_implemented(self, 1, args)
+        ]
+
+class DiffraxVJPOp(Op):
+    __props__ = ()
+
+    itypes = [pt.dvector, pt.dvector, pt.dmatrix]
+    otypes = [pt.dvector]
+
+    def __init__(self, jax_op):
+        self.jax_op = jax_op
+        self.grad_op = None
+
+    def make_node(self, y0, args, gz):
+        inputs = [
+            pt.as_tensor_variable(y0),
+            pt.as_tensor_variable(args),
+            pt.as_tensor_variable(gz)
+        ]
+        outputs = [
+            pt.vector(dtype="float64")
+        ]
+        return Apply(self, inputs, outputs)
+
+    def perform(self, node, inputs, outputs):
+        y0, args, gz = inputs
+        # Convert NumPy arrays to JAX DeviceArrays
+        y0 = jnp.asarray(y0)
+        args = jnp.asarray(args)
+        gz = jnp.asarray(gz)
+        result = self.jax_op(y0, args, gz)
+        outputs[0][0] = np.asarray(result, dtype="float64")
 
 def one_compartment_model(t, y, *theta ):
     """
