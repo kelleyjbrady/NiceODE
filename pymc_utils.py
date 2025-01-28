@@ -28,20 +28,20 @@ class DiffraxJaxOp(Op):
     itypes = [pt.dvector, pt.dvector]
     otypes = [pt.dmatrix]
 
-    def __init__(self, func, timepoints):
+    def __init__(self, func, t0, t1, dt0, timepoints):
         if not callable(func):
             raise ValueError("`func` must be a callable object.")
         if not isinstance(timepoints, (list, tuple, np.ndarray)) or len(timepoints) < 2:
             raise ValueError("`timepoints` must be a list, tuple, or array with at least two elements.")
 
-        self._func = func
-        self._t0 = timepoints
-        self._t1 = timepoints
-        self._dt0 = (self._t1 - self._t0) / jnp.shape(timepoints)
-        self._term = diffrax.ODETerm(self._func)
-        self._solver = diffrax.Dopri5()
-        self._saveat = diffrax.SaveAt(ts=timepoints)
-        self._stepsize_controller = diffrax.PIDController(rtol=1e-5, atol=1e-5)
+        self.func = func
+        self.t0 = t0
+        self.t1 = t1
+        self.dt0 = dt0
+        self.term = diffrax.ODETerm(self.func)
+        self.solver = diffrax.Dopri5()
+        self.saveat = diffrax.SaveAt(ts=timepoints)
+        self.stepsize_controller = diffrax.PIDController(rtol=1e-5, atol=1e-5)
 
         self.jax_op = self.setup_jax_op()
         self.vjp_op = self.setup_vjp_op()
@@ -85,6 +85,8 @@ class DiffraxJaxOp(Op):
         # Convert NumPy arrays to JAX DeviceArrays
         y0 = jnp.asarray(y0)
         args = jnp.asarray(args)
+        print(f"In perform: y0.shape = {y0.shape}, y0.dtype = {y0.dtype}")
+        print(f"In perform: args.shape = {args.shape}, args.dtype = {args.dtype}")
         result = self.jax_op(y0, args)
         outputs[0][0] = np.asarray(result, dtype="float64")
     
@@ -201,7 +203,10 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
     time_mask = time_mask_df.to_numpy().astype(bool)
     all_sub_tp_alt = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'TIME')    
     all_sub_tp = np.tile(all_sub_tp_alt.columns, (len(time_mask_df),1))
-    
+    timepoints = np.array(all_sub_tp_alt.columns)
+    t1 = timepoints[-1]
+    t0 = 0 
+    dt0 = 0.1
     coords = {'subject':list(pm_subj_df['SUBJID'].values), 
           'obs_id': list(pm_df.index.values)
           }
@@ -293,9 +298,11 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
         print(f"Shape of subject max tp: {subject_max_tp_data.shape.eval()}")
         theta_matrix = pt.concatenate([param.reshape((1, -1)) for param in pm_model_params], axis=0).T
         print("Shape of theta_matrix:", theta_matrix.shape.eval())
+        print("Shape of tp_data:",  tp_data.shape.eval())
+        print("Shape of tp_data[0,:]:",  tp_data[0,:].shape.eval())
         use_diffrax = True
         if use_diffrax:
-            diffrax_op = DiffraxJaxOp(one_compartment_diffrax, tp_data[0,:])
+            diffrax_op = DiffraxJaxOp(one_compartment_diffrax, t0, t1, dt0, timepoints)
             vjp_op = DiffraxVJPOp(diffrax_op.jax_op)
             diffrax_op.vjp_op = vjp_op
             ode_sol = diffrax_op(pm_subj_df["DV"].values.astype("float64"), theta_matrix.astype("float64"))
@@ -308,8 +315,18 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
                                     )
         #time_mask_data_reshaped = time_mask_data.reshape(n_subjects, max_time_points, 1)
         #tmp_ode_sol = pm.Deterministic("tmp_sol", ode_sol)
-        filtered_ode_sol = ode_sol[time_mask_data].flatten()
-        sol = pm.Deterministic("sol", filtered_ode_sol)
+        print("Shape of ode_sol:", ode_sol.shape)
+        print("Shape of time_mask_data:", time_mask_data.shape)
+        try_convert_debug = False
+        if try_convert_debug:
+            ode_sol = np.asarray(ode_sol)
+            time_mask_data = np.asarray(time_mask_data).astype(bool)
+            filtered_ode_sol = ode_sol[time_mask_data].flatten()
+            filtered_ode_sol_c = np.copy(filtered_ode_sol)
+            sol = pm.Deterministic("sol", filtered_ode_sol_c)
+        else:
+            filtered_ode_sol = ode_sol[time_mask_data].flatten()
+            sol = pm.Deterministic("sol", filtered_ode_sol)
         sigma_obs = pm.HalfNormal("sigma_obs", sigma=1)
         #print("Shape of ode_sol (in PyMC model):", ode_sol.shape)
         # or
