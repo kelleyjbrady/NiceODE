@@ -154,6 +154,9 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
 
             print(f"Shape of coeff_intercept_i[{coeff_name}]: {coeff_intercept_i[coeff_name].shape.eval()}")
             model_coeff = (population_coeff[coeff_name] + coeff_intercept_i[coeff_name])
+            if coeff_name not in betas:
+                betas[coeff_name] = {}
+                subject_data[coeff_name] = {} 
             for beta_name in betas[coeff_name]:
                 print(f"Shape of model_coeff: {model_coeff.shape.eval()}")
                 print(f"Shape of betas[{coeff_name}][{beta_name}]: {betas[coeff_name][beta_name].shape.eval()}")
