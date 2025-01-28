@@ -123,9 +123,10 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
             seen_coeff.append(coeff_name)
             
         population_coeff = {}
-        pop_coeff_intercept_mu = {}
-        pop_coeff_intercept_sigma = {}
-        pop_coeff_intercept_i = {}
+        coeff_intercept_mu = {}
+        coeff_intercept_sigma = {}
+        coeff_intercept_i = {}
+        z_coeff = {}
         pm_model_params = []
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
@@ -136,15 +137,23 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
             #ensure that neither init value is zero, I think that can make the graphviz fail
             population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = 0, sigma = 3)
             
-            pop_coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 3)
-            pop_coeff_intercept_sigma[coeff_name] = pm.HalfNormal(f"{coeff_name}_intercept_sigma", sigma = 10)
-            pop_coeff_intercept_i[coeff_name] = pm.Normal(f"{coeff_name}_intercept_sub",
-                                                        mu = pop_coeff_intercept_mu[coeff_name], 
-                                                        sigma = pop_coeff_intercept_sigma[coeff_name],
-                                                        dims = 'subject'
-                                                        )
-            print(f"Shape of pop_coeff_intercept_i[{coeff_name}]: {pop_coeff_intercept_i[coeff_name].shape.eval()}")
-            model_coeff = (population_coeff[coeff_name] + pop_coeff_intercept_i[coeff_name])
+            coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 3)
+            coeff_intercept_sigma[coeff_name] = pm.HalfNormal(f"{coeff_name}_intercept_sigma", sigma = 10)
+                    # Non-centered subject-level deviations (standard normal prior)
+            z_coeff[coeff_name] = pm.Normal(
+                f"z_{coeff_name}", mu=0, sigma=1, dims="subject"
+            )
+
+            # Subject-level intercept (non-centered)
+            coeff_intercept_i[coeff_name] = pm.Deterministic(
+                f"{coeff_name}_intercept",
+                coeff_intercept_mu[coeff_name]
+                + z_coeff[coeff_name] * coeff_intercept_sigma[coeff_name],
+                dims="subject",
+            )
+
+            print(f"Shape of coeff_intercept_i[{coeff_name}]: {coeff_intercept_i[coeff_name].shape.eval()}")
+            model_coeff = (population_coeff[coeff_name] + coeff_intercept_i[coeff_name])
             for beta_name in betas[coeff_name]:
                 print(f"Shape of model_coeff: {model_coeff.shape.eval()}")
                 print(f"Shape of betas[{coeff_name}][{beta_name}]: {betas[coeff_name][beta_name].shape.eval()}")
