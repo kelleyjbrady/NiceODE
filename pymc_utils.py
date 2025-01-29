@@ -14,6 +14,7 @@ from pytensor.gradient import grad_not_implemented
 from pytensor.graph.op import Apply, Op
 from pytensor.tensor.type import TensorType
 import pytensor.tensor as pt
+from scipy.integrate import solve_ivp
 
 # One-compartment model using diffrax
 def one_compartment_diffrax(t, y, args):
@@ -28,7 +29,7 @@ class DiffraxJaxOp(Op):
     itypes = [pt.dvector, pt.dvector]
     otypes = [pt.dmatrix]
 
-    def __init__(self, func, t0, t1, dt0, timepoints):
+    def __init__(self, func, t0, t1, dt0, timepoints, time_mask):
         if not callable(func):
             raise ValueError("`func` must be a callable object.")
         if not isinstance(timepoints, (list, tuple, np.ndarray)) or len(timepoints) < 2:
@@ -42,12 +43,12 @@ class DiffraxJaxOp(Op):
         self.solver = diffrax.Dopri5()
         self.saveat = diffrax.SaveAt(ts=timepoints)
         self.stepsize_controller = diffrax.PIDController(rtol=1e-5, atol=1e-5)
-
+        self.time_mask = time_mask
         self.jax_op = self.setup_jax_op()
         self.vjp_op = self.setup_vjp_op()
 
     def setup_jax_op(self):
-      def jax_sol_op(y0, args):
+      def jax_sol_op(y0, args, time_mask):
           sol = diffrax.diffeqsolve(
               self.term,
               self.solver,
@@ -59,21 +60,24 @@ class DiffraxJaxOp(Op):
               saveat=self.saveat,
               stepsize_controller=self.stepsize_controller
           )
-          return sol.ys.T, args
+          filtered_sol = sol.ys.T[time_mask]
+          return filtered_sol, args
 
       return jax.jit(jax_sol_op)
     
     def setup_vjp_op(self):
-        def vjp_sol_op(y0, args, g):
-            _, vjp_fn = jax.vjp(self.jax_op, y0, args)
-            (result, _) = vjp_fn(g)
+        def vjp_sol_op(y0, args, time_mask, g):
+            jax_op_lambda = lambda y0, args: self.jax_op(y0, args, time_mask)[0]
+            _, vjp_fn = jax.vjp(jax_op_lambda, y0, args)
+            (result,) = vjp_fn(g)
             return result
         return jax.jit(vjp_sol_op)
 
-    def make_node(self, y0, args):
+    def make_node(self, y0, args, time_mask):
         inputs = [
             pt.as_tensor_variable(y0),
             pt.as_tensor_variable(args),
+            pt.as_tensor_variable(time_mask)
         ]
         outputs = [
             pt.matrix(dtype="float64"),
@@ -81,18 +85,19 @@ class DiffraxJaxOp(Op):
         return Apply(self, inputs, outputs)
 
     def perform(self, node, inputs, outputs):
-        y0, args = inputs
+        y0, args, time_mask = inputs
         # Convert NumPy arrays to JAX DeviceArrays
         y0 = jnp.asarray(y0)
         args = jnp.asarray(args)
+        time_mask = jnp.asarray(time_mask)
         print(f"In perform: y0.shape = {y0.shape}, y0.dtype = {y0.dtype}")
         print(f"In perform: args.shape = {args.shape}, args.dtype = {args.dtype}")
-        result, args_out = self.jax_op(y0, args)
+        result, args_out = self.jax_op(y0, args, time_mask)
         outputs[0][0] = np.asarray(result, dtype="float64")
         outputs[1][0] = np.asarray(args_out, dtype="float64")
     
     def grad(self, inputs, output_gradients):
-        (y0, args) = inputs
+        (y0, args, time_mask) = inputs
         (gz,_) = output_gradients
         return [
             self.vjp_op(y0, args, gz)[0],
@@ -101,6 +106,12 @@ class DiffraxJaxOp(Op):
             x_pos=1,
             x=args,
             msg="Gradient w.r.t. args not implemented",
+        ), 
+            pm.gradient_not_implemented(
+            op=self,
+            x_pos=2,
+            x=time_mask,
+            msg="Gradient w.r.t. time_mask not implemented",
         )
         ]
 
@@ -114,10 +125,11 @@ class DiffraxVJPOp(Op):
         self.jax_op = jax_op
         self.grad_op = None
 
-    def make_node(self, y0, args, gz):
+    def make_node(self, y0, args, time_mask, gz):
         inputs = [
             pt.as_tensor_variable(y0),
             pt.as_tensor_variable(args),
+            pt.as_tensor_variable(time_mask),
             pt.as_tensor_variable(gz)
         ]
         outputs = [
@@ -126,12 +138,13 @@ class DiffraxVJPOp(Op):
         return Apply(self, inputs, outputs)
 
     def perform(self, node, inputs, outputs):
-        y0, args, gz = inputs
+        y0, args, time_mask, gz = inputs
         # Convert NumPy arrays to JAX DeviceArrays
         y0 = jnp.asarray(y0)
         args = jnp.asarray(args)
+        time_mask = jnp.asarray(time_mask)
         gz = jnp.asarray(gz)
-        result = self.jax_op(y0, args, gz)
+        result = self.jax_op(y0, args, time_mask, gz)
         outputs[0][0] = np.asarray(result, dtype="float64")
 
 def one_compartment_model(t, y, *theta ):
@@ -201,8 +214,33 @@ class JaxOdeintOp(Op):
         #return [(n_subjects, n_time_points, n_compartments)]
         return [(n_subjects, n_time_points)]
 
+def solve_ode_scipy(y0, t0, t1, theta, time_mask, timepoints):
+    """Solves the ODE for a single subject using SciPy."""
+    sol = solve_ivp(
+        one_compartment_diffrax,
+        [t0, t1],
+        y0,
+        args=(theta,),
+        t_eval=timepoints,
+        method="RK45"
+    )
+    return sol.y.T[time_mask]
 
-def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars): 
+def evaluate_params_for_subject(subject_idx, k_i, vd_i):
+            return k_i[subject_idx].eval(), vd_i[subject_idx].eval()
+        
+def solve_subject_odes(subject_indices, k_i, vd_i, y0_i, time_mask, timepoints):
+    full_sol = []
+    for sub_idx in subject_indices:
+        y0 = y0_i[sub_idx]
+        k_val, vd_val = evaluate_params_for_subject(sub_idx, k_i, vd_i)
+        theta = np.array([k_val, vd_val])
+        time_mask_i = time_mask[sub_idx, :]
+        filtered_sol = solve_ode_scipy(y0, theta, time_mask_i, timepoints)
+        full_sol.extend(filtered_sol)
+    return np.array(full_sol)
+
+def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_method:str = 'scipy'): 
     
     pm_df['tmp'] = 1
     time_mask_df = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'tmp').fillna(0)
@@ -306,35 +344,29 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars):
         print("Shape of theta_matrix:", theta_matrix.shape.eval())
         print("Shape of tp_data:",  tp_data.shape.eval())
         print("Shape of tp_data[0,:]:",  tp_data[0,:].shape.eval())
-        use_diffrax = True
-        if use_diffrax:
-            diffrax_op = DiffraxJaxOp(one_compartment_diffrax, t0, t1, dt0, timepoints)
+        #use_diffrax = True
+        if ode_method == 'diffrax':
+            diffrax_op = DiffraxJaxOp(one_compartment_diffrax, t0, t1, dt0, timepoints, time_mask_data.eval())
             vjp_op = DiffraxVJPOp(diffrax_op.jax_op)
             diffrax_op.vjp_op = vjp_op
-            ode_sol = diffrax_op(pm_subj_df["DV"].values.astype("float64"), theta_matrix.astype("float64"))
-        else:
+            ode_sol = diffrax_op(pm_subj_df["DV"].values.astype("float64"), theta_matrix.astype("float64"), time_mask_data)[0]
+            sol = pm.Deterministic("sol", ode_sol.flatten())
+        elif ode_method == 'jax_odeint':
             ode_sol = jax_odeint_op(subject_init_conc.astype('float64'),
                                     subject_min_tp_data.astype('float64'),
                                     subject_max_tp_data.astype('float64'),
                                     theta_matrix.astype('float64'),
                                     tp_data.astype('float64'),
                                     )
-        #time_mask_data_reshaped = time_mask_data.reshape(n_subjects, max_time_points, 1)
-        #tmp_ode_sol = pm.Deterministic("tmp_sol", ode_sol)
-        print("Shape of ode_sol:", ode_sol.shape)
-        print("Shape of time_mask_data:", time_mask_data.shape)
-        try_convert_debug = False
-        if try_convert_debug:
-            ode_sol = np.asarray(ode_sol)
-            time_mask_data = np.asarray(time_mask_data).astype(bool)
-            filtered_ode_sol = ode_sol[time_mask_data].flatten()
-            filtered_ode_sol_c = np.copy(filtered_ode_sol)
-            sol = pm.Deterministic("sol", filtered_ode_sol_c)
-        else:
             print("Shape of evaluated time_mask_data:", time_mask_data.shape.eval())
             print("Shape of evaluated ode_sol:", ode_sol.shape.eval())
             filtered_ode_sol = ode_sol[time_mask_data].flatten()
             sol = pm.Deterministic("sol", filtered_ode_sol)
+        elif ode_method == 'scipy':
+            
+        #time_mask_data_reshaped = time_mask_data.reshape(n_subjects, max_time_points, 1)
+        #tmp_ode_sol = pm.Deterministic("tmp_sol", ode_sol)
+
         sigma_obs = pm.HalfNormal("sigma_obs", sigma=1)
         #print("Shape of ode_sol (in PyMC model):", ode_sol.shape)
         # or
