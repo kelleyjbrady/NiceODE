@@ -12,6 +12,7 @@ import numpy as np
 import pymc as pm
 from pytensor.gradient import grad_not_implemented
 from pytensor.graph.op import Apply, Op
+from pytensor.compile.ops import as_op
 from pytensor.tensor.type import TensorType
 import pytensor.tensor as pt
 from scipy.integrate import solve_ivp
@@ -214,7 +215,7 @@ class JaxOdeintOp(Op):
         #return [(n_subjects, n_time_points, n_compartments)]
         return [(n_subjects, n_time_points)]
 
-def solve_ode_scipy(y0, t0, t1, theta, time_mask, timepoints):
+def solve_ode_scipy(y0, t0, t1, theta, timepoints):
     """Solves the ODE for a single subject using SciPy."""
     sol = solve_ivp(
         one_compartment_diffrax,
@@ -224,7 +225,7 @@ def solve_ode_scipy(y0, t0, t1, theta, time_mask, timepoints):
         t_eval=timepoints,
         method="RK45"
     )
-    return sol.y.T[time_mask]
+    return sol.y.T
 
 def evaluate_params_for_subject(subject_idx, k_i, vd_i):
             return k_i[subject_idx].eval(), vd_i[subject_idx].eval()
@@ -240,6 +241,17 @@ def solve_subject_odes(subject_indices, k_i, vd_i, y0_i, time_mask, timepoints):
         full_sol.extend(filtered_sol)
     return np.array(full_sol)
 
+def generate_subject_ivp_op(subject_y0, subject_t0, subject_t1, subject_timepoints ):
+    @as_op(itypes=[pt.dvector], otypes=[pt.dmatrix])
+    def pytensor_forward_model_matrix(theta):
+        return solve_ode_scipy(y0 = subject_y0,
+                               t0 = subject_t0,
+                               t1 = subject_t1,
+                               theta = theta,
+                               timepoints = subject_timepoints )
+    return pytensor_forward_model_matrix
+
+
 def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_method:str = 'scipy'): 
     
     pm_df['tmp'] = 1
@@ -248,8 +260,8 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
     all_sub_tp_alt = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'TIME')    
     all_sub_tp = np.tile(all_sub_tp_alt.columns, (len(time_mask_df),1))
     timepoints = np.array(all_sub_tp_alt.columns)
-    t1 = timepoints[-1]
-    t0 = 0 
+    #t1 = timepoints[-1]
+    #t0 = 0 
     dt0 = 0.1
     coords = {'subject':list(pm_subj_df['SUBJID'].values), 
           'obs_id': list(pm_df.index.values)
@@ -264,6 +276,8 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
         time_mask_data = pm.Data('time_mask', time_mask, dims = ('subject', 'time'))
         tp_data = pm.Data('timepoints', all_sub_tp, dims = ('subject', 'time'))
         subject_init_conc = pm.Data('c0', pm_subj_df['DV'].values, dims = 'subject')
+        global_t0 = tp_data[0,0]
+        global_t1 = tp_data[0,-1]
         #subject_tps = pm.MutableData('subject_tp', pm_subj_df['subj_tp'].values, dims = 'subject')
         #sub_tps = {}
         #for sub in coords['subject']:
@@ -271,6 +285,10 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
         #    sub_tps[sub] = pm.Data(f"subject{sub}_timepoints", one_subject_tps)
         subject_max_tp_data = pm.Data('subject_tp_max', pm_subj_df['subj_tp_max'].values, dims = 'subject')
         subject_min_tp_data = pm.Data('subject_tp_min', pm_subj_df['subj_tp_min'].values, dims = 'subject')
+        
+        subject_init_conc_eval = subject_init_conc.eval()
+        tp_data_eval = tp_data.eval()
+        time_mask_data_eval = time_mask_data.eval()
 
         subject_data = {}
         betas = {}
@@ -337,13 +355,14 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
             )
         
         
-        print(f"Shape of intial conc: {subject_init_conc.shape.eval()}")
+        print(f"Shape of intial conc: {subject_init_conc_eval.shape}")
         print(f"Shape of subject min tp: {subject_min_tp_data.shape.eval()}")
         print(f"Shape of subject max tp: {subject_max_tp_data.shape.eval()}")
         theta_matrix = pt.concatenate([param.reshape((1, -1)) for param in pm_model_params], axis=0).T
-        print("Shape of theta_matrix:", theta_matrix.shape.eval())
-        print("Shape of tp_data:",  tp_data.shape.eval())
-        print("Shape of tp_data[0,:]:",  tp_data[0,:].shape.eval())
+        theta_matrix_eval = theta_matrix.eval()
+        print("Shape of theta_matrix:", theta_matrix_eval.shape)
+        print("Shape of tp_data:",  tp_data_eval.shape)
+        print("Shape of tp_data[0,:]:",  tp_data_eval[0,:].shape)
         #use_diffrax = True
         if ode_method == 'diffrax':
             diffrax_op = DiffraxJaxOp(one_compartment_diffrax, t0, t1, dt0, timepoints, time_mask_data.eval())
@@ -363,7 +382,58 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
             filtered_ode_sol = ode_sol[time_mask_data].flatten()
             sol = pm.Deterministic("sol", filtered_ode_sol)
         elif ode_method == 'scipy':
-            
+            bad_solution = False
+            #sol = []
+            if bad_solution:
+                sol = np.zeros_like(tp_data_eval)
+                for sub_idx, subject in enumerate(coords['subject']):
+                    subject_y0 = np.array([subject_init_conc_eval[sub_idx]])
+                    subject_model_params = theta_matrix_eval[sub_idx, :]
+                    subject_timepoints = tp_data_eval[sub_idx, :]
+                    subject_t0 = tp_data_eval[sub_idx, 0]
+                    subject_t1 = tp_data_eval[sub_idx, -1]
+                    ode_sol = solve_ode_scipy(subject_y0, subject_t0, subject_t1, subject_model_params, subject_timepoints )
+                    #sol.append(ode_sol)
+                    print(ode_sol.shape)
+                    sol[sub_idx, :] = ode_sol.flatten()
+                #sol = np.array(sol)
+                print(sol.shape)
+                print(time_mask_data_eval.shape)
+                #sol = np.copy(sol[time_mask_data_eval].flatten())
+                sol = sol.flatten()
+                time_mask_data_eval = time_mask_data_eval.flatten()
+                print(sol.shape)
+                print(time_mask_data_eval.shape)
+                #sol = np.copy(sol[time_mask_data_eval])#.flatten()
+                sol = pt.as_tensor(sol)
+                print(sol.shape)
+                sol = pm.Deterministic("sol", sol)
+            else:
+                sol = []
+                for sub_idx, subject in enumerate(coords['subject']):
+                    subject_y0 = [subject_init_conc[sub_idx]]
+                    subject_model_params = theta_matrix[sub_idx, :]
+                    subject_timepoints = tp_data[sub_idx, :]
+                    subject_t0 = tp_data[sub_idx, 0]
+                    subject_t1 = tp_data[sub_idx, -1]
+                    fwd_func = generate_subject_ivp_op(
+                        subject_init_conc, subject_t0=subject_t0,
+                        subject_t1=subject_t1,
+                        subject_timepoints = subject_timepoints
+                    )
+                    ode_sol = fwd_func(subject_model_params)
+                    print(ode_sol.shape.eval())
+                    #sol[sub_idx, :].set(ode_sol.flatten())
+                    sol.extend(ode_sol.flatten())
+                sol = np.array(sol)
+                #sol = sol.flatten()
+                time_mask_data_f = time_mask_data.flatten()
+                
+                sol = sol[time_mask_data_f]
+                #sol = pt.as_tensor(sol)
+                #print(sol.shape)
+                sol = pm.Deterministic("sol", sol)
+                    
         #time_mask_data_reshaped = time_mask_data.reshape(n_subjects, max_time_points, 1)
         #tmp_ode_sol = pm.Deterministic("tmp_sol", ode_sol)
 
