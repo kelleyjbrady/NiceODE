@@ -242,19 +242,20 @@ def solve_subject_odes(subject_indices, k_i, vd_i, y0_i, time_mask, timepoints):
         full_sol.extend(filtered_sol)
     return np.array(full_sol)
 
-def generate_subject_ivp_op(timepoints):
-    @as_op(itypes=[pt.dscalar, pt.dscalar,pt.dscalar, pt.dvector,], otypes=[pt.dvector])
+def generate_subject_ivp_op():
+    @as_op(itypes=[pt.dscalar, pt.dscalar,pt.dscalar, pt.dvector,pt.dvector,], otypes=[pt.dvector])
     def pytensor_forward_model_matrix(
         y0,
         t0,
         t1,
         theta,
+        timepoints,
         ):
         return solve_ode_scipy(y0,
                                t0,
                                t1,
                                theta,
-                               timepoints = timepoints )
+                               timepoints)
     return pytensor_forward_model_matrix
 
 
@@ -279,12 +280,13 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
     with pm.Model(coords=coords) as model:
         
         data_obs = pm.Data('dv', pm_df['DV'].values, dims = 'obs_id')
+        #print(data_obs.shape.eval())
         time_mask_data = pm.Data('time_mask', time_mask, dims = ('subject', 'time'))
         tp_data = pm.Data('timepoints', all_sub_tp, dims = ('subject', 'time'))
         tp_data_vector = pm.Data('timepoints_vector', timepoints.flatten(), dims = 'time')
         subject_init_conc = pm.Data('c0', pm_subj_df['DV'].values, dims = 'subject')
-        global_t0 = tp_data[0,0]
-        global_t1 = tp_data[0,-1]
+        #global_t0 = tp_data[0,0]
+        #global_t1 = tp_data[0,-1]
         #subject_tps = pm.MutableData('subject_tp', pm_subj_df['subj_tp'].values, dims = 'subject')
         #sub_tps = {}
         #for sub in coords['subject']:
@@ -324,29 +326,33 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
         pm_model_params = []
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
+            coeff_has_subject_intercept = row['subject_level_intercept']
+            
             #pop_coeff_init = 0
             #while pop_coeff_init == 0:
             #    pop_coeff_init = np.random.rand()
                 
             #ensure that neither init value is zero, I think that can make the graphviz fail
             population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = 0, sigma = 3)
-            
-            coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 3)
-            coeff_intercept_sigma[coeff_name] = pm.HalfNormal(f"{coeff_name}_intercept_sigma", sigma = 10)
-                    # Non-centered subject-level deviations (standard normal prior)
-            z_coeff[coeff_name] = pm.Normal(
-                f"z_{coeff_name}", mu=0, sigma=1, dims="subject"
-            )
+            if coeff_has_subject_intercept:
+                coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 3)
+                coeff_intercept_sigma[coeff_name] = pm.HalfNormal(f"{coeff_name}_intercept_sigma", sigma = 10)
+                        # Non-centered subject-level deviations (standard normal prior)
+                z_coeff[coeff_name] = pm.Normal(
+                    f"z_{coeff_name}", mu=0, sigma=1, dims="subject"
+                )
 
-            # Subject-level intercept (non-centered)
-            coeff_intercept_i[coeff_name] = pm.Deterministic(
-                f"{coeff_name}_intercept",
-                coeff_intercept_mu[coeff_name]
-                + z_coeff[coeff_name] * coeff_intercept_sigma[coeff_name],
-                dims="subject",
-            )
+                # Subject-level intercept (non-centered)
+                coeff_intercept_i[coeff_name] = pm.Deterministic(
+                    f"{coeff_name}_intercept",
+                    coeff_intercept_mu[coeff_name]
+                    + z_coeff[coeff_name] * coeff_intercept_sigma[coeff_name],
+                    dims="subject",
+                )
 
-            print(f"Shape of coeff_intercept_i[{coeff_name}]: {coeff_intercept_i[coeff_name].shape.eval()}")
+                print(f"Shape of coeff_intercept_i[{coeff_name}]: {coeff_intercept_i[coeff_name].shape.eval()}")
+            else:
+                coeff_intercept_i[coeff_name] = 0
             model_coeff = (population_coeff[coeff_name] + coeff_intercept_i[coeff_name])
             if coeff_name not in betas:
                 betas[coeff_name] = {}
@@ -392,7 +398,7 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
             bad_solution = False
             #sol = []
             if bad_solution:
-                sol = np.zeros_like(tp_data_eval)
+                sol = []
                 for sub_idx, subject in enumerate(coords['subject']):
                     subject_y0 = np.array([subject_init_conc_eval[sub_idx]])
                     subject_model_params = theta_matrix_eval[sub_idx, :]
@@ -402,46 +408,40 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
                     ode_sol = solve_ode_scipy(subject_y0, subject_t0, subject_t1, subject_model_params, subject_timepoints )
                     #sol.append(ode_sol)
                     print(ode_sol.shape)
-                    sol[sub_idx, :] = ode_sol.flatten()
+                    sol.append(ode_sol.flatten())
                 #sol = np.array(sol)
-                print(sol.shape)
-                print(time_mask_data_eval.shape)
-                #sol = np.copy(sol[time_mask_data_eval].flatten())
-                sol = sol.flatten()
-                time_mask_data_eval = time_mask_data_eval.flatten()
-                print(sol.shape)
-                print(time_mask_data_eval.shape)
-                #sol = np.copy(sol[time_mask_data_eval])#.flatten()
-                sol = pt.as_tensor(sol)
-                print(sol.shape)
+                sol = pt.concatenate(sol)
+                print(sol.shape.eval())
+                time_mask_data_f = time_mask_data.flatten()
+                
+                sol = sol[time_mask_data_f]
+                print(sol.shape.eval())
                 sol = pm.Deterministic("sol", sol)
             else:
-                n_subjects = len(coords['subject'])
-                n_timepoints = len(timepoints)  # or all_sub_tp.shape[1] if they are guaranteed same length
-                sol = np.zeros((n_subjects * n_timepoints,)) # pre-allocate!
+
                 sol_alt = []
-                sol_alt2 = []
+                
                 for sub_idx, subject in enumerate(coords['subject']):
                     subject_y0 = [subject_init_conc[sub_idx]]
                     print(subject_y0[0].shape.eval())
                     subject_model_params = theta_matrix[sub_idx, :]
                     print(subject_model_params.shape.eval())
                     #subject_timepoints = tp_data[sub_idx, :]
-                    subject_timepoints = timepoints
+                    subject_timepoints = tp_data_vector
                     print(subject_timepoints.shape)
-                    subject_t0 = tp_data[sub_idx, 0]
+                    subject_t0 = subject_timepoints[ 0]
                     print(subject_t0.shape.eval())
-                    subject_t1 = tp_data[sub_idx, -1]
+                    subject_t1 = subject_timepoints[-1]
                     print(subject_t1.shape.eval())
                     fwd_func = generate_subject_ivp_op(
-                        timepoints
+                        
                     )
                     ode_sol = fwd_func(
                         subject_y0[0],
                         subject_t0,
                         subject_t1,
                         subject_model_params,
-                        #subject_timepoints
+                        subject_timepoints
                     )
                     ode_sol = ode_sol.flatten()
                     sol_alt.append(ode_sol)
@@ -449,7 +449,7 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
                     #start_idx = sub_idx * n_timepoints
                     #end_idx = (sub_idx + 1) * n_timepoints
                     print(ode_sol.shape.eval())
-                    print(sol.shape)
+                    #print(sol.shape)
                     #print(np.array(ode_sol).shape)
                     #sol[sub_idx, :] = np.array(ode_sol)
                     #sol[start_idx:end_idx] = ode_sol
@@ -463,6 +463,7 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
                 time_mask_data_f = time_mask_data.flatten()
                 
                 sol = sol[time_mask_data_f]
+                print(sol.shape.eval())
                 #sol = pt.as_tensor(sol)
                 #print(sol.shape)
                 sol = pm.Deterministic("sol", sol)

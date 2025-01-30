@@ -96,6 +96,8 @@ class PopulationCoeffcient:
     optimization_history: list[np.float64] = field(default_factory=list)
     optimization_lower_bound: np.float64 = None
     optimization_upper_bound: np.float64 = None
+    subject_level_intercept:bool = False
+
 
     def __post_init__(self):
         self.optimization_init_val = (np.log(self.optimization_init_val) if self.log_transform_init_val
@@ -182,7 +184,8 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                 'population_coeff':True, 
                 'init_val':pop_coeff.optimization_init_val,
                 'allometric':False,
-                'allometric_norm_value':None
+                'allometric_norm_value':None,
+                'subject_level_intercept':pop_coeff.subject_level_intercept
             })
         #unpack the dep vars for the population coeffs
         for model_coeff in self.dep_vars:
@@ -196,7 +199,8 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                     'population_coeff':False, 
                     'init_val':coeff_dep_var.optimization_init_val,
                     'allometric': True if coeff_dep_var.model_method == 'allometric' else False,
-                    'allometric_norm_value':coeff_dep_var.allometric_norm_value
+                    'allometric_norm_value':coeff_dep_var.allometric_norm_value, 
+                    'subject_level_intercept':False
                 })
         self.init_vals_pd = pd.DataFrame(init_vals_pd)
         self.n_optimized_coeff = len(init_vals)
