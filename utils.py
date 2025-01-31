@@ -374,38 +374,92 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         conc_at_time_c = self.conc_at_time_col
         #data_out['conc_at_time_c'] = deepcopy(self.conc_at_time_col)
         #data_out['pk_model_function'] = deepcopy(self.pk_model_function)
-        pk_model_function = deepcopy(self.pk_model_function)
+        #pk_model_function = deepcopy(self.pk_model_function)
         verbose = self.verbose
         
-        population_coeff = deepcopy(self.population_coeff)
+        #population_coeff = deepcopy(self.population_coeff)
         #data_out['betas'] = deepcopy(self.betas)
         #data_out['time_c'] = deepcopy(self.time_col)
-        betas = deepcopy(self.betas)
+        #betas = deepcopy(self.betas)
         time_col = deepcopy(self.time_col)
-        subs = data[subject_id_c].unique()
-        n_subs = len(subs)
+        #subs = data[subject_id_c].unique()
+        self.y = np.array(data[conc_at_time_c].values, dtype = np.float64)
+        subject_data = data.drop_duplicates(subset=subject_id_c, keep = 'first').copy()
+        self.subject_y0 = np.array(subject_data[conc_at_time_c].values, dtype = np.float64)
+        #n_subs = len(subs)
         init_vals = self.init_vals_pd.copy()
         init_vals['init_val'] = init_vals['init_val'].fillna(0.0)
         model_params = init_vals.loc[init_vals['population_coeff'], :]
+        self.n_population_coeff = len(model_params)
         model_param_dep_vars = init_vals.loc[init_vals['population_coeff'] == False, :]
-        seen_coeff = []
-        betas = pd.DataFrame()
+        data['tmp'] = 1
+        time_mask_df = data.pivot( index = subject_id_c,
+                                  columns = time_col,
+                                  values = 'tmp').fillna(0)
+        self.time_mask = time_mask_df.to_numpy().astype(bool)
+        self.global_tp = np.array(time_mask_df.columns.values, dtype = np.float64)
+        self.global_t0 = self.global_tp[0]
+        self.global_tf = self.global_tp[-1]
+        self.global_tspan = np.array([self.global_t0, self.global_tf], dtype=np.float64)
+        betas = pd.DataFrame( )
         beta_data = pd.DataFrame()
         for idx, row in model_param_dep_vars.iterrows():
             coeff_name = row['model_coeff']
             beta_name = row['model_coeff_dep_var']
-            betas[(coeff_name, beta_name)] = row['init_val']
-            beta_data[(coeff_name, beta_name)] = data[beta_name].values
-        pop_coeff = pd.DataFrame()
+            col = (coeff_name, beta_name)
+            if col not in betas.columns:
+                betas[col] = [np.nan]
+                betas[col] = betas[col].astype(pd.Float64Dtype)
+            betas[col] = [row['init_val']]
+            if col not in beta_data.columns:
+                betas[col] = np.repeat(np.nan, len(subject_data))
+                betas[col] = betas[col].astype(pd.Float64Dtype)
+            beta_data[col] = subject_data[beta_name].values
+        pop_coeffs = pd.DataFrame()
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
-            pop_coeff[coeff_name] = row['init_val']
+            if coeff_name not in pop_coeffs.columns:
+                pop_coeffs[coeff_name] = [np.nan]
+                pop_coeffs[coeff_name] = pop_coeffs[coeff_name].astype(pd.Float64Dtype)
+            pop_coeffs[coeff_name] = [row['init_val']]
             #betas[coeff_name] = row['init_val']
-        return pop_coeff, betas, beta_data
+        betas.columns = pd.MultiIndex.from_tuples(betas.columns)
+        beta_data.columns = pd.MultiIndex.from_tuples(beta_data.columns)
+        self.init_pop_coeffs = deepcopy(pop_coeffs)
+        self.init_betas = deepcopy(betas)
+        return pop_coeffs.copy(), betas.copy(), beta_data.copy()
     
-   # def _predict_vectorized(self, pop_coeff, betas, beta_data):
-   #     for c in pop_coeff.columns:
-   #         theta = beta_data
+    def _generate_pk_model_coeff_vectorized(self, pop_coeffs, betas, beta_data):
+        model_coeffs = pd.DataFrame()
+        for c in pop_coeffs.columns:
+            pop_coeff = pop_coeffs[c].values
+            theta = betas[c].values.flatten()
+            X = beta_data[c].values
+            out = np.exp((X @ theta) + pop_coeff) + 1e-6
+            if c not in model_coeffs.columns:
+                model_coeffs[c] = np.repeat(np.nan, len(out))
+                model_coeffs[c] = model_coeffs[c].astype(pd.Float64Dtype)
+            model_coeffs[c] = out
+        return model_coeffs.copy()
+    
+    def _solve_ivp(self,model_coeffs,parallel = False, timepoints = None):
+        if parallel:
+            pass 
+        else:
+            sol = []
+            for idx, row in model_coeffs.iterrows():
+                initial_conc = self.subject_y0[idx]
+                ode_sol = solve_ivp(self.pk_model_function,
+                                self.global_tspan,
+                            np.array([initial_conc], dtype = np.float64),
+                            t_eval=self.global_tp if timepoints is None else timepoints,
+                            args=(*row, 1 ))
+                sol.append(ode_sol.y[0])
+            sol = np.concatenate(sol)
+            if timepoints is None:
+                sol = sol[self.time_mask.flatten()]
+        return sol
+
             
     
     def _predict_inner(self, data_out):
@@ -504,10 +558,45 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         #sse = np.sum(residuals**2)
         error = self.loss_function(data[self.conc_at_time_col], preds, **self.loss_params)
         return error
+    
+    def _objective_function2(self, params, beta_data):
+        self.objective_calls = self.objective_calls + 1
+        if self.objective_calls % 100 == 0:
+            print(self.objective_calls)
+        pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), columns = self.init_pop_coeffs.columns)
+        thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), columns = self.init_betas.columns)
+        model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
+        preds = self._solve_ivp(model_coeffs)
+        error = self.loss_function(self.y, preds, **self.loss_params)
+        return error
+        
+        
+    def fit2(self, data, parallel = False, parallel_n_jobs = -1 , warm_start = False, checkpoint_filename='check_test.jb'):
+        pop_coeffs, betas, beta_data = self._assemble_pred_matrices(data)
+        init_params = np.concatenate([pop_coeffs.values, betas.values], axis = 1, dtype=np.float64).flatten()
+        self.objective_calls = 0
+        self.fit_result_ = optimize_with_checkpoint_joblib(self._objective_function2,
+                                                           init_params,
+                                                           n_checkpoint=5,
+                                                           checkpoint_filename=checkpoint_filename,
+                                                           args=(beta_data,),
+                                                           warm_start=warm_start,
+                                                           tol = self.optimzer_tol,
+                                                           bounds=self.bounds
+                                                           )
+        return deepcopy(self)
+
 
     def fit(self, data, parallel = False, parallel_n_jobs = -1 , warm_start = False, checkpoint_filename='check_test.jb'):
         # bounds = [(None, None) for i in range(len(self.dep_vars) + len(self.population_coeff))]
-        objective_function = partial(self._objective_function, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
+        self.objective_calls = 0
+        def objective_function_wrapper(*args, **kwargs):  # Create a wrapper
+            self.objective_calls += 1
+            if self.objective_calls % 100 == 0:
+                print(self.objective_calls)
+            return self._objective_function(*args, **kwargs)
+        
+        objective_function = partial(objective_function_wrapper, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
         self.fit_result_ = optimize_with_checkpoint_joblib(objective_function,
                                                            self.init_vals,
                                                            n_checkpoint=5,
@@ -801,7 +890,7 @@ def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename,
 
         kwargs['callback'] = combined_callback
 
-    result = minimize(func, x0, *args, tol = tol, **kwargs)
+    result = minimize(func, x0, *args, tol = tol, options= {'disp':True}, **kwargs, )
 
     # Remove checkpoint file at end.
     # try:
