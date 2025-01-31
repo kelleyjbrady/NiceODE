@@ -367,7 +367,47 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             data_out['subject_data'] = deepcopy(subject_data)
             data_out['initial_conc'] = deepcopy(initial_conc)
             yield deepcopy(data_out)
-
+    
+    def _assemble_pred_matrices(self, data):
+        subject_id_c = self.groupby_col
+        #data_out['subject_id_c'] = deepcopy(self.groupby_col)
+        conc_at_time_c = self.conc_at_time_col
+        #data_out['conc_at_time_c'] = deepcopy(self.conc_at_time_col)
+        #data_out['pk_model_function'] = deepcopy(self.pk_model_function)
+        pk_model_function = deepcopy(self.pk_model_function)
+        verbose = self.verbose
+        
+        population_coeff = deepcopy(self.population_coeff)
+        #data_out['betas'] = deepcopy(self.betas)
+        #data_out['time_c'] = deepcopy(self.time_col)
+        betas = deepcopy(self.betas)
+        time_col = deepcopy(self.time_col)
+        subs = data[subject_id_c].unique()
+        n_subs = len(subs)
+        init_vals = self.init_vals_pd.copy()
+        init_vals['init_val'] = init_vals['init_val'].fillna(0.0)
+        model_params = init_vals.loc[init_vals['population_coeff'], :]
+        model_param_dep_vars = init_vals.loc[init_vals['population_coeff'] == False, :]
+        seen_coeff = []
+        betas = pd.DataFrame()
+        beta_data = pd.DataFrame()
+        for idx, row in model_param_dep_vars.iterrows():
+            coeff_name = row['model_coeff']
+            beta_name = row['model_coeff_dep_var']
+            betas[(coeff_name, beta_name)] = row['init_val']
+            beta_data[(coeff_name, beta_name)] = data[beta_name].values
+        pop_coeff = pd.DataFrame()
+        for idx, row in model_params.iterrows():
+            coeff_name = row['model_coeff']
+            pop_coeff[coeff_name] = row['init_val']
+            #betas[coeff_name] = row['init_val']
+        return pop_coeff, betas, beta_data
+    
+   # def _predict_vectorized(self, pop_coeff, betas, beta_data):
+   #     for c in pop_coeff.columns:
+   #         theta = beta_data
+            
+    
     def _predict_inner(self, data_out):
         subject_data = data_out['subject_data']
         initial_conc = data_out['initial_conc']
