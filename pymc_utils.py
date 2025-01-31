@@ -333,7 +333,7 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
             #    pop_coeff_init = np.random.rand()
                 
             #ensure that neither init value is zero, I think that can make the graphviz fail
-            population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = 0, sigma = 3)
+            population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = row['init_val'], sigma = 1)
             if coeff_has_subject_intercept:
                 coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 3)
                 coeff_intercept_sigma[coeff_name] = pm.HalfNormal(f"{coeff_name}_intercept_sigma", sigma = 10)
@@ -352,7 +352,7 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
 
                 print(f"Shape of coeff_intercept_i[{coeff_name}]: {coeff_intercept_i[coeff_name].shape.eval()}")
             else:
-                coeff_intercept_i[coeff_name] = 0
+                coeff_intercept_i[coeff_name] = pt.full((len(coords['subject']),), 0.0)
             model_coeff = (population_coeff[coeff_name] + coeff_intercept_i[coeff_name])
             if coeff_name not in betas:
                 betas[coeff_name] = {}
@@ -364,7 +364,9 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
                 #print(f"Shape of pm_subj_df[{beta_name}][{sub_idx}]: {pm_subj_df[beta_name][sub_idx].shape}")
                 model_coeff = (model_coeff + (betas[coeff_name][beta_name] * subject_data[coeff_name][beta_name]))
             pm_model_params.append(
-                pm.Deterministic(f"{coeff_name}_i", pm.math.exp(model_coeff), dims = 'subject')
+                pm.Deterministic(f"{coeff_name}_i",
+                                 pm.math.exp(model_coeff),
+                                 dims = 'subject' )
             )
         
         
