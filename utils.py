@@ -22,6 +22,7 @@ import pymc as pm
 import arviz as az
 import pytensor
 import pytensor.tensor as pt
+import inspect
 
 def softplus(x):
     return np.log(1 + np.exp(x))
@@ -113,7 +114,7 @@ class ObjectiveFunctionColumn:
 @dataclass
 class PopulationCoeffcient:
     coeff_name: str
-    optimization_init_val: np.float64
+    optimization_init_val: np.float64 = None
     log_transform_init_val: bool = True
     optimization_history: list[np.float64] = field(default_factory=list)
     optimization_lower_bound: np.float64 = None
@@ -122,6 +123,8 @@ class PopulationCoeffcient:
 
 
     def __post_init__(self):
+        if self.optimization_init_val is None:
+            self.optimization_init_val = np.random.rand() + 1e-6
         self.optimization_init_val = (np.log(self.optimization_init_val) if self.log_transform_init_val
                                       else self.optimization_init_val)
 
@@ -155,6 +158,12 @@ def huber_loss(y_true, y_pred, delta=1.0):
     resid = y_pred - y_true
     loss = huber(delta, resid)
     return np.mean(loss)
+
+def get_function_args(func):
+    signature = inspect.signature(func)
+    params = signature.parameters
+    arg_names = [param.name.lower() for param in params.values()]
+    return arg_names
 class OneCompartmentModel(RegressorMixin, BaseEstimator):
 
     def __init__(
@@ -170,14 +179,26 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         loss_function = mean_squared_error,
         loss_params = {},
         optimizer_tol = None,
-        verbose=False
+        verbose=False, 
+        ode_solver_method = 'RK45',
 
     ):
+        dep_vars = {} if dep_vars is None else dep_vars
+        population_coeff = [] if population_coeff is None else population_coeff
+        self.ode_solver_method = ode_solver_method
         self.groupby_col = groupby_col
         self.conc_at_time_col = conc_at_time_col
         self.time_col = time_col
         self.verbose = verbose
         self.pk_model_function = pk_model_function
+        self.pk_args_diffeq = get_function_args(pk_model_function)[2:]
+        for arg_name in self.pk_args_diffeq:
+            if len(population_coeff) == 0:
+                population_coeff.append(PopulationCoeffcient(arg_name))
+            else:
+                assigned_args = [obj.coeff_name for obj in population_coeff]
+                if arg_name not in assigned_args:
+                    population_coeff.append(PopulationCoeffcient(arg_name))
         self.loss_function = loss_function
         # not sure if the section below needs to be in two places
         for coef_obj in population_coeff:
@@ -445,8 +466,9 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                 pop_coeffs[coeff_name] = pop_coeffs[coeff_name].astype(pd.Float64Dtype())
             pop_coeffs[coeff_name] = [row['init_val']]
             #betas[coeff_name] = row['init_val']
-        betas.columns = pd.MultiIndex.from_tuples(betas.columns)
-        beta_data.columns = pd.MultiIndex.from_tuples(beta_data.columns)
+        betas.columns = pd.MultiIndex.from_tuples(betas.columns) if len(betas.columns) > 0 else betas.columns
+        beta_data.columns = (pd.MultiIndex.from_tuples(beta_data.columns)
+                                if len(beta_data.columns) > 0 else beta_data.columns)
         self.init_pop_coeffs = deepcopy(pop_coeffs)
         self.init_betas = deepcopy(betas)
         return pop_coeffs.copy(), betas.copy(), beta_data.copy()
@@ -455,20 +477,24 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         model_coeffs = pd.DataFrame(dtype = pd.Float64Dtype())
         for c in pop_coeffs.columns:
             pop_coeff = pop_coeffs[c].values
-            theta = betas[c].values.flatten()
-            X = beta_data[c].values
+            theta = betas[c].values.flatten() if c in betas.columns else np.zeros_like(pop_coeff)
+            X = beta_data[c].values if c in beta_data.columns else np.zeros_like(pop_coeff)
             out = np.exp((X @ theta) + pop_coeff) + 1e-6
             if c not in model_coeffs.columns:
                 model_coeffs[c] = np.repeat(np.nan, len(out))
                 model_coeffs[c] = model_coeffs[c].astype(pd.Float64Dtype())
             model_coeffs[c] = out
+        if len(model_coeffs) != len(self.subject_y0):
+            tmp_coeff = np.tile(model_coeffs.values, (len(self.subject_y0), 1))
+            model_coeffs = pd.DataFrame(tmp_coeff, columns = model_coeffs.columns)
         return model_coeffs.copy()
     
-    def _solve_ivp_parallel(self, y0, args, tspan = None, teval = None, fun = None):
+    def _solve_ivp_parallel(self, y0, args, tspan = None, teval = None, fun = None, method = None):
         return solve_ivp(fun,
                                 tspan,
                             np.array([y0], dtype = np.float64),
                             t_eval=teval,
+                            method = method,
                             args=(*args,))
         
     
@@ -479,6 +505,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                                  fun = self.pk_model_function,
                                  tspan = self.global_tspan,
                                  teval = self.global_tp if timepoints is None else timepoints,
+                                 method = self.ode_solver_method,
                                  )
             sol = Parallel(n_jobs=parallel_n_jobs)(delayed(partial_solve_ivp)(y0, idx_row[1]) for idx_row, y0 in iter_obj)
             sol = [sol_i.y[0] for sol_i in sol]
@@ -490,6 +517,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                                 self.global_tspan,
                             np.array([initial_conc], dtype = np.float64),
                             t_eval=self.global_tp if timepoints is None else timepoints,
+                            method = self.ode_solver_method,
                             args=(*row,))
                 sol.append(ode_sol.y[0])
         sol = np.concatenate(sol)
@@ -617,7 +645,11 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         
     def fit2(self, data, parallel = False, parallel_n_jobs = -1 , warm_start = False, checkpoint_filename='check_test.jb'):
         pop_coeffs, betas, beta_data = self._assemble_pred_matrices(data)
-        init_params = np.concatenate([pop_coeffs.values, betas.values], axis = 1, dtype=np.float64).flatten()
+        if len(betas.values) > 0:
+            init_params = [pop_coeffs.values, betas.values]
+            init_params = np.concatenate(init_params, axis = 1, dtype=np.float64).flatten()
+        else:
+            init_params = pop_coeffs.values.flatten().astype(np.float64)
         objective_function = partial(self._objective_function2, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
         self.fit_result_ = optimize_with_checkpoint_joblib(objective_function,
                                                            init_params,

@@ -1,7 +1,7 @@
 from numba import njit
 
 
-class OneCompartmentDiffEq(object):
+class OneCompartmentFODiffEq(object):
     def __init__(self):
         self.params = {'cl': {
             'name': 'clearance',
@@ -13,11 +13,11 @@ class OneCompartmentDiffEq(object):
         }
         }
     def diff_eq(self):  
-        return numba_one_compartment_model
+        return first_order_one_compartment_model
 
 
 @njit
-def numba_one_compartment_model(t, y, cl, vd):
+def first_order_one_compartment_model2(t, y, cl, vd):
     """
     Defines the differential equation for a one-compartment pharmacokinetic model.
 
@@ -38,4 +38,22 @@ def numba_one_compartment_model(t, y, cl, vd):
     """
     C = y[0]  # Extract concentration from the state vector
     dCdt = -(cl/vd) * C  # Calculate the rate of change
+    return dCdt
+
+
+@njit
+def first_order_one_compartment_model(t, y, k):
+   
+    C = y[0]  # Extract concentration from the state vector
+    dCdt = -(k) * C  # Calculate the rate of change
+    return dCdt
+
+@njit
+def mm_one_compartment_model(t, C, Vmax, Km):
+    dCdt = - (Vmax * C) / (Km + C)
+    return dCdt
+
+@njit 
+def parallel_elim_one_compartment_model(t, C, K, Vmax, Km):
+    dCdt = -K * C - (Vmax * C) / (Km + C)
     return dCdt
