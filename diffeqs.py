@@ -17,7 +17,7 @@ class OneCompartmentDiffEq(object):
 
 
 @njit
-def numba_one_compartment_model(t, y, params):
+def numba_one_compartment_model(t, y, cl, vd):
     """
     Defines the differential equation for a one-compartment pharmacokinetic model.
 
@@ -36,7 +36,6 @@ def numba_one_compartment_model(t, y, params):
     Returns:
         float: The rate of change of drug concentration (dC/dt).
     """
-    cl, vd = params
     C = y[0]  # Extract concentration from the state vector
     dCdt = -(cl/vd) * C  # Calculate the rate of change
     return dCdt

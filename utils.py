@@ -469,7 +469,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                                 tspan,
                             np.array([y0], dtype = np.float64),
                             t_eval=teval,
-                            args=(*args, 1 ))
+                            args=(*args,))
         
     
     def _solve_ivp(self,model_coeffs,parallel = False,parallel_n_jobs = None, timepoints = None):
@@ -490,7 +490,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                                 self.global_tspan,
                             np.array([initial_conc], dtype = np.float64),
                             t_eval=self.global_tp if timepoints is None else timepoints,
-                            args=(*row, 1 ))
+                            args=(*row,))
                 sol.append(ode_sol.y[0])
         sol = np.concatenate(sol)
         if timepoints is None:
@@ -543,14 +543,14 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                 warnings.simplefilter("error", RuntimeWarning)
                 sol = solve_ivp(pk_model_function, np.array([subject_data[time_c].min(), subject_data[time_c].max()], dtype = np.float64),
                             np.array([initial_conc], dtype = np.float64),
-                            t_eval=np.array(subject_data[time_c], dtype = np.float64), args=(*subject_coeff, 1 ))
+                            t_eval=np.array(subject_data[time_c], dtype = np.float64), args=(*subject_coeff,))
         except (ZeroDivisionError, RuntimeWarning) as e:
             self.ivp_error_params_ = {
             'f':deepcopy(pk_model_function),
             'tspan': np.array([subject_data[time_c].min(), subject_data[time_c].max()]),
             'init_conc':np.array([initial_conc]),
             't_eval':np.array(subject_data[time_c]), 
-            'args': "args=(*subject_coeff, 1 )",
+            'args': "args=(*subject_coeff,)",
             'args0':subject_coeff
             
             }
