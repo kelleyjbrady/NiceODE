@@ -46,14 +46,15 @@ def first_order_one_compartment_model(t, y, k):
    
     C = y[0]  # Extract concentration from the state vector
     dCdt = -(k) * C  # Calculate the rate of change
-    return dCdt
+    return [dCdt]
 
 @njit
-def mm_one_compartment_model(t, C, Vmax, Km):
+def mm_one_compartment_model(t, y, Vmax, Km):
+    C = y[0]
     dCdt = - (Vmax * C) / (Km + C)
-    return dCdt
+    return [dCdt]
 
 @njit 
 def parallel_elim_one_compartment_model(t, C, K, Vmax, Km):
     dCdt = -K * C - (Vmax * C) / (Km + C)
-    return dCdt
+    return [dCdt]
