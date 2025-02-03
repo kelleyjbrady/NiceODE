@@ -450,7 +450,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         return pop_coeffs.copy(), betas.copy(), beta_data.copy()
     
     def _generate_pk_model_coeff_vectorized(self, pop_coeffs, betas, beta_data):
-        model_coeffs = pd.DataFrame()
+        model_coeffs = pd.DataFrame(dtype = pd.Float64Dtype())
         for c in pop_coeffs.columns:
             pop_coeff = pop_coeffs[c].values
             theta = betas[c].values.flatten()
@@ -601,7 +601,17 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
         error = self.loss_function(self.y, preds, **self.loss_params)
         return error
-        
+    
+    def predict2(self, data, parallel = None, parallel_n_jobs = None, timepoints = None ):
+        if self.fit_result_ is None:
+            raise ValueError("The Model must be fit before prediction")
+        params = self.fit_result_['x']
+        pop_coeffs, _, beta_data = self._assemble_pred_matrices(data)
+        pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), columns = self.init_pop_coeffs.columns)
+        thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), columns = self.init_betas.columns)
+        model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
+        preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs, timepoints = timepoints)
+        return preds
         
     def fit2(self, data, parallel = False, parallel_n_jobs = -1 , warm_start = False, checkpoint_filename='check_test.jb'):
         pop_coeffs, betas, beta_data = self._assemble_pred_matrices(data)
