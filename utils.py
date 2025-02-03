@@ -35,6 +35,8 @@ def plot_subject_levels(df: pd.DataFrame, x='TIME', y='DV', subject='SUBJID', ax
     df[y] = df[y].astype(pd.Float32Dtype())
     df[x] = df[x].astype(pd.Float32Dtype())
     sns.lineplot(data=df, x=x, y=y, hue=subject, ax=ax)
+    
+    
 
 @njit
 def numba_one_compartment_model(t, y, k, Vd, dose):
