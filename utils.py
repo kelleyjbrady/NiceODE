@@ -186,6 +186,13 @@ def determine_ode_output_size(ode_func):
 
     except (TypeError, OSError):
         return None
+    
+def safe_signed_log(array):
+    s = np.zeros_like(array, dtype=np.float64)  # Initialize with zeros
+    non_zero_mask = array != 0
+    s[non_zero_mask] = np.sign(array[non_zero_mask]) * np.log(np.abs(array[non_zero_mask]))
+    return s
+
 
 class OneCompartmentModel(RegressorMixin, BaseEstimator):
 
@@ -486,6 +493,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         for idx, row in model_param_dep_vars.iterrows():
             coeff_name = row['model_coeff']
             beta_name = row['model_coeff_dep_var']
+            beta_is_allometric = row['allometric']
             col = (coeff_name, beta_name)
             if col not in betas.columns:
                 betas[col] = [np.nan]
@@ -494,7 +502,11 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             if col not in beta_data.columns:
                 beta_data[col] = np.repeat(np.nan, len(subject_data))
                 beta_data[col] = betas[col].astype(pd.Float64Dtype())
-            beta_data[col] = subject_data[beta_name].values
+            if beta_is_allometric:
+                beta_data_col = safe_signed_log(subject_data[beta_name].values / row['allometric_norm_value'])
+            else:
+                beta_data_col = subject_data[beta_name].values
+            beta_data[col] = beta_data_col
         pop_coeffs = pd.DataFrame()
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
@@ -537,29 +549,34 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
     
     def _solve_ivp(self,model_coeffs,parallel = False,parallel_n_jobs = None, timepoints = None):
         iter_obj =  zip(model_coeffs.iterrows(), self.ode_t0_vals.iterrows())
-        
-        if parallel:
-            partial_solve_ivp = partial(self._solve_ivp_parallel,
+        partial_solve_ivp = partial(self._solve_ivp_parallel,
                                  fun = self.pk_model_function,
                                  tspan = self.global_tspan,
                                  teval = self.global_tp if timepoints is None else timepoints,
                                  method = self.ode_solver_method,
                                  )
-            sol = Parallel(n_jobs=parallel_n_jobs)(delayed(partial_solve_ivp)(ode_inits_idx_row[1].values, coeff_idx_row[1])
+        if parallel:
+            
+            sol = Parallel(n_jobs=parallel_n_jobs)(delayed(partial_solve_ivp)(ode_inits_idx_row[1], coeff_idx_row[1])
                                                    for coeff_idx_row, ode_inits_idx_row in iter_obj)
             sol = [sol_i.y[0] for sol_i in sol]
         else:
-            sol = []
-            for coeff_idx_row, ode_inits_idx_row in iter_obj:
-                coeff_row = coeff_idx_row[1]
-                ode_inits = ode_inits_idx_row[1].values
-                ode_sol = solve_ivp(self.pk_model_function,
-                                self.global_tspan,
-                            ode_inits,
-                            t_eval=self.global_tp if timepoints is None else timepoints,
-                            method = self.ode_solver_method,
-                            args=(*coeff_row,))
-                sol.append(ode_sol.y[0])
+            list_comp = False
+            if list_comp:
+                sol = [partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1]).y[0] 
+                       for coeff_idx_row, ode_inits_idx_row in iter_obj]
+            else:
+                sol = []
+                for coeff_idx_row, ode_inits_idx_row in iter_obj:
+                    coeff_idx_row = coeff_idx_row[1]
+                    ode_inits = ode_inits_idx_row[1]
+                    ode_sol = solve_ivp(self.pk_model_function,
+                                    self.global_tspan,
+                                ode_inits,
+                                t_eval=self.global_tp if timepoints is None else timepoints,
+                                method = self.ode_solver_method,
+                                args=(*coeff_idx_row,))
+                    sol.append(ode_sol.y[0])
         sol = np.concatenate(sol)
         if timepoints is None:
             sol = sol[self.time_mask.flatten()]
