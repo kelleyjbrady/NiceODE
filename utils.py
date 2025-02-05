@@ -23,6 +23,7 @@ import arviz as az
 import pytensor
 import pytensor.tensor as pt
 import inspect
+import ast
 
 def softplus(x):
     return np.log(1 + np.exp(x))
@@ -146,6 +147,10 @@ class ObjectiveFunctionBeta:
         if self.model_method not in allowed_methods:
             raise ValueError(f"""Method '{self.model_method.__name__}' is not an allowed method. Allowed methods are: {
                              [method.__name__ for method in allowed_methods]}""")
+            
+@dataclass
+class ODEInitVals:
+    column_name: str
 
 def sum_of_squares_loss(y_true, y_pred):
     return np.sum((y_true - y_pred)**2)
@@ -164,14 +169,34 @@ def get_function_args(func):
     params = signature.parameters
     arg_names = [param.name.lower() for param in params.values()]
     return arg_names
+
+def determine_ode_output_size(ode_func):
+    try:
+        source = inspect.getsource(ode_func)
+        tree = ast.parse(source)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Return):
+                if isinstance(node.value, ast.List):
+                    return len(node.value.elts)  # Return the length of the tuple
+                else:
+                    return 0  # Not a tuple, implies a scalar (or single value)
+
+        return None  # No return statement found
+
+    except (TypeError, OSError):
+        return None
+
 class OneCompartmentModel(RegressorMixin, BaseEstimator):
 
     def __init__(
         self,
         groupby_col: str = 'SUBJID',
         conc_at_time_col: str = 'DV',
+        dose_col:str = None,
         time_col='TIME',
         pk_model_function=one_compartment_model,
+        ode_t0_cols: List[ODEInitVals] = None,
         population_coeff: List[PopulationCoeffcient] = [
             PopulationCoeffcient('k', 0.6), PopulationCoeffcient('vd', 2.0)],
         dep_vars: Dict[str, ObjectiveFunctionColumn] = {'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
@@ -186,6 +211,8 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         dep_vars = {} if dep_vars is None else dep_vars
         population_coeff = [] if population_coeff is None else population_coeff
         self.ode_solver_method = ode_solver_method
+        self.ode_output_size = determine_ode_output_size(pk_model_function)
+        self.ode_t0_cols = self._validate_ode_to_vals_size(ode_t0_cols)
         self.groupby_col = groupby_col
         self.conc_at_time_col = conc_at_time_col
         self.time_col = time_col
@@ -214,7 +241,14 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.bounds = self._unpack_upper_lower_bounds()
         self.loss_params = loss_params
         self.optimzer_tol = optimizer_tol
-
+    
+    def _validate_ode_to_vals_size(self, ode_t0_vals):
+        size_tmp = len(ode_t0_vals)
+        if size_tmp != self.ode_output_size:
+            raise ValueError(f"n={size_tmp} ODE t0 args were provided (`ode_t0_vals`) but the provided ODE (`pk_model_function`) requires n = {self.ode_output_size}")
+        else:
+            return ode_t0_vals
+        
     def _unpack_init_vals(self,):
         #unpack the population coeffs
         init_vals = [
@@ -429,6 +463,9 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.y = np.array(data[conc_at_time_c].values, dtype = np.float64)
         subject_data = data.drop_duplicates(subset=subject_id_c, keep = 'first').copy()
         self.subject_y0 = np.array(subject_data[conc_at_time_c].values, dtype = np.float64)
+        
+        ode_init_val_cols = [i.column_name for i in self.ode_t0_cols]
+        self.ode_t0_vals = subject_data[ode_init_val_cols].reset_index(drop = True).copy()
         #n_subs = len(subs)
         init_vals = self.init_vals_pd.copy()
         init_vals['init_val'] = init_vals['init_val'].fillna(0.0)
@@ -492,33 +529,36 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
     def _solve_ivp_parallel(self, y0, args, tspan = None, teval = None, fun = None, method = None):
         return solve_ivp(fun,
                                 tspan,
-                            np.array([y0], dtype = np.float64),
+                            y0,
                             t_eval=teval,
                             method = method,
                             args=(*args,))
         
     
     def _solve_ivp(self,model_coeffs,parallel = False,parallel_n_jobs = None, timepoints = None):
+        iter_obj =  zip(model_coeffs.iterrows(), self.ode_t0_vals.iterrows())
+        
         if parallel:
-            iter_obj =  zip(model_coeffs.iterrows(), self.subject_y0)
             partial_solve_ivp = partial(self._solve_ivp_parallel,
                                  fun = self.pk_model_function,
                                  tspan = self.global_tspan,
                                  teval = self.global_tp if timepoints is None else timepoints,
                                  method = self.ode_solver_method,
                                  )
-            sol = Parallel(n_jobs=parallel_n_jobs)(delayed(partial_solve_ivp)(y0, idx_row[1]) for idx_row, y0 in iter_obj)
+            sol = Parallel(n_jobs=parallel_n_jobs)(delayed(partial_solve_ivp)(ode_inits_idx_row[1].values, coeff_idx_row[1])
+                                                   for coeff_idx_row, ode_inits_idx_row in iter_obj)
             sol = [sol_i.y[0] for sol_i in sol]
         else:
             sol = []
-            for idx, row in model_coeffs.iterrows():
-                initial_conc = self.subject_y0[idx]
+            for coeff_idx_row, ode_inits_idx_row in iter_obj:
+                coeff_row = coeff_idx_row[1]
+                ode_inits = ode_inits_idx_row[1].values
                 ode_sol = solve_ivp(self.pk_model_function,
                                 self.global_tspan,
-                            np.array([initial_conc], dtype = np.float64),
+                            ode_inits,
                             t_eval=self.global_tp if timepoints is None else timepoints,
                             method = self.ode_solver_method,
-                            args=(*row,))
+                            args=(*coeff_row,))
                 sol.append(ode_sol.y[0])
         sol = np.concatenate(sol)
         if timepoints is None:

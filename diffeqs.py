@@ -38,7 +38,7 @@ def first_order_one_compartment_model2(t, y, cl, vd):
     """
     C = y[0]  # Extract concentration from the state vector
     dCdt = -(cl/vd) * C  # Calculate the rate of change
-    return dCdt
+    return [dCdt]
 
 
 @njit
@@ -54,7 +54,15 @@ def mm_one_compartment_model(t, y, Vmax, Km):
     dCdt = - (Vmax * C) / (Km + C)
     return [dCdt]
 
-@njit 
+#@njit 
 def parallel_elim_one_compartment_model(t, C, K, Vmax, Km):
-    dCdt = -K * C - (Vmax * C) / (Km + C)
+    dCdt = (-K * C) - ((Vmax * C) / (Km + C))
     return [dCdt]
+
+def one_compartment_absorption(t, y, ka, cl, vd):
+    """One-compartment model with first-order absorption and elimination."""
+    C, A = y
+    dCdt = ka * A - (cl/vd) * C
+    dAdt = -ka * A
+    return [dCdt, dAdt]
+
