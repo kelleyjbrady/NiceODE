@@ -56,7 +56,19 @@ def estimate_subject_slope_cv(df, time_col = 'TIME', conc_col = 'CONC_ln', id_co
                     'max_conc':sub_max_conc, 
                     'max_conc_time':max_time,
                 })
-    return pd.DataFrame(results)
+    df_out = pd.DataFrame(results)
+    df_out['abs_cv'] = np.abs(df_out['start_idx_slope_cv'])
+    df_out['cv_sign'] = np.sign(df_out['start_idx_slope_cv'])
+    signs = df_out.groupby('start_time')['cv_sign'].mean().reset_index().rename(columns = {'cv_sign':'start_time_mean_cv_sign'})
+    start_idx_cv_mean = df_out.groupby('start_time')['abs_cv'].mean().reset_index().rename(columns = {'abs_cv':'start_time_mean_abs_cv'})
+    start_idx_cv_std = df_out.groupby('start_time')['abs_cv'].std().reset_index().rename(columns = {'abs_cv':'start_time_std_mean_cv'})
+    df_out = (df_out
+            .merge(signs, how = 'left', on = 'start_time')
+            .merge(start_idx_cv_mean, how = 'left', on = 'start_time')
+            .merge(start_idx_cv_std, how = 'left', on = 'start_time')
+            )
+    
+    return df_out
 
 def identify_low_conc_zones(dfs:List[pd.DataFrame], low_frac = 0.01):
     subject_zero_zones = []
