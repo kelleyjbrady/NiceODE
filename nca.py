@@ -3,6 +3,7 @@ import numpy as np
 from scipy.stats import linregress
 from utils import safe_signed_log
 from sklearn.metrics import auc
+from typing import List
 
 
 def estimate_subject_slope_cv(df, time_col = 'TIME', conc_col = 'CONC_ln', id_col = 'ID'):
@@ -56,6 +57,51 @@ def estimate_subject_slope_cv(df, time_col = 'TIME', conc_col = 'CONC_ln', id_co
                     'max_conc_time':max_time,
                 })
     return pd.DataFrame(results)
+
+def identify_low_conc_zones(dfs:List[pd.DataFrame], low_frac = 0.01):
+    subject_zero_zones = []
+    for tmp in dfs:
+        max_auc = tmp['auc_per_time'].max()
+        #f1 = tmp['auc_per_time'] < max_auc*.01
+        tmp.loc[tmp['auc_per_time'] < max_auc*low_frac, 'auc_per_time_gt_lim'] = 0
+        tmp.loc[tmp['auc_per_time'] >= max_auc*low_frac, 'auc_per_time_gt_lim'] = 1
+        ind = (tmp.groupby('start_time')['auc_per_time_gt_lim'].sum(
+        ).reset_index().rename(columns={'auc_per_time_gt_lim': 'start_time_ind'}))
+        ind.loc[ind['start_time_ind'] != 0] = 1
+        tmp = tmp.merge(ind, how = 'left', on = 'start_time')
+        f1 = tmp['start_time_ind'] == 0
+        time_at_max_conc = tmp['max_conc_time'].values[0]
+        f2 = tmp['start_time'] > time_at_max_conc
+        tmp_f = tmp.loc[f1 & f2, :]
+        brack = tmp_f.loc[tmp_f['start_time'] == tmp_f['start_time'].min(), :]
+
+        subject_zero_zones.append(
+            {
+                'ID':brack['ID'].values[0], 
+                'zero_window_time_start':brack['start_time'].values[0],
+                'consecutive_zero_windows':len(brack)
+                
+            }
+        )
+    return pd.DataFrame(subject_zero_zones)
+
+def estimate_k_halflife(dfs, zero_zone_df = None):
+    zero_zone_df = identify_low_conc_zones(dfs) if zero_zone_df is None else zero_zone_df
+    res = []
+    for tmp in dfs:
+        #id = tmp['ID'].values[0]
+        tmp = tmp.merge(zero_zone_df, how = 'left', on = 'ID')#.copy()
+        f1 = tmp['start_time'] < tmp['zero_window_time_start']
+        f2 = tmp['end_time'] <= tmp['zero_window_time_start']
+        tmp = tmp.loc[f1 & f2, :]
+        f = tmp['start_time_std_mean_cv'] == tmp['start_time_std_mean_cv'].min()
+        out_df = tmp.loc[f, :].copy()
+        out_df['window_k_est'] = -1*tmp.loc[f, 'slope'].values
+        out_df['geom_mean_k_est'] = np.exp(np.mean(safe_signed_log(out_df['window_k_est'])))
+        out_df['window_halflife_est'] = 0.693/out_df['window_k_est']
+        out_df['geom_mean_halflife_est'] = np.exp(np.mean(safe_signed_log(out_df['window_halflife_est'])))
+        res.append(out_df.copy())
+    return pd.concat(res).reset_index(drop = True)
 
 def analyze_pk_data(df, subject_col = 'subject', time_col = 'time', conc_col = 'conc'):  # df has columns 'subject', 'time', 'conc'
     results = {}
