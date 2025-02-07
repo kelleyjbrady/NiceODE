@@ -529,8 +529,10 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             theta = betas[c].values.flatten() if c in betas.columns else np.zeros_like(pop_coeff)
             X = beta_data[c].values if c in beta_data.columns else np.zeros_like(pop_coeff)
             out = np.exp((X @ theta) + pop_coeff) + 1e-6
+            if len(out) != len(self.subject_y0):
+                out = np.repeat(out, len(self.subject_y0))
             if c not in model_coeffs.columns:
-                model_coeffs[c] = np.repeat(np.nan, len(out))
+                model_coeffs[c] = np.repeat(np.nan, len(self.subject_y0))
                 model_coeffs[c] = model_coeffs[c].astype(pd.Float64Dtype())
             model_coeffs[c] = out
         if len(model_coeffs) != len(self.subject_y0):
