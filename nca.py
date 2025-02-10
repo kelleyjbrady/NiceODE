@@ -165,3 +165,37 @@ def analyze_pk_data(df, subject_col = 'subject', time_col = 'time', conc_col = '
         results[subject_id] = {'t_elim': t_elim, 't_zero': t_zero, 'k': k}
 
     return results
+
+def log_trapazoidal_section_auc(time, conc):
+    tmp_auc = ((np.diff(conc)
+            /(np.diff(safe_signed_log(conc))+1e-6))
+    *(np.diff(time)))
+    tmp_auc[np.isnan(tmp_auc)] = 0
+    return tmp_auc
+
+def section_auc(time, conc):
+    avg_conc = (conc[:-1] + conc[1:]) / 2
+    delta_t = np.diff(time)
+    return avg_conc*delta_t
+
+def auc_trapz_slope_is_pos(conc):
+    tmp = np.sign(np.diff(conc))
+    tmp[tmp >= 0] = True
+    tmp[tmp < 0] = False
+    return tmp.astype(bool)
+
+def calculate_aucs(time, conc):
+    t = log_trapazoidal_section_auc(time, conc)
+    n = section_auc(time, conc)
+    s = auc_trapz_slope_is_pos(conc)
+    
+    auc_res = [
+        {
+            'linup_logdown':np.sum(n[s]) + np.sum(t[~s]),
+            'logup_lindown':np.sum(n[~s]) + np.sum(t[s]), 
+            'linear_auc':np.sum(n), 
+            'log_auc':np.sum(t)
+        }
+        ]
+    
+    return pd.DataFrame(auc_res)
