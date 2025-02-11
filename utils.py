@@ -187,11 +187,9 @@ def determine_ode_output_size(ode_func):
     except (TypeError, OSError):
         return None
     
-def safe_signed_log(array):
-    s = np.zeros_like(array, dtype=np.float64)  # Initialize with zeros
-    non_zero_mask = array != 0
-    s[non_zero_mask] = np.sign(array[non_zero_mask]) * np.log(np.abs(array[non_zero_mask]))
-    return s
+def safe_signed_log(x):
+    sign = np.sign(x)
+    return sign * np.log1p(np.abs(x)) 
 
 
 class OneCompartmentModel(RegressorMixin, BaseEstimator):
