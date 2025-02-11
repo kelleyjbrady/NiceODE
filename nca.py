@@ -213,24 +213,51 @@ def section_auc(time, conc):
 
 def auc_trapz_slope_is_pos(conc):
     tmp = np.sign(np.diff(conc))
-    tmp[tmp >= 0] = True
-    tmp[tmp < 0] = False
+    tmp[tmp > 0] = True
+    tmp[tmp <= 0] = False
     return tmp.astype(bool)
 
-def calculate_aucs(time, conc):
+def extend_auc_to_inf(time, conc, zero_start,terminal_k):
+    final_conc = conc[time < zero_start][-1]
+    return final_conc/terminal_k
+
+def extend_aumc_to_inf(time, conc, zero_start,terminal_k):
+    final_time = time[time < zero_start][-1]
+    final_conc = conc[time < zero_start][-1]
+    
+    return (final_conc * final_time / terminal_k) + (final_conc / (final_time**2))
+
+def calculate_aucs(time, conc, zero_start =None, terminal_k=None):
+    if zero_start is not None and terminal_k is not None:
+        #interp_conc_start = conc[time < zero_start][-1]
+        auc_inf = extend_auc_to_inf(time, conc, zero_start, terminal_k)
+        final_time = time[time < zero_start][-1]
+        final_conc = conc[time < zero_start][-1]
+        conc = conc[time < zero_start]
+        time = time[time < zero_start]
+    
     t = log_trapazoidal_section_auc(time, conc)
+    t = np.append(t, auc_inf)
     n = section_auc(time, conc)
+    n = np.append(n, auc_inf)
     n_alt = auc(time, conc)
     s = auc_trapz_slope_is_pos(conc)
+    s = np.append(s, False)
     
-    auc_res = [
-        {
-            'linup_logdown':np.sum(n[s]) + np.sum(t[~s]),
-            'logup_lindown':np.sum(n[~s]) + np.sum(t[s]), 
-            'linear_auc':np.sum(n), 
-            'lin_auc_alt':n_alt,
-            'log_auc':np.sum(t)
-        }
-        ]
+    auc_res = pd.DataFrame()
+    auc_res['time_start'] = np.append(time[:-1] , final_time)
+    auc_res['time_end'] = np.append(time[1:], np.inf)
+    auc_res['conc_start'] = np.append(conc[:-1], final_conc)
+    auc_res['conc_end'] = np.append(conc[1:], 0.0)
+    auc_res['section_auc_log_trap'] = t
+    auc_res['section_auc'] = n
+    #auc_res['section_auc_alt'] = n_alt
+    auc_res['section_conc_change_sign'] = s
+    auc_res['linup_logdown'] = np.sum(n[s]) + np.sum(t[~s])
+    auc_res['logup_lindown'] = np.sum(n[~s]) + np.sum(t[s])
+    auc_res['linear_auc'] = np.sum(n)
+    auc_res['lin_auc_alt'] = n_alt
+    auc_res['log_auc'] = np.sum(t)
     
-    return pd.DataFrame(auc_res)
+    
+    return auc_res
