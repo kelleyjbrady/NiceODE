@@ -227,10 +227,13 @@ def extend_aumc_to_inf(time, conc, zero_start,terminal_k):
     
     return (final_conc * final_time / terminal_k) + (final_conc / (final_time**2))
 
-def calculate_aucs(time, conc, zero_start =None, terminal_k=None):
+def calculate_aucs(time, conc, zero_start =None, terminal_k=None, aucmc = False):
     if zero_start is not None and terminal_k is not None:
         #interp_conc_start = conc[time < zero_start][-1]
-        auc_inf = extend_auc_to_inf(time, conc, zero_start, terminal_k)
+        if aucmc:
+            auc_inf = extend_aumc_to_inf(time, conc, zero_start, terminal_k)
+        else:
+            auc_inf = extend_auc_to_inf(time, conc, zero_start, terminal_k)
         final_time = time[time < zero_start][-1]
         final_conc = conc[time < zero_start][-1]
         conc = conc[time < zero_start]
