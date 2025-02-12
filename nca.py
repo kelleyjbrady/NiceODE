@@ -124,6 +124,7 @@ def estimate_k_halflife(dfs, zero_zone_df = None):
         tmp = tmp.loc[f1 & f2 & f3, :]
         f = tmp['start_time_std_mean_cv'] == tmp['start_time_std_mean_cv'].min()
         out_df = tmp.loc[f, :].copy()
+        
         out_df['window_k_est'] = -1*tmp.loc[f, 'slope'].values
         out_df['geom_mean_k_est'] = np.exp(np.mean(masked_signed_safe_log(out_df['window_k_est'])))
         out_df['window_halflife_est'] = 0.693/out_df['window_k_est']
@@ -219,48 +220,69 @@ def auc_trapz_slope_is_pos(conc):
 
 def extend_auc_to_inf(time, conc, zero_start,terminal_k):
     final_conc = conc[time < zero_start][-1]
-    return final_conc/terminal_k
+    final_time = time[time < zero_start][-1]
+    auc_to_inf = final_conc/terminal_k
+    
+    
+    auc_res = pd.DataFrame()
+    auc_res['time_start'] = [final_time]
+    auc_res['time_end'] = [np.inf]
+    auc_res['conc_start'] = [final_conc]
+    auc_res['conc_end'] = [0.0]
+    auc_res['section_auc_log_trap'] = [auc_to_inf]
+    auc_res['section_auc'] = [auc_to_inf]
+    #auc_res['section_auc_alt'] = n_alt
+    auc_res['section_conc_change_sign'] = [False]
+   
+    return auc_res
 
 def extend_aumc_to_inf(time, conc, zero_start,terminal_k):
     final_time = time[time < zero_start][-1]
     final_conc = conc[time < zero_start][-1]
-    
-    return (final_conc * final_time / terminal_k) + (final_conc / (final_time**2))
-
-def calculate_aucs(time, conc, zero_start =None, terminal_k=None, aucmc = False):
-    if zero_start is not None and terminal_k is not None:
-        #interp_conc_start = conc[time < zero_start][-1]
-        if aucmc:
-            auc_inf = extend_aumc_to_inf(time, conc, zero_start, terminal_k)
-        else:
-            auc_inf = extend_auc_to_inf(time, conc, zero_start, terminal_k)
-        final_time = time[time < zero_start][-1]
-        final_conc = conc[time < zero_start][-1]
-        conc = conc[time < zero_start]
-        time = time[time < zero_start]
-    
-    t = log_trapazoidal_section_auc(time, conc)
-    t = np.append(t, auc_inf)
-    n = section_auc(time, conc)
-    n = np.append(n, auc_inf)
-    n_alt = auc(time, conc)
-    s = auc_trapz_slope_is_pos(conc)
-    s = np.append(s, False)
+    aumc_to_inf = (final_conc * final_time / terminal_k) + (final_conc / (terminal_k**2))
     
     auc_res = pd.DataFrame()
-    auc_res['time_start'] = np.append(time[:-1] , final_time)
-    auc_res['time_end'] = np.append(time[1:], np.inf)
-    auc_res['conc_start'] = np.append(conc[:-1], final_conc)
-    auc_res['conc_end'] = np.append(conc[1:], 0.0)
-    auc_res['section_auc_log_trap'] = t
-    auc_res['section_auc'] = n
+    auc_res['time_start'] = [final_time]
+    auc_res['time_end'] = [np.inf]
+    auc_res['conc_start'] = [final_conc]
+    auc_res['conc_end'] = [0.0]
+    auc_res['section_auc_log_trap'] = [aumc_to_inf]
+    auc_res['section_auc'] = [aumc_to_inf]
     #auc_res['section_auc_alt'] = n_alt
-    auc_res['section_conc_change_sign'] = s
-    auc_res['linup_logdown'] = np.sum(n[s]) + np.sum(t[~s])
-    auc_res['logup_lindown'] = np.sum(n[~s]) + np.sum(t[s])
-    auc_res['linear_auc'] = np.sum(n)
-    auc_res['lin_auc_alt'] = n_alt
-    auc_res['log_auc'] = np.sum(t)
+    auc_res['section_conc_change_sign'] = [False]
+    return auc_res
+
+def generate_auc_res_df(time, conc, log_trap_auc_comp, linear_auc_comp, auc_section_slope, ):
+    auc_res = pd.DataFrame()
+    auc_res['time_start'] = time[:-1] 
+    auc_res['time_end'] = time[1:]
+    auc_res['conc_start'] = conc[:-1]
+    auc_res['conc_end'] = conc[1:]
+    auc_res['section_auc_log_trap'] = log_trap_auc_comp
+    auc_res['section_auc'] = linear_auc_comp
+    #auc_res['section_auc_alt'] = n_alt
+    auc_res['section_conc_change_sign'] = auc_section_slope
+    s=auc_section_slope
+    auc_res['linup_logdown'] = np.sum(linear_auc_comp[s]) + np.sum(log_trap_auc_comp[~s])
+    auc_res['logup_lindown'] = np.sum(linear_auc_comp[~s]) + np.sum(log_trap_auc_comp[s])
+    auc_res['linear_auc'] = np.sum(linear_auc_comp)
+    #auc_res['lin_auc_alt'] = n_alt
+    auc_res['log_auc'] = np.sum(log_trap_auc_comp)
+    
+    return auc_res
+
+def calculate_aucs(time, conc, zero_start =None, terminal_k=None, ):
+
+    
+    t = log_trapazoidal_section_auc(time, conc)
+    
+    n = section_auc(time, conc)
+
+    #n_alt = auc(time, conc)
+    s = auc_trapz_slope_is_pos(conc)
+
+    
+    auc_res = generate_auc_res_df(time, conc, t, n, s)
     
     
     return auc_res
