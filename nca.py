@@ -6,10 +6,11 @@ from sklearn.metrics import auc
 from typing import List
 
 
-def estimate_subject_slope_cv(df, time_col = 'TIME', conc_col = 'CONC_ln', id_col = 'ID'):
+def estimate_subject_slope_cv(df, time_col = 'TIME', conc_col = 'CONC_ln', id_col = 'ID',):
     df = df.copy()
     sub_max_conc = df[conc_col].max()
     max_time = df.loc[df[conc_col] == sub_max_conc, time_col].values[-1]
+    #zero_window_start = df[zero_start_col].values[0]
     df['orig_conc'] = df[conc_col].copy()
     df[conc_col] =safe_signed_log(df[conc_col])
     times = df[time_col].unique()
@@ -53,7 +54,7 @@ def estimate_subject_slope_cv(df, time_col = 'TIME', conc_col = 'CONC_ln', id_co
                     'end_time': endtime,
                     'slope': slope,
                     'startidx_endidx_slope_cv':slope_cv,
-                    'startidx_endidx_slope_sign':start_idx_slopes_signs,
+                    'startidx_endidx_slope_sign':np.sign(slope),
                     'intercept': intercept,
                     'r_value': r_value,
                     'adj_r2': adj_r2,
@@ -64,14 +65,14 @@ def estimate_subject_slope_cv(df, time_col = 'TIME', conc_col = 'CONC_ln', id_co
     df_out = pd.DataFrame(results)
     df_out['abs_cv'] = np.abs(df_out['startidx_endidx_slope_cv'])
     #df_out['cv_sign'] = np.sign(df_out['start_idx_slope_cv'])
-    signs = df_out.groupby('start_time')['startidx_endidx_slope_sign'].mean().reset_index().rename(columns = {'startidx_endidx_slope_sign':'start_time_mean_cv_sign'})
+    signs = df_out.groupby('start_time')['startidx_endidx_slope_sign'].mean().reset_index().rename(columns = {'startidx_endidx_slope_sign':'start_time_mean_slope_sign'})
     start_idx_cv_mean = df_out.groupby('start_time')['abs_cv'].mean().reset_index().rename(columns = {'abs_cv':'start_time_mean_abs_cv'})
     start_idx_cv_std = df_out.groupby('start_time')['abs_cv'].std().reset_index().rename(columns = {'abs_cv':'start_time_std_mean_cv'})
     df_out = (df_out
             .merge(signs, how = 'left', on = 'start_time')
             .merge(start_idx_cv_mean, how = 'left', on = 'start_time')
             .merge(start_idx_cv_std, how = 'left', on = 'start_time')
-            )
+           )
     
     return df_out
 
@@ -83,6 +84,50 @@ def masked_signed_safe_log(x):
     s[non_zero_mask] = np.sign(x[non_zero_mask]) * np.log(np.abs(x[non_zero_mask]))
 
     return s 
+
+
+def indentify_low_conc_zones2(df,
+                              time_col = 'TIME',
+                              conc_col = 'CONC_ln',
+                              id_col = 'ID', 
+                              low_frac = 0.005
+                              ):
+    df = df.copy()
+    sub_max_conc = df[conc_col].max()
+    max_time = df.loc[df[conc_col] == sub_max_conc, time_col].values[-1]
+    df['orig_conc'] = df[conc_col].copy()
+    df[conc_col] =safe_signed_log(df[conc_col])
+    times = df[time_col].unique()
+    results = []
+    for start_idx, starttime in enumerate(times):
+        if start_idx == 3:
+            testing = 1
+        start_idx_slopes = []
+        if (start_idx + 1) < len(times):
+            for end_idx, endtime in enumerate(times[start_idx+1:]):
+                f = (df[time_col] >= starttime) & (df[time_col] <= endtime)
+                work_df = df.loc[f, :]
+                x = work_df[time_col].values
+                y = work_df[conc_col].values
+                auc_y = work_df['orig_conc'].values
+                section_auc = auc(x, auc_y)
+                auc_per_time = section_auc / (endtime - starttime)
+                
+                n = len(work_df[time_col].unique())
+                results.append({
+                    'ID':work_df[id_col].unique()[0],
+                    #'start_index': start_idx,
+                    #'end_index': end_idx,
+                    'auc_per_time':auc_per_time,
+                    'start_time': starttime,
+                    'end_time': endtime,
+                    'n_points': n, 
+                    'max_conc':sub_max_conc, 
+                    'max_conc_time':max_time,
+                })
+    tmp_res = pd.DataFrame(results)
+    return identify_low_conc_zones([tmp_res], low_frac = low_frac)
+
 
 def identify_low_conc_zones(dfs:List[pd.DataFrame], low_frac = 0.01):
     subject_zero_zones = []
@@ -232,7 +277,7 @@ def extend_auc_to_inf(time, conc, zero_start,terminal_k):
     auc_res['section_auc_log_trap'] = [auc_to_inf]
     auc_res['section_auc'] = [auc_to_inf]
     #auc_res['section_auc_alt'] = n_alt
-    auc_res['section_conc_change_sign'] = [False]
+    auc_res['section_slope_is_pos'] = [False]
    
     return auc_res
 
@@ -249,7 +294,7 @@ def extend_aumc_to_inf(time, conc, zero_start,terminal_k):
     auc_res['section_auc_log_trap'] = [aumc_to_inf]
     auc_res['section_auc'] = [aumc_to_inf]
     #auc_res['section_auc_alt'] = n_alt
-    auc_res['section_conc_change_sign'] = [False]
+    auc_res['section_slope_is_pos'] = [False]
     return auc_res
 
 def generate_auc_res_df(time, conc, log_trap_auc_comp, linear_auc_comp, auc_section_slope, ):
@@ -261,7 +306,7 @@ def generate_auc_res_df(time, conc, log_trap_auc_comp, linear_auc_comp, auc_sect
     auc_res['section_auc_log_trap'] = log_trap_auc_comp
     auc_res['section_auc'] = linear_auc_comp
     #auc_res['section_auc_alt'] = n_alt
-    auc_res['section_conc_change_sign'] = auc_section_slope
+    auc_res['section_slope_is_pos'] = auc_section_slope
     s=auc_section_slope
     auc_res['linup_logdown'] = np.sum(linear_auc_comp[s]) + np.sum(log_trap_auc_comp[~s])
     auc_res['logup_lindown'] = np.sum(linear_auc_comp[~s]) + np.sum(log_trap_auc_comp[s])
