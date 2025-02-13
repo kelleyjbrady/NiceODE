@@ -200,7 +200,7 @@ def estimate_k_halflife(dfs, zero_zone_df = None, adj_r2_threshold = 0.8):
                             )
         tmp = tmp.merge(avg_adj_r2, how = 'left', on = 'start_time')
         tmp = tmp.merge(start_idx_thresh, how = 'left', on = 'start_time')
-        f = tmp['startidx_avg_adj_r2_gte_threshold'] == 1 #the way this work is allowing the window to be wrong somtimes. Test on M9 to see an example. 
+        f = tmp['startidx_avg_adj_r2_gte_threshold'] == 1 
         good_liniearity_df = tmp.loc[f, :]
         if len(good_liniearity_df) > 0:
             tmp = good_liniearity_df.copy()
@@ -357,7 +357,7 @@ def generate_auc_res_df(time, conc, log_trap_auc_comp, linear_auc_comp, auc_sect
     auc_res['section_auc'] = linear_auc_comp
     #auc_res['section_auc_alt'] = n_alt
     auc_res['section_slope_is_pos'] = auc_section_slope
-    s=auc_section_slope
+    #s=auc_section_slope
     #auc_res['linup_logdown'] = np.sum(linear_auc_comp[s]) + np.sum(log_trap_auc_comp[~s])
     #auc_res['logup_lindown'] = np.sum(linear_auc_comp[~s]) + np.sum(log_trap_auc_comp[s])
     #auc_res['linear_auc'] = np.sum(linear_auc_comp)
@@ -366,7 +366,7 @@ def generate_auc_res_df(time, conc, log_trap_auc_comp, linear_auc_comp, auc_sect
     
     return auc_res
 
-def calculate_aucs(time, conc, zero_start =None, terminal_k=None, ):
+def calculate_section_aucs(time, conc, zero_start =None, terminal_k=None, ):
 
     
     t = log_trapazoidal_section_auc(time, conc)
