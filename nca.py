@@ -381,3 +381,48 @@ def calculate_section_aucs(time, conc, zero_start =None, terminal_k=None, ):
     
     
     return auc_res
+
+
+def prepare_section_aucs(df):
+    debugging_tmp = False
+    auc_df = []
+    aumc_df = []
+    for sub in df['ID'].unique():
+        
+            #orig_settings = np.seterr(all='raise')
+        #prepare data needed for both AUC and AUMC
+        work_df = df.loc[df['ID'] == sub, :].copy()
+        conc = work_df['CONC'].values
+        time = work_df['TIME'].values
+        zero_start = work_df['zero_window_time_start_x'].unique()[0]
+        terminal_k = work_df['window_k_est'].unique()[0]
+        if sub == 'M10':
+            debugging_tmp = True
+            debug_vars = {}
+            debug_vars['conc'] = np.copy(conc)
+            debug_vars['time'] = np.copy(time)
+            debug_vars['zero_start'] = np.copy(zero_start)
+            debug_vars['terminal_k'] = np.copy(terminal_k)
+        #calculate AUC components
+        aucs = calculate_section_aucs(time,conc , zero_start, terminal_k)
+        auc_inf = extend_auc_to_inf(time, conc, zero_start, terminal_k)
+        aucs = pd.concat([aucs, auc_inf]).sort_values(by = 'time_start')
+        aucs['zero_window_time_start'] = zero_start
+        aucs['terminal_k'] = terminal_k
+        #if debugging_tmp:
+            #np.seterr(**orig_settings) 
+        aucs['ID'] = sub
+        #calculate AUMC components
+        conctime = time * conc
+        aumcs = calculate_section_aucs(time, conctime, zero_start, terminal_k, )
+        #aumc_inf = extend_aumc_to_inf(work_df['TIME'].values, work_df['ConcTime'].values, zero_start, terminal_k)
+        aumc_inf = extend_aumc_to_inf(time, conc, zero_start, terminal_k)
+        aumcs = pd.concat([aumcs, aumc_inf]).sort_values(by = 'time_start')
+        aumcs['zero_window_time_start'] = zero_start
+        aumcs['terminal_k'] = terminal_k
+        aumcs['ID'] = sub
+        auc_df.append(aucs)
+        aumc_df.append(aumcs)
+    auc_df = pd.concat(auc_df).reset_index(drop = True)
+    aumc_df = pd.concat(aumc_df).reset_index(drop = True)
+    return auc_df, aumc_df
