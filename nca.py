@@ -426,3 +426,24 @@ def prepare_section_aucs(df):
     auc_df = pd.concat(auc_df).reset_index(drop = True)
     aumc_df = pd.concat(aumc_df).reset_index(drop = True)
     return auc_df, aumc_df
+
+def calculate_auc_from_sections(df):
+    df = df.copy()
+    f1 = df['time_start'] < df['zero_window_time_start']
+    f2 = df['time_end'] < df['zero_window_time_start']
+    f3 = (df['time_start'] < df['zero_window_time_start']) & (df['time_end'] == np.inf)
+    tmp = df.loc[(f1 & f2) | f3, :].copy()
+    linear_only_auc = (tmp
+                    .groupby('ID')[['section_auc']]
+                    .sum()
+                    .reset_index()
+                    .rename(columns = {'section_auc':'linear_auc'})
+                    
+                    )
+    tmp_up = tmp.loc[tmp['section_slope_is_pos']]
+    linear_up = tmp_up.groupby('ID')['section_auc'].sum().reset_index()
+    tmp_down = tmp.loc[~tmp['section_slope_is_pos']]
+    log_down = tmp_down.groupby('ID')['section_auc_log_trap'].sum().reset_index()
+    tmp = linear_up.merge(log_down, how = 'left', on = 'ID')
+    tmp['linup_logdown_auc'] = tmp['section_auc'] + tmp['section_auc_log_trap']
+    return tmp.merge(linear_only_auc, how = 'left', on = 'ID').copy()
