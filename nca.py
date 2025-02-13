@@ -157,10 +157,13 @@ def identify_low_conc_zones(dfs:List[pd.DataFrame], low_frac = 0.01):
         )
     return pd.DataFrame(subject_zero_zones)
 
-def estimate_k_halflife(dfs, zero_zone_df = None):
+def estimate_k_halflife(dfs, zero_zone_df = None, adj_r2_threshold = 0.8):
     zero_zone_df = identify_low_conc_zones(dfs) if zero_zone_df is None else zero_zone_df
     res = []
+    adj_r2_ind_col = f"adj_r2_gte_{adj_r2_threshold}"
     for tmp in dfs:
+        if tmp['ID'].values[0] == 'M9':
+            debugging = True
         #id = tmp['ID'].values[0]
         tmp = tmp.merge(zero_zone_df, how = 'left', on = 'ID')#.copy()
         f1 = tmp['start_time'] < tmp['zero_window_time_start']
@@ -178,7 +181,16 @@ def estimate_k_halflife(dfs, zero_zone_df = None):
         tmp = tmp.merge(start_idx_avg_slope, how = 'left', on = 'start_time')
         f3 = tmp['startidx_avg_slope_sign'] == -1
         tmp = tmp.loc[f3, :]
-        
+        tmp['adj_r2_threshold'] = adj_r2_threshold
+        tmp.loc[tmp['adj_r2'] >= adj_r2_threshold, 'adj_r2_gte_threshold'] = 1
+        tmp.loc[tmp['adj_r2'] < adj_r2_threshold, 'adj_r2_gte_threshold'] = 0
+        start_idx_thresh = (tmp
+                        .groupby('start_time')['adj_r2_gte_threshold']
+                        .mean()
+                        .reset_index()
+                        .rename(columns = {'adj_r2_gte_threshold':'startidx_avg_adj_r2_gte_threshold'})
+                        
+                            )
         avg_adj_r2 = (tmp
                         .groupby('start_time')['adj_r2']
                         .mean()
@@ -187,7 +199,8 @@ def estimate_k_halflife(dfs, zero_zone_df = None):
                         
                             )
         tmp = tmp.merge(avg_adj_r2, how = 'left', on = 'start_time')
-        f = tmp['startidx_avg_adj_r2'] > 0.8 #the way this work is allowing the window to be wrong somtimes. Test on M9 to see an example. 
+        tmp = tmp.merge(start_idx_thresh, how = 'left', on = 'start_time')
+        f = tmp['startidx_avg_adj_r2_gte_threshold'] == 1 #the way this work is allowing the window to be wrong somtimes. Test on M9 to see an example. 
         good_liniearity_df = tmp.loc[f, :]
         if len(good_liniearity_df) > 0:
             tmp = good_liniearity_df.copy()
@@ -345,11 +358,11 @@ def generate_auc_res_df(time, conc, log_trap_auc_comp, linear_auc_comp, auc_sect
     #auc_res['section_auc_alt'] = n_alt
     auc_res['section_slope_is_pos'] = auc_section_slope
     s=auc_section_slope
-    auc_res['linup_logdown'] = np.sum(linear_auc_comp[s]) + np.sum(log_trap_auc_comp[~s])
-    auc_res['logup_lindown'] = np.sum(linear_auc_comp[~s]) + np.sum(log_trap_auc_comp[s])
-    auc_res['linear_auc'] = np.sum(linear_auc_comp)
+    #auc_res['linup_logdown'] = np.sum(linear_auc_comp[s]) + np.sum(log_trap_auc_comp[~s])
+    #auc_res['logup_lindown'] = np.sum(linear_auc_comp[~s]) + np.sum(log_trap_auc_comp[s])
+    #auc_res['linear_auc'] = np.sum(linear_auc_comp)
     #auc_res['lin_auc_alt'] = n_alt
-    auc_res['log_auc'] = np.sum(log_trap_auc_comp)
+    #auc_res['log_auc'] = np.sum(log_trap_auc_comp)
     
     return auc_res
 
