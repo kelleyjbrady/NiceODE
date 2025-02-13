@@ -165,15 +165,52 @@ def estimate_k_halflife(dfs, zero_zone_df = None):
         tmp = tmp.merge(zero_zone_df, how = 'left', on = 'ID')#.copy()
         f1 = tmp['start_time'] < tmp['zero_window_time_start']
         f2 = tmp['end_time'] <= tmp['zero_window_time_start']
-        f3 = tmp['start_time_mean_cv_sign'] == -1
-        tmp = tmp.loc[f1 & f2 & f3, :]
-        f = tmp['start_time_std_mean_cv'] == tmp['start_time_std_mean_cv'].min()
-        out_df = tmp.loc[f, :].copy()
+        tmp = tmp.loc[f1 & f2, :]
         
-        out_df['window_k_est'] = -1*tmp.loc[f, 'slope'].values
-        out_df['geom_mean_k_est'] = np.exp(np.mean(masked_signed_safe_log(out_df['window_k_est'])))
+        tmp['startidx_endidx_slope_sign'] = np.sign(tmp['slope'])
+        start_idx_avg_slope = (tmp
+                                          .groupby('start_time')['startidx_endidx_slope_sign']
+                                          .mean()
+                                          .reset_index()
+                                          .rename(columns = {'startidx_endidx_slope_sign':'startidx_avg_slope_sign'})
+                                          
+                                          )
+        tmp = tmp.merge(start_idx_avg_slope, how = 'left', on = 'start_time')
+        f3 = tmp['startidx_avg_slope_sign'] == -1
+        tmp = tmp.loc[f3, :]
+        
+        avg_adj_r2 = (tmp
+                        .groupby('start_time')['adj_r2']
+                        .mean()
+                        .reset_index()
+                        .rename(columns = {'adj_r2':'startidx_avg_adj_r2'})
+                        
+                            )
+        tmp = tmp.merge(avg_adj_r2, how = 'left', on = 'start_time')
+        f = tmp['startidx_avg_adj_r2'] > 0.8 #the way this work is allowing the window to be wrong somtimes. Test on M9 to see an example. 
+        good_liniearity_df = tmp.loc[f, :]
+        if len(good_liniearity_df) > 0:
+            tmp = good_liniearity_df.copy()
+            f = tmp['startidx_avg_adj_r2'] == tmp['startidx_avg_adj_r2'].max()
+            tmp = tmp.loc[f, :].copy()
+            f = tmp['end_time'] == tmp['end_time'].max()
+            tmp = tmp.loc[f, :].copy()
+            
+
+            #out_df['geom_mean_halflife_est'] = np.exp(np.mean(masked_signed_safe_log(out_df['window_halflife_est'])))
+            tmp['method'] = 'adj_r2'
+            
+        if len(good_liniearity_df) == 0:
+            max_end = tmp['end_time'].max()
+            tmp = tmp.loc[tmp['end_time'] == max_end]
+            max_start = tmp['start_time'].max()
+            tmp = tmp.loc[tmp['start_time'] == max_start]
+            tmp['method'] = 'final_nonzero_section'
+            debugging = True
+        out_df = tmp.copy()
+        out_df['window_k_est'] = -1*out_df['slope'].values
+        #out_df['geom_mean_k_est'] = np.exp(np.mean(masked_signed_safe_log(out_df['window_k_est'])))
         out_df['window_halflife_est'] = 0.693/out_df['window_k_est']
-        out_df['geom_mean_halflife_est'] = np.exp(np.mean(masked_signed_safe_log(out_df['window_halflife_est'])))
         res.append(out_df.copy())
     return pd.concat(res).reset_index(drop = True)
 
