@@ -475,6 +475,42 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.global_t0 = self.global_tp[0]
         self.global_tf = self.global_tp[-1]
         self.global_tspan = np.array([self.global_t0, self.global_tf], dtype=np.float64)
+    
+    def _unpack_prepare_thetas(self,model_param_dep_vars:pd.DataFrame, subject_data:pd.DataFrame):
+        thetas = pd.DataFrame( )
+        theta_data = pd.DataFrame()
+        for idx, row in model_param_dep_vars.iterrows():
+            coeff_name = row['model_coeff']
+            theta_name = row['model_coeff_dep_var']
+            theta_is_allometric = row['allometric']
+            col = (coeff_name, theta_name)
+            if col not in thetas.columns:
+                thetas[col] = [np.nan]
+                thetas[col] = thetas[col].astype(pd.Float64Dtype())
+            thetas[col] = [row['init_val']]
+            if col not in theta_data.columns:
+                theta_data[col] = np.repeat(np.nan, len(subject_data))
+                theta_data[col] = thetas[col].astype(pd.Float64Dtype())
+            if theta_is_allometric:
+                theta_data_col = safe_signed_log(subject_data[theta_name].values / row['allometric_norm_value'])
+            else:
+                theta_data_col = subject_data[theta_name].values
+            theta_data[col] = theta_data_col
+        thetas.columns = pd.MultiIndex.from_tuples(thetas.columns) if len(thetas.columns) > 0 else thetas.columns
+        theta_data.columns = (pd.MultiIndex.from_tuples(theta_data.columns)
+                                if len(theta_data.columns) > 0 else theta_data.columns)
+        return thetas, theta_data
+    
+    def _unpack_prepare_pop_coeffs(self,model_params:pd.DataFrame):
+        pop_coeffs = pd.DataFrame()
+        for idx, row in model_params.iterrows():
+            coeff_name = row['model_coeff']
+            if coeff_name not in pop_coeffs.columns:
+                pop_coeffs[coeff_name] = [np.nan]
+                pop_coeffs[coeff_name] = pop_coeffs[coeff_name].astype(pd.Float64Dtype())
+            pop_coeffs[coeff_name] = [row['init_val']]
+        return pop_coeffs
+        
         
     
     def _assemble_pred_matrices(self, data):
@@ -496,40 +532,12 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.n_population_coeff = len(model_params)
         model_param_dep_vars = init_vals.loc[init_vals['population_coeff'] == False, :]
         self._homongenize_timepoints(data, subject_id_c, time_col)
+        thetas, theta_data = self._unpack_prepare_thetas(model_param_dep_vars, subject_data)
+        pop_coeffs = self._unpack_prepare_pop_coeffs(model_params)
 
-        betas = pd.DataFrame( )
-        beta_data = pd.DataFrame()
-        for idx, row in model_param_dep_vars.iterrows():
-            coeff_name = row['model_coeff']
-            beta_name = row['model_coeff_dep_var']
-            beta_is_allometric = row['allometric']
-            col = (coeff_name, beta_name)
-            if col not in betas.columns:
-                betas[col] = [np.nan]
-                betas[col] = betas[col].astype(pd.Float64Dtype())
-            betas[col] = [row['init_val']]
-            if col not in beta_data.columns:
-                beta_data[col] = np.repeat(np.nan, len(subject_data))
-                beta_data[col] = betas[col].astype(pd.Float64Dtype())
-            if beta_is_allometric:
-                beta_data_col = safe_signed_log(subject_data[beta_name].values / row['allometric_norm_value'])
-            else:
-                beta_data_col = subject_data[beta_name].values
-            beta_data[col] = beta_data_col
-        pop_coeffs = pd.DataFrame()
-        for idx, row in model_params.iterrows():
-            coeff_name = row['model_coeff']
-            if coeff_name not in pop_coeffs.columns:
-                pop_coeffs[coeff_name] = [np.nan]
-                pop_coeffs[coeff_name] = pop_coeffs[coeff_name].astype(pd.Float64Dtype())
-            pop_coeffs[coeff_name] = [row['init_val']]
-            #betas[coeff_name] = row['init_val']
-        betas.columns = pd.MultiIndex.from_tuples(betas.columns) if len(betas.columns) > 0 else betas.columns
-        beta_data.columns = (pd.MultiIndex.from_tuples(beta_data.columns)
-                                if len(beta_data.columns) > 0 else beta_data.columns)
         self.init_pop_coeffs = deepcopy(pop_coeffs)
-        self.init_betas = deepcopy(betas)
-        return pop_coeffs.copy(), betas.copy(), beta_data.copy()
+        self.init_betas = deepcopy(thetas)
+        return pop_coeffs.copy(), thetas.copy(), theta_data.copy()
     
     def _generate_pk_model_coeff_vectorized(self, pop_coeffs, betas, beta_data):
         model_coeffs = pd.DataFrame(dtype = pd.Float64Dtype())
