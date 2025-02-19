@@ -121,7 +121,7 @@ class PopulationCoeffcient:
     optimization_lower_bound: np.float64 = None
     optimization_upper_bound: np.float64 = None
     subject_level_intercept:bool = False
-    subject_level_initercept_init_val:np.float64 = None
+    subject_level_intercept_init_val:np.float64 = None
 
 
 
@@ -131,13 +131,13 @@ class PopulationCoeffcient:
         self.optimization_init_val = (np.log(self.optimization_init_val) if self.log_transform_init_val
                                       else self.optimization_init_val)
         
-        c1 = self.subject_level_initercept_init_val is None
+        c1 = self.subject_level_intercept_init_val is None
         c2 = self.subject_level_intercept
         if c1 and c2:
-            self.subject_level_initercept_init_val = np.random.rand() + 1e-6
+            self.subject_level_intercept_init_val = np.random.rand() + 1e-6
         if c2:
-            self.subject_level_initercept_init_val = (np.log(self.subject_level_initercept_init_val) if self.log_transform_init_val
-                                        else self.subject_level_initercept_init_val)
+            self.subject_level_intercept_init_val = (np.log(self.subject_level_intercept_init_val) if self.log_transform_init_val
+                                        else self.subject_level_intercept_init_val)
         
 
 
@@ -555,7 +555,8 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self._homongenize_timepoints(data, subject_id_c, time_col)
         thetas, theta_data = self._unpack_prepare_thetas(model_param_dep_vars, subject_data)
         pop_coeffs, subject_level_intercepts = self._unpack_prepare_pop_coeffs(model_params)
-
+        self.n_subject_level_intercepts = len(subject_level_intercepts.columns)
+        
         self.subject_level_intercepts = deepcopy(subject_level_intercepts)
         self.init_pop_coeffs = deepcopy(pop_coeffs)
         self.init_betas = deepcopy(thetas)
@@ -591,6 +592,8 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
     
     def _solve_ivp(self,model_coeffs,parallel = False,parallel_n_jobs = None, timepoints = None):
         iter_obj =  zip(model_coeffs.iterrows(), self.ode_t0_vals.iterrows())
+        def ode_wrapper(t, y, *args):  # Inner wrapper specifically for solve_ivp
+            return self.pk_model_function(t, y, *args)
         partial_solve_ivp = partial(self._solve_ivp_parallel,
                                  fun = self.pk_model_function,
                                  tspan = self.global_tspan,
@@ -603,7 +606,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                                                    for coeff_idx_row, ode_inits_idx_row in iter_obj)
             sol = [sol_i.y[0] for sol_i in sol]
         else:
-            list_comp = False
+            list_comp = True
             if list_comp:
                 sol = [partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1]).y[0] 
                        for coeff_idx_row, ode_inits_idx_row in iter_obj]
@@ -724,18 +727,32 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         return error
     
     def _objective_function2(self, params, beta_data,  parallel = None, parallel_n_jobs = None ,):
-        pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), columns = self.init_pop_coeffs.columns)
-        thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), columns = self.init_betas.columns)
-        model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
-        preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
-        error = self.loss_function(self.y, preds, **self.loss_params)
+        if self.n_subject_level_intercepts == 0:
+            pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), columns = self.init_pop_coeffs.columns)
+            thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), columns = self.init_betas.columns)
+            model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
+            preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
+            error = self.loss_function(self.y, preds, **self.loss_params)
+        elif self.n_subject_level_intercepts > 0:
+            n_pop_c = self.n_population_coeff
+            pop_coeffs = pd.DataFrame(params[:n_pop_c].reshape(1,-1), columns = self.init_pop_coeffs.columns[:n_pop_c])
+            start_idx = n_pop_c
+            end_idx = start_idx + 1
+            sigma = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), columns = self.init_pop_coeffs.columns[start_idx:end_idx])
+            start_idx = end_idx
+            end_idx = start_idx + self.n_subject_level_intercepts
+            omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), columns = self.subject_level_intercepts.columns)
+            start_idx = end_idx
+            thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), columns = self.init_betas.columns)
+            res = FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, beta_data, self)
+            error = res
         return error
     
     def predict2(self, data, parallel = None, parallel_n_jobs = None, timepoints = None ):
         if self.fit_result_ is None:
             raise ValueError("The Model must be fit before prediction")
         params = self.fit_result_['x']
-        pop_coeffs, _, beta_data = self._assemble_pred_matrices(data)
+        pop_coeffs, _, _, beta_data = self._assemble_pred_matrices(data)
         pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), columns = self.init_pop_coeffs.columns)
         thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), columns = self.init_betas.columns)
         model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
@@ -748,7 +765,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         if len(omegas.values) > 0:
             init_params.append(omegas.values)
         if len(betas.values) > 0:
-            init_params = init_params.append(betas.values)
+            init_params.append(betas.values)
         init_params = np.concatenate(init_params, axis = 1, dtype=np.float64).flatten()
         
         objective_function = partial(self._objective_function2, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
@@ -817,6 +834,23 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
 
         return deepcopy(self)
 
+
+def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj):
+    
+    # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
+    model_coeffs = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, theta_data)
+    #would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`) 
+    # prepopulated with partial
+    preds = model_obj._solve_ivp(model_coeffs, parallel = False, )
+    
+    
+    #compute the Jacobian using finite differences
+    
+    return None
+    
+    
+    
+    
 
 def arbitrary_objective_function(params, data, model_function=one_compartment_model, subject_id_c='SUBJID', conc_at_time_c='DV',
                                  time_c='TIME', population_coeff=['k', 'vd'],
