@@ -592,8 +592,6 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
     
     def _solve_ivp(self,model_coeffs,parallel = False,parallel_n_jobs = None, timepoints = None):
         iter_obj =  zip(model_coeffs.iterrows(), self.ode_t0_vals.iterrows())
-        def ode_wrapper(t, y, *args):  # Inner wrapper specifically for solve_ivp
-            return self.pk_model_function(t, y, *args)
         partial_solve_ivp = partial(self._solve_ivp_parallel,
                                  fun = self.pk_model_function,
                                  tspan = self.global_tspan,
@@ -845,6 +843,26 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj):
     
     
     #compute the Jacobian using finite differences
+    plus_pop_coeffs = pop_coeffs.copy()
+    minus_pop_coeffs = pop_coeffs.copy()
+    epsilon = 1e-6
+    J = np.zeros((len(model_obj.y), len(omegas)))
+    for omega_idx, omega_c in enumerate(omegas.columns):
+        c = omega_c[0]
+        plus_pop_coeffs[c] = plus_pop_coeffs[c] + epsilon
+        plus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(plus_pop_coeffs,
+                                                                          thetas, theta_data)
+        plus_preds = model_obj._solve_ivp(plus_model_coeffs, parallel = False, )
+        
+        minus_pop_coeffs[c] = minus_pop_coeffs[c] - epsilon
+        minus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(minus_pop_coeffs,
+                                                                          thetas, theta_data)
+        minus_preds = model_obj._solve_ivp(minus_model_coeffs, parallel = False, )
+
+        J[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon)
+        
+    residuals = model_obj.y - preds
+
     
     return None
     

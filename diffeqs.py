@@ -41,7 +41,7 @@ def first_order_one_compartment_model2(t, y, cl, vd):
     return [dCdt]
 
 
-@njit
+#@njit
 def first_order_one_compartment_model(t, y, k):
    
     C = y[0]  # Extract concentration from the state vector
