@@ -121,6 +121,8 @@ class PopulationCoeffcient:
     optimization_lower_bound: np.float64 = None
     optimization_upper_bound: np.float64 = None
     subject_level_intercept:bool = False
+    subject_level_initercept_init_val:np.float64 = None
+
 
 
     def __post_init__(self):
@@ -128,6 +130,15 @@ class PopulationCoeffcient:
             self.optimization_init_val = np.random.rand() + 1e-6
         self.optimization_init_val = (np.log(self.optimization_init_val) if self.log_transform_init_val
                                       else self.optimization_init_val)
+        
+        c1 = self.subject_level_initercept_init_val is None
+        c2 = self.subject_level_intercept
+        if c1 and c2:
+            self.subject_level_initercept_init_val = np.random.rand() + 1e-6
+        if c2:
+            self.subject_level_initercept_init_val = (np.log(self.subject_level_initercept_init_val) if self.log_transform_init_val
+                                        else self.subject_level_initercept_init_val)
+        
 
 
 @dataclass
@@ -189,8 +200,10 @@ def determine_ode_output_size(ode_func):
     
 def safe_signed_log(x):
     sign = np.sign(x)
-    return sign * np.log1p(np.abs(x)) 
+    return sign * np.log1p(np.abs(x))
 
+
+    
 
 class OneCompartmentModel(RegressorMixin, BaseEstimator):
 
@@ -267,7 +280,8 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                 'init_val':pop_coeff.optimization_init_val,
                 'allometric':False,
                 'allometric_norm_value':None,
-                'subject_level_intercept':pop_coeff.subject_level_intercept
+                'subject_level_intercept':pop_coeff.subject_level_intercept, 
+                'subject_level_initercept_init_val':pop_coeff.subject_level_initercept_init_val
             })
         #unpack the dep vars for the population coeffs
         for model_coeff in self.dep_vars:
@@ -282,7 +296,8 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                     'init_val':coeff_dep_var.optimization_init_val,
                     'allometric': True if coeff_dep_var.model_method == 'allometric' else False,
                     'allometric_norm_value':coeff_dep_var.allometric_norm_value, 
-                    'subject_level_intercept':False
+                    'subject_level_intercept':False, 
+                    'subject_level_initercept_init_val':False
                 })
         self.init_vals_pd = pd.DataFrame(init_vals_pd)
         self.n_optimized_coeff = len(init_vals)
@@ -450,21 +465,24 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             data_out['initial_conc'] = deepcopy(initial_conc)
             yield deepcopy(data_out)
     
+    def _homongenize_timepoints(self,data, subject_id_c, time_col):
+        data['tmp'] = 1
+        time_mask_df = data.pivot( index = subject_id_c,
+                                    columns = time_col,
+                                    values = 'tmp').fillna(0)
+        self.time_mask = time_mask_df.to_numpy().astype(bool)
+        self.global_tp = np.array(time_mask_df.columns.values, dtype = np.float64)
+        self.global_t0 = self.global_tp[0]
+        self.global_tf = self.global_tp[-1]
+        self.global_tspan = np.array([self.global_t0, self.global_tf], dtype=np.float64)
+        
+    
     def _assemble_pred_matrices(self, data):
         subject_id_c = self.groupby_col
-        #data_out['subject_id_c'] = deepcopy(self.groupby_col)
         conc_at_time_c = self.conc_at_time_col
-        #data_out['conc_at_time_c'] = deepcopy(self.conc_at_time_col)
-        #data_out['pk_model_function'] = deepcopy(self.pk_model_function)
-        #pk_model_function = deepcopy(self.pk_model_function)
         verbose = self.verbose
-        
-        #population_coeff = deepcopy(self.population_coeff)
-        #data_out['betas'] = deepcopy(self.betas)
-        #data_out['time_c'] = deepcopy(self.time_col)
-        #betas = deepcopy(self.betas)
         time_col = deepcopy(self.time_col)
-        #subs = data[subject_id_c].unique()
+
         self.y = np.array(data[conc_at_time_c].values, dtype = np.float64)
         subject_data = data.drop_duplicates(subset=subject_id_c, keep = 'first').copy()
         self.subject_y0 = np.array(subject_data[conc_at_time_c].values, dtype = np.float64)
@@ -477,15 +495,8 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         model_params = init_vals.loc[init_vals['population_coeff'], :]
         self.n_population_coeff = len(model_params)
         model_param_dep_vars = init_vals.loc[init_vals['population_coeff'] == False, :]
-        data['tmp'] = 1
-        time_mask_df = data.pivot( index = subject_id_c,
-                                  columns = time_col,
-                                  values = 'tmp').fillna(0)
-        self.time_mask = time_mask_df.to_numpy().astype(bool)
-        self.global_tp = np.array(time_mask_df.columns.values, dtype = np.float64)
-        self.global_t0 = self.global_tp[0]
-        self.global_tf = self.global_tp[-1]
-        self.global_tspan = np.array([self.global_t0, self.global_tf], dtype=np.float64)
+        self._homongenize_timepoints(data, subject_id_c, time_col)
+
         betas = pd.DataFrame( )
         beta_data = pd.DataFrame()
         for idx, row in model_param_dep_vars.iterrows():
