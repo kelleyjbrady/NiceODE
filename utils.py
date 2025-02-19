@@ -281,7 +281,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                 'allometric':False,
                 'allometric_norm_value':None,
                 'subject_level_intercept':pop_coeff.subject_level_intercept, 
-                'subject_level_initercept_init_val':pop_coeff.subject_level_initercept_init_val
+                'subject_level_intercept_init_val':pop_coeff.subject_level_intercept_init_val
             })
         #unpack the dep vars for the population coeffs
         for model_coeff in self.dep_vars:
@@ -297,7 +297,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                     'allometric': True if coeff_dep_var.model_method == 'allometric' else False,
                     'allometric_norm_value':coeff_dep_var.allometric_norm_value, 
                     'subject_level_intercept':False, 
-                    'subject_level_initercept_init_val':False
+                    'subject_level_intercept_init_val':False
                 })
         self.init_vals_pd = pd.DataFrame(init_vals_pd)
         self.n_optimized_coeff = len(init_vals)
@@ -503,13 +503,34 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
     
     def _unpack_prepare_pop_coeffs(self,model_params:pd.DataFrame):
         pop_coeffs = pd.DataFrame()
+        subject_level_intercepts = pd.DataFrame()
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
             if coeff_name not in pop_coeffs.columns:
                 pop_coeffs[coeff_name] = [np.nan]
                 pop_coeffs[coeff_name] = pop_coeffs[coeff_name].astype(pd.Float64Dtype())
             pop_coeffs[coeff_name] = [row['init_val']]
-        return pop_coeffs
+            
+            if row['subject_level_intercept']:
+                omega_name = f"omega2_{coeff_name}"
+                col = (coeff_name, omega_name)
+                if col not in subject_level_intercepts.columns:
+                    subject_level_intercepts[col] = [np.nan]
+                    subject_level_intercepts[col] = subject_level_intercepts[col].astype(pd.Float64Dtype())
+                subject_level_intercepts[col] = [row['subject_level_intercept_init_val']]
+                
+        subject_level_intercepts.columns = (pd.MultiIndex.from_tuples(subject_level_intercepts.columns)
+            if len(subject_level_intercepts.columns) > 0 else subject_level_intercepts.columns)
+        
+        #if there are subject level intercepts, then we need to have model error sigma to perform FO, FOCE etc.
+        if len(subject_level_intercepts.columns) > 0:
+            coeff_name = 'sigma2'
+            if coeff_name not in pop_coeffs.columns:
+                pop_coeffs[coeff_name] = [np.nan]
+                pop_coeffs[coeff_name] = pop_coeffs[coeff_name].astype(pd.Float64Dtype())
+            pop_coeffs[coeff_name] = [0.1]
+                
+        return pop_coeffs, subject_level_intercepts
         
         
     
@@ -533,11 +554,13 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         model_param_dep_vars = init_vals.loc[init_vals['population_coeff'] == False, :]
         self._homongenize_timepoints(data, subject_id_c, time_col)
         thetas, theta_data = self._unpack_prepare_thetas(model_param_dep_vars, subject_data)
-        pop_coeffs = self._unpack_prepare_pop_coeffs(model_params)
+        pop_coeffs, subject_level_intercepts = self._unpack_prepare_pop_coeffs(model_params)
 
+        self.subject_level_intercepts = deepcopy(subject_level_intercepts)
         self.init_pop_coeffs = deepcopy(pop_coeffs)
         self.init_betas = deepcopy(thetas)
-        return pop_coeffs.copy(), thetas.copy(), theta_data.copy()
+        #this is too many things to return in this manner
+        return pop_coeffs.copy(), subject_level_intercepts.copy(), thetas.copy(), theta_data.copy()
     
     def _generate_pk_model_coeff_vectorized(self, pop_coeffs, betas, beta_data):
         model_coeffs = pd.DataFrame(dtype = pd.Float64Dtype())
@@ -720,12 +743,14 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         return preds
         
     def fit2(self, data, parallel = False, parallel_n_jobs = -1 , warm_start = False, checkpoint_filename='check_test.jb'):
-        pop_coeffs, betas, beta_data = self._assemble_pred_matrices(data)
+        pop_coeffs, omegas, betas, beta_data = self._assemble_pred_matrices(data)
+        init_params = [pop_coeffs.values,]
+        if len(omegas.values) > 0:
+            init_params.append(omegas.values)
         if len(betas.values) > 0:
-            init_params = [pop_coeffs.values, betas.values]
-            init_params = np.concatenate(init_params, axis = 1, dtype=np.float64).flatten()
-        else:
-            init_params = pop_coeffs.values.flatten().astype(np.float64)
+            init_params = init_params.append(betas.values)
+        init_params = np.concatenate(init_params, axis = 1, dtype=np.float64).flatten()
+        
         objective_function = partial(self._objective_function2, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
         self.fit_result_ = optimize_with_checkpoint_joblib(objective_function,
                                                            init_params,
