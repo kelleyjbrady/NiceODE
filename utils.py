@@ -135,9 +135,6 @@ class PopulationCoeffcient:
         c2 = self.subject_level_intercept
         if c1 and c2:
             self.subject_level_intercept_init_val = np.random.rand() + 1e-6
-        if c2:
-            self.subject_level_intercept_init_val = (np.log(self.subject_level_intercept_init_val) if self.log_transform_init_val
-                                        else self.subject_level_intercept_init_val)
         
 
 
@@ -278,10 +275,14 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                 'model_coeff_dep_var':None,
                 'population_coeff':True, 
                 'init_val':pop_coeff.optimization_init_val,
+                'model_coeff_lower_bound':pop_coeff.optimization_lower_bound,
+                'model_coeff_upper_bound':pop_coeff.optimization_upper_bound,
                 'allometric':False,
                 'allometric_norm_value':None,
                 'subject_level_intercept':pop_coeff.subject_level_intercept, 
-                'subject_level_intercept_init_val':pop_coeff.subject_level_intercept_init_val
+                'subject_level_intercept_init_val':pop_coeff.subject_level_intercept_init_val,
+                'subject_level_intercect_var_lower_bound':0 if pop_coeff.subject_level_intercept else None,
+                'subject_level_intercect_var_upper_bound':None
             })
         #unpack the dep vars for the population coeffs
         for model_coeff in self.dep_vars:
@@ -294,19 +295,33 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                     'model_coeff_dep_var': coeff_dep_var.column_name,
                     'population_coeff':False, 
                     'init_val':coeff_dep_var.optimization_init_val,
+                    'model_coeff_lower_bound':coeff_dep_var.optimization_lower_bound,
+                    'model_coeff_upper_bound':coeff_dep_var.optimization_upper_bound,
                     'allometric': True if coeff_dep_var.model_method == 'allometric' else False,
                     'allometric_norm_value':coeff_dep_var.allometric_norm_value, 
                     'subject_level_intercept':False, 
-                    'subject_level_intercept_init_val':False
+                    'subject_level_intercept_init_val':False,
+                    'subject_level_intercect_var_lower_bound':None,
+                    'subject_level_intercect_var_upper_bound':None
                 })
         self.init_vals_pd = pd.DataFrame(init_vals_pd)
         self.n_optimized_coeff = len(init_vals)
         return np.array(init_vals, dtype = np.float64)
     
     def _unpack_upper_lower_bounds(self,):
+        #pop coeff bounds
         bounds = [(obj.optimization_lower_bound, obj.optimization_upper_bound)
                   for obj in self.population_coeff]
+        #then sigma
+        if any([obj.subject_level_intercept for obj in self.population_coeff]):
+            bounds.extend((0, ))
         
+        #then omega2s
+        for obj in self.population_coeff:
+            if obj.subject_level_intercept:
+                bounds.extend((0, ))
+        
+        #then dep var bounds
         for model_coeff in self.dep_vars:
             coeff_dep_vars = self.dep_vars[model_coeff]
             bounds.extend([(obj.optimization_lower_bound, obj.optimization_upper_bound) for obj in coeff_dep_vars
@@ -539,7 +554,8 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         conc_at_time_c = self.conc_at_time_col
         verbose = self.verbose
         time_col = deepcopy(self.time_col)
-
+        self.unique_groups = np.array(data[subject_id_c].unique())
+        self.y_groups = np.array(data[subject_id_c].values)
         self.y = np.array(data[conc_at_time_c].values, dtype = np.float64)
         subject_data = data.drop_duplicates(subset=subject_id_c, keep = 'first').copy()
         self.subject_y0 = np.array(subject_data[conc_at_time_c].values, dtype = np.float64)
@@ -862,9 +878,26 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj):
         J[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon)
         
     residuals = model_obj.y - preds
-
+    omegas = omegas.values.flatten()
+    omega2 = np.diag(omegas)
+    sigma = sigma.values
+    total_log_likelihood = 0.0
+    for sub in model_obj.unique_groups:
+        filt = model_obj.y_groups == sub
+        
+        J_sub = J[filt]
+        n_timepoints = len(J_sub)
+        covariance_matrix_sub = J_sub @ omegas @ J_sub.T + np.diag(np.full(n_timepoints, sigma))
+        residuals_sub = residuals[filt]
+        
+        det_cov_matrix_i = np.linalg.det(covariance_matrix_sub)
+        inv_cov_matrix_i = np.linalg.inv(covariance_matrix_sub)
+        log_likelihood_i = (-0.5 * 
+                            (n_timepoints * np.log(2 * np.pi) + np.log(det_cov_matrix_i) + residuals_sub.T @ inv_cov_matrix_i @ residuals_sub))
+        total_log_likelihood = total_log_likelihood + log_likelihood_i
     
-    return None
+
+    return - total_log_likelihood
     
     
     
