@@ -314,12 +314,10 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                   for obj in self.population_coeff]
         #then sigma
         if any([obj.subject_level_intercept for obj in self.population_coeff]):
-            bounds.extend((0, ))
+            bounds.append((0, None))
         
         #then omega2s
-        for obj in self.population_coeff:
-            if obj.subject_level_intercept:
-                bounds.extend((0, ))
+        bounds.extend([(0, None) for obj in self.population_coeff if obj.subject_level_intercept])
         
         #then dep var bounds
         for model_coeff in self.dep_vars:
@@ -758,8 +756,8 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), columns = self.subject_level_intercepts.columns)
             start_idx = end_idx
             thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), columns = self.init_betas.columns)
-            res = FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, beta_data, self)
-            error = res
+            error, _ = FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, beta_data, self)
+
         return error
     
     def predict2(self, data, parallel = None, parallel_n_jobs = None, timepoints = None ):
@@ -767,10 +765,25 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             raise ValueError("The Model must be fit before prediction")
         params = self.fit_result_['x']
         pop_coeffs, _, _, beta_data = self._assemble_pred_matrices(data)
-        pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), columns = self.init_pop_coeffs.columns)
-        thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), columns = self.init_betas.columns)
-        model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
-        preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs, timepoints = timepoints)
+        if self.n_subject_level_intercepts == 0:
+           
+            pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), columns = self.init_pop_coeffs.columns)
+            thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), columns = self.init_betas.columns)
+            model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
+            preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs, timepoints = timepoints)
+        elif self.n_subject_level_intercepts > 0:
+            n_pop_c = self.n_population_coeff
+            pop_coeffs = pd.DataFrame(params[:n_pop_c].reshape(1,-1), columns = self.init_pop_coeffs.columns[:n_pop_c])
+            start_idx = n_pop_c
+            end_idx = start_idx + 1
+            sigma = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), columns = self.init_pop_coeffs.columns[start_idx:end_idx])
+            start_idx = end_idx
+            end_idx = start_idx + self.n_subject_level_intercepts
+            omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), columns = self.subject_level_intercepts.columns)
+            start_idx = end_idx
+            thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), columns = self.init_betas.columns)
+            error, b_i_approx = FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
+            
         return preds
         
     def fit2(self, data, parallel = False, parallel_n_jobs = -1 , warm_start = False, checkpoint_filename='check_test.jb'):
@@ -849,7 +862,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         return deepcopy(self)
 
 
-def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj):
+def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, solve_for_omegas = False):
     
     # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
     model_coeffs = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, theta_data)
@@ -875,19 +888,24 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj):
                                                                           thetas, theta_data)
         minus_preds = model_obj._solve_ivp(minus_model_coeffs, parallel = False, )
 
-        J[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon)
+        J[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
         
     residuals = model_obj.y - preds
     omegas = omegas.values.flatten()
-    omega2 = np.diag(omegas)
+    omega2 = np.diag(omegas) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
     sigma = sigma.values
     total_log_likelihood = 0.0
+    n_individuals = len(model_obj.unique_groups)
+    n_random_effects = len(omegas)
+
+    b_i_approx = np.zeros((n_individuals, n_random_effects))
+
     for sub in model_obj.unique_groups:
         filt = model_obj.y_groups == sub
         
         J_sub = J[filt]
         n_timepoints = len(J_sub)
-        covariance_matrix_sub = J_sub @ omegas @ J_sub.T + np.diag(np.full(n_timepoints, sigma))
+        covariance_matrix_sub = J_sub @ omega2 @ J_sub.T + np.diag(np.full(n_timepoints, sigma))
         residuals_sub = residuals[filt]
         
         det_cov_matrix_i = np.linalg.det(covariance_matrix_sub)
@@ -897,7 +915,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj):
         total_log_likelihood = total_log_likelihood + log_likelihood_i
     
 
-    return - total_log_likelihood
+    return - total_log_likelihood, b_i_approx
     
     
     
