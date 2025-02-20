@@ -281,7 +281,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                 'allometric_norm_value':None,
                 'subject_level_intercept':pop_coeff.subject_level_intercept, 
                 'subject_level_intercept_init_val':pop_coeff.subject_level_intercept_init_val,
-                'subject_level_intercect_var_lower_bound':0 if pop_coeff.subject_level_intercept else None,
+                'subject_level_intercect_var_lower_bound':1e-6 if pop_coeff.subject_level_intercept else None,
                 'subject_level_intercect_var_upper_bound':None
             })
         #unpack the dep vars for the population coeffs
@@ -314,10 +314,10 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                   for obj in self.population_coeff]
         #then sigma
         if any([obj.subject_level_intercept for obj in self.population_coeff]):
-            bounds.append((0, None))
+            bounds.append((1e-6, None))
         
         #then omega2s
-        bounds.extend([(0, None) for obj in self.population_coeff if obj.subject_level_intercept])
+        bounds.extend([(1e-6, None) for obj in self.population_coeff if obj.subject_level_intercept])
         
         #then dep var bounds
         for model_coeff in self.dep_vars:
@@ -900,7 +900,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
 
     b_i_approx = np.zeros((n_individuals, n_random_effects))
 
-    for sub in model_obj.unique_groups:
+    for sub_idx, sub in enumerate(model_obj.unique_groups):
         filt = model_obj.y_groups == sub
         
         J_sub = J[filt]
@@ -913,7 +913,9 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
         log_likelihood_i = (-0.5 * 
                             (n_timepoints * np.log(2 * np.pi) + np.log(det_cov_matrix_i) + residuals_sub.T @ inv_cov_matrix_i @ residuals_sub))
         total_log_likelihood = total_log_likelihood + log_likelihood_i
-    
+        if solve_for_omegas:
+            b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omega2), J_sub.T @ residuals_sub)
+            
 
     return - total_log_likelihood, b_i_approx
     
