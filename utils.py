@@ -783,7 +783,11 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             start_idx = end_idx
             thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), columns = self.init_betas.columns)
             error, b_i_approx = FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
-            
+            b_i_approx = pd.DataFrame(b_i_approx, columns = omegas.columns)
+            for c in pop_coeffs.columns:
+                pop_coeffs[c] = pop_coeffs[c] + b_i_approx[c]
+            model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
+            preds = self._solve_ivp(model_coeffs)
         return preds
         
     def fit2(self, data, parallel = False, parallel_n_jobs = -1 , warm_start = False, checkpoint_filename='check_test.jb'):
