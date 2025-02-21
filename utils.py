@@ -159,6 +159,7 @@ class ObjectiveFunctionBeta:
 @dataclass
 class ODEInitVals:
     column_name: str
+#    init_val_is_measured_t0_val: bool = True
 
 def sum_of_squares_loss(y_true, y_pred):
     return np.sum((y_true - y_pred)**2)
@@ -227,7 +228,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         population_coeff = [] if population_coeff is None else population_coeff
         self.ode_solver_method = ode_solver_method
         self.ode_output_size = determine_ode_output_size(pk_model_function)
-        self.ode_t0_cols = self._validate_ode_to_vals_size(ode_t0_cols)
+        self.ode_t0_cols = self._validate_ode_t0_vals_size(ode_t0_cols)
         self.groupby_col = groupby_col
         self.conc_at_time_col = conc_at_time_col
         self.time_col = time_col
@@ -257,7 +258,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.loss_params = loss_params
         self.optimzer_tol = optimizer_tol
     
-    def _validate_ode_to_vals_size(self, ode_t0_vals):
+    def _validate_ode_t0_vals_size(self, ode_t0_vals):
         size_tmp = len(ode_t0_vals)
         if size_tmp != self.ode_output_size:
             raise ValueError(f"n={size_tmp} ODE t0 args were provided (`ode_t0_vals`) but the provided ODE (`pk_model_function`) requires n = {self.ode_output_size}")
@@ -548,6 +549,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         
     
     def _assemble_pred_matrices(self, data):
+        data = data.reset_index(drop = True).copy()
         subject_id_c = self.groupby_col
         conc_at_time_c = self.conc_at_time_col
         verbose = self.verbose
@@ -557,9 +559,10 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.y = np.array(data[conc_at_time_c].values, dtype = np.float64)
         subject_data = data.drop_duplicates(subset=subject_id_c, keep = 'first').copy()
         self.subject_y0 = np.array(subject_data[conc_at_time_c].values, dtype = np.float64)
-        
+        self.subject_y0_idx = np.array(subject_data.index.values, dtype = np.int64)
         ode_init_val_cols = [i.column_name for i in self.ode_t0_cols]
         self.ode_t0_vals = subject_data[ode_init_val_cols].reset_index(drop = True).copy()
+        self.ode_t0_vals_are_subject_y0 = np.all(self.subject_y0 == self.ode_t0_vals.iloc[:,0])
         #n_subs = len(subs)
         init_vals = self.init_vals_pd.copy()
         init_vals['init_val'] = init_vals['init_val'].fillna(0.0)
@@ -876,12 +879,13 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     # prepopulated with partial
     preds = model_obj._solve_ivp(model_coeffs, parallel = False, )
     
-    
+    y = np.copy(model_obj.y)
+    y_groups_idx = np.copy(model_obj.y_groups)
     #compute the Jacobian using finite differences
     plus_pop_coeffs = pop_coeffs.copy()
     minus_pop_coeffs = pop_coeffs.copy()
     epsilon = 1e-6
-    J = np.zeros((len(model_obj.y), len(omegas)))
+    J = np.zeros((len(y), len(omegas)))
     for omega_idx, omega_c in enumerate(omegas.columns):
         c = omega_c[0]
         plus_pop_coeffs[c] = plus_pop_coeffs[c] + epsilon
@@ -896,7 +900,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
 
         J[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
         
-    residuals = model_obj.y - preds
+    residuals = y - preds
     omegas = omegas.values.flatten() #omegas as SD, we want Variance, thus **2 below
     omega2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
     sigma = sigma.values[0]
@@ -906,18 +910,26 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     n_random_effects = len(omegas)
 
     b_i_approx = np.zeros((n_individuals, n_random_effects))
+    if model_obj.ode_t0_vals_are_subject_y0:
+        drop_idx = model_obj.subject_y0_idx
+        J = np.delete(J, drop_idx, axis = 0)
+        residuals = np.delete(residuals, drop_idx)
+        y = np.delete(y, drop_idx)
+        y_groups_idx = np.delete(y_groups_idx, drop_idx)
 
-    J_vec = create_vectorizable_J(J, model_obj.y_groups, n_random_effects)
+    J_vec = create_vectorizable_J(J, y_groups_idx, n_random_effects)
     Omega_expanded = np.kron(np.eye(n_individuals), omega2)
-    covariance_matrix = J_vec @ Omega_expanded @ J_vec.T + np.diag(np.full(len(model_obj.y), sigma2))
+    covariance_matrix = (J_vec @ Omega_expanded @ J_vec.T 
+                         + np.diag(np.full(len(y), sigma2)) 
+                         + 1e-6 * np.eye(len(y)))
     det_cov_matrix = np.linalg.det(covariance_matrix)
     inv_cov_matrix = np.linalg.inv(covariance_matrix)
-    total_log_likelihood_vec = (-0.5 * (len(model_obj.y) * np.log(2 * np.pi)
+    total_log_likelihood_vec = (-0.5 * (len(y) * np.log(2 * np.pi)
                                     + np.log(det_cov_matrix) 
                                     + residuals.T @ inv_cov_matrix @ residuals))
     
     for sub_idx, sub in enumerate(model_obj.unique_groups):
-        filt = model_obj.y_groups == sub
+        filt = y_groups_idx == sub
         
         J_sub = J[filt]
         n_timepoints = len(J_sub)
@@ -935,21 +947,25 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
 
     return - total_log_likelihood, b_i_approx
     
-@njit 
+#@njit 
 def create_vectorizable_J(J, groups_idx, n_random_effects):
     unique_groups = np.unique(groups_idx)
-    J_reshaped = np.zeros((len(J), unique_groups * n_random_effects))
-    for group_idx, group in enumerate(unique_groups):
+    J_reshaped = np.zeros((len(J), len(unique_groups) * n_random_effects))
+    start_row = 0
+    for g_idx, group in enumerate(unique_groups):
         n_timepoints = np.sum(groups_idx == group)
+        end_row = start_row + n_timepoints
         for j in range(n_random_effects):
-            start_row = group * n_timepoints
-            end_row = (group + 1) * n_timepoints
+            #start_row = g_idx * n_timepoints
+            #end_row = (g_idx + 1) * n_timepoints
             start_col_original = j # Use j directly
-            start_col_reshaped = group * n_random_effects + j
+            start_col_reshaped = g_idx * n_random_effects + j
             end_col_reshaped = start_col_reshaped + 1
             J_tmp = J[start_row:end_row, start_col_original:start_col_original+1]
             J_reshaped[start_row:end_row, start_col_reshaped:end_col_reshaped] = J_tmp
-    
+        start_row = end_row
+    return J_reshaped
+
 
 def arbitrary_objective_function(params, data, model_function=one_compartment_model, subject_id_c='SUBJID', conc_at_time_c='DV',
                                  time_c='TIME', population_coeff=['k', 'vd'],
