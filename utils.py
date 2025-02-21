@@ -897,21 +897,31 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
         J[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
         
     residuals = model_obj.y - preds
-    omegas = omegas.values.flatten()
-    omega2 = np.diag(omegas) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
-    sigma = sigma.values
+    omegas = omegas.values.flatten() #omegas as SD, we want Variance, thus **2 below
+    omega2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
+    sigma = sigma.values[0]
+    sigma2 = sigma**2
     total_log_likelihood = 0.0
     n_individuals = len(model_obj.unique_groups)
     n_random_effects = len(omegas)
 
     b_i_approx = np.zeros((n_individuals, n_random_effects))
 
+    J_vec = create_vectorizable_J(J, model_obj.y_groups, n_random_effects)
+    Omega_expanded = np.kron(np.eye(n_individuals), omega2)
+    covariance_matrix = J_vec @ Omega_expanded @ J_vec.T + np.diag(np.full(len(model_obj.y), sigma2))
+    det_cov_matrix = np.linalg.det(covariance_matrix)
+    inv_cov_matrix = np.linalg.inv(covariance_matrix)
+    total_log_likelihood_vec = (-0.5 * (len(model_obj.y) * np.log(2 * np.pi)
+                                    + np.log(det_cov_matrix) 
+                                    + residuals.T @ inv_cov_matrix @ residuals))
+    
     for sub_idx, sub in enumerate(model_obj.unique_groups):
         filt = model_obj.y_groups == sub
         
         J_sub = J[filt]
         n_timepoints = len(J_sub)
-        covariance_matrix_sub = J_sub @ omega2 @ J_sub.T + np.diag(np.full(n_timepoints, sigma))
+        covariance_matrix_sub = J_sub @ omega2 @ J_sub.T + np.diag(np.full(n_timepoints, sigma2))
         residuals_sub = residuals[filt]
         
         det_cov_matrix_i = np.linalg.det(covariance_matrix_sub)
@@ -925,8 +935,20 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
 
     return - total_log_likelihood, b_i_approx
     
-    
-    
+@njit 
+def create_vectorizable_J(J, groups_idx, n_random_effects):
+    unique_groups = np.unique(groups_idx)
+    J_reshaped = np.zeros((len(J), unique_groups * n_random_effects))
+    for group_idx, group in enumerate(unique_groups):
+        n_timepoints = np.sum(groups_idx == group)
+        for j in range(n_random_effects):
+            start_row = group * n_timepoints
+            end_row = (group + 1) * n_timepoints
+            start_col_original = j # Use j directly
+            start_col_reshaped = group * n_random_effects + j
+            end_col_reshaped = start_col_reshaped + 1
+            J_tmp = J[start_row:end_row, start_col_original:start_col_original+1]
+            J_reshaped[start_row:end_row, start_col_reshaped:end_col_reshaped] = J_tmp
     
 
 def arbitrary_objective_function(params, data, model_function=one_compartment_model, subject_id_c='SUBJID', conc_at_time_c='DV',
