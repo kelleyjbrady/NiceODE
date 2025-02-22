@@ -24,6 +24,7 @@ import pytensor
 import pytensor.tensor as pt
 import inspect
 import ast
+from scipy.linalg import block_diag
 
 def softplus(x):
     return np.log(1 + np.exp(x))
@@ -542,7 +543,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             if coeff_name not in pop_coeffs.columns:
                 pop_coeffs[coeff_name] = [np.nan]
                 pop_coeffs[coeff_name] = pop_coeffs[coeff_name].astype(pd.Float64Dtype())
-            pop_coeffs[coeff_name] = [0.1]
+            pop_coeffs[coeff_name] = [4]
                 
         return pop_coeffs, subject_level_intercepts
         
@@ -921,21 +922,36 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     Omega_expanded = np.kron(np.eye(n_individuals), omega2)
     covariance_matrix = (J_vec @ Omega_expanded @ J_vec.T 
                          + np.diag(np.full(len(y), sigma2)) 
-                         + 1e-6 * np.eye(len(y)))
+                         + 1e-6 * np.eye(len(y))
+                         )
     det_cov_matrix = np.linalg.det(covariance_matrix)
+    if ((det_cov_matrix == 0) 
+        or (det_cov_matrix == np.inf) 
+        or (det_cov_matrix == -np.inf)):
+        need_debug = True
     inv_cov_matrix = np.linalg.inv(covariance_matrix)
     total_log_likelihood_vec = (-0.5 * (len(y) * np.log(2 * np.pi)
                                     + np.log(det_cov_matrix) 
                                     + residuals.T @ inv_cov_matrix @ residuals))
     
+    debug_extreme_J = {}
+    debug_near_zero_resid = {}
+    debug_cov_diag_near_zero = {}
+    cov_matrix_i = []
     for sub_idx, sub in enumerate(model_obj.unique_groups):
         filt = y_groups_idx == sub
         
         J_sub = J[filt]
+        if np.any(np.abs(J_sub) < 1e-5) or np.any(np.abs(J_sub) > 1e5):
+            debug_extreme_J[sub_idx] = J_sub
         n_timepoints = len(J_sub)
-        covariance_matrix_sub = J_sub @ omega2 @ J_sub.T + np.diag(np.full(n_timepoints, sigma2))
+        covariance_matrix_sub = J_sub @ omega2 @ J_sub.T + np.diag(np.full(n_timepoints, sigma2)) + + 1e-6 * np.eye(n_timepoints)
+        cov_matrix_i.append(covariance_matrix_sub)
+        if np.any(np.abs(np.diag(covariance_matrix_sub)) < 1e-5):
+            debug_cov_diag_near_zero[sub_idx] = np.diag(covariance_matrix_sub)
         residuals_sub = residuals[filt]
-        
+        if np.all(np.abs(residuals_sub) < 1e-5) or np.all(np.abs(residuals_sub) > 1e5):
+            debug_near_zero_resid[sub_idx] = residuals_sub
         det_cov_matrix_i = np.linalg.det(covariance_matrix_sub)
         inv_cov_matrix_i = np.linalg.inv(covariance_matrix_sub)
         log_likelihood_i = (-0.5 * 
@@ -944,7 +960,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
         if solve_for_omegas:
             b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omega2), J_sub.T @ residuals_sub)
             
-
+    alt_conv_blk_diag = block_diag(*cov_matrix_i)
     return - total_log_likelihood, b_i_approx
     
 #@njit 
