@@ -914,7 +914,9 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     
     
     apprx_fprime_jac = True
+    J_afp = None
     central_diff_jax = False
+    J_cd = None
     if apprx_fprime_jac:
         def wrapped_solve_ivp(pop_coeffs_array):
             #pop_coeffs_array will have shape n_pop, 
@@ -922,15 +924,14 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
             pop_coeffs_inner = pd.DataFrame(pop_coeffs_array.reshape(1,-1), columns = pop_coeffs.columns)
             model_coeffs_local = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs_inner, thetas, theta_data)
             return model_obj._solve_ivp(model_coeffs_local, parallel=False)
-        J = approx_fprime(pop_coeffs.values.flatten(), wrapped_solve_ivp, epsilon=1e-6)
-        J = J.reshape(len(model_obj.y), n_random_effects)
-        J_afp = np.copy(J)
+        J_afp = approx_fprime(pop_coeffs.values.flatten(), wrapped_solve_ivp, epsilon=1e-6)
+        J_afp = J_afp.reshape(len(model_obj.y), n_random_effects)
     if central_diff_jax:
         #compute the Jacobian using finite differences
         plus_pop_coeffs = pop_coeffs.copy()
         minus_pop_coeffs = pop_coeffs.copy()
         epsilon = 1e-6
-        J = np.zeros((len(y), n_random_effects))
+        J_cd = np.zeros((len(y), n_random_effects))
         for omega_idx, omega_c in enumerate(omegas_names):
             c = omega_c[0]
             plus_pop_coeffs[c] = plus_pop_coeffs[c] + epsilon
@@ -943,8 +944,8 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
                                                                             thetas, theta_data)
             minus_preds = model_obj._solve_ivp(minus_model_coeffs, parallel = False, )
 
-            J[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
-        
+            J_cd[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
+    J = [i for i in [J_afp, J_cd] if i is not None][0]
     
     
     
@@ -959,14 +960,12 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
         y = np.delete(y, drop_idx)
         y_groups_idx = np.delete(y_groups_idx, drop_idx)
 
-    J_vec = create_vectorizable_J(J, y_groups_idx, n_random_effects)
-    Omega_expanded = np.kron(np.eye(n_individuals), omega2)
-    covariance_matrix = (J_vec @ Omega_expanded @ J_vec.T 
-                         + np.diag(np.full(len(y), sigma2)) 
-                         + 1e-6 * np.eye(len(y))
-                         )
-    direct_det_cov = True
+    
+    direct_det_cov = False
+    direct_neg_ll = None
+    
     cholsky_cov = True
+    neg_ll_chol = None
     if cholsky_cov:
         V_all = []
         for sub in model_obj.unique_groups:
@@ -990,6 +989,12 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
         neg_ll_chol = -0.5 * (log_det_V + residuals.T @ V_inv_residuals + len(y) * np.log(2 * np.pi))
         
     if direct_det_cov:
+        J_vec = create_vectorizable_J(J, y_groups_idx, n_random_effects)
+        Omega_expanded = np.kron(np.eye(n_individuals), omega2)
+        covariance_matrix = (J_vec @ Omega_expanded @ J_vec.T 
+                            + np.diag(np.full(len(y), sigma2)) 
+                            + 1e-6 * np.eye(len(y))
+                            )
         det_cov_matrix = np.linalg.det(covariance_matrix)
         if ((det_cov_matrix == 0) 
             or (det_cov_matrix == np.inf) 
@@ -1002,36 +1007,42 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
                                     + residuals.T @ inv_cov_matrix @ residuals))
     
     #fallback method is used by default
+    per_sub_direct_neg_ll = False
     debug_extreme_J = {}
     debug_near_zero_resid = {}
     debug_cov_diag_near_zero = {}
     cov_matrix_i = []
-    per_sub_direct_neg_ll = 0.0
-    for sub_idx, sub in enumerate(model_obj.unique_groups):
-        filt = y_groups_idx == sub
-        
-        J_sub = J[filt]
-        if np.any(np.abs(J_sub) < 1e-5) or np.any(np.abs(J_sub) > 1e5):
-            debug_extreme_J[sub_idx] = J_sub
-        n_timepoints = len(J_sub)
-        covariance_matrix_sub = J_sub @ omega2 @ J_sub.T + np.diag(np.full(n_timepoints, sigma2))  + 1e-6 * np.eye(n_timepoints)
-        cov_matrix_i.append(covariance_matrix_sub)
-        if np.any(np.abs(np.diag(covariance_matrix_sub)) < 1e-5):
-            debug_cov_diag_near_zero[sub_idx] = np.diag(covariance_matrix_sub)
-        residuals_sub = residuals[filt]
-        if np.all(np.abs(residuals_sub) < 1e-5) or np.all(np.abs(residuals_sub) > 1e5):
-            debug_near_zero_resid[sub_idx] = residuals_sub
-        det_cov_matrix_i = np.linalg.det(covariance_matrix_sub)
-        inv_cov_matrix_i = np.linalg.inv(covariance_matrix_sub)
-        log_likelihood_i = (-0.5 * 
-                            (n_timepoints * np.log(2 * np.pi) + np.log(det_cov_matrix_i) + residuals_sub.T @ inv_cov_matrix_i @ residuals_sub))
-        per_sub_direct_neg_ll = per_sub_direct_neg_ll + log_likelihood_i
-        if solve_for_omegas:
+    per_sub_direct_neg_ll = 0.0 if per_sub_direct_neg_ll else None
+    
+    if solve_for_omegas:
+        for sub_idx, sub in enumerate(model_obj.unique_groups):
+            filt = y_groups_idx == sub
+            
+            J_sub = J[filt]
+            residuals_sub = residuals[filt]
+            if per_sub_direct_neg_ll:
+                if np.any(np.abs(J_sub) < 1e-5) or np.any(np.abs(J_sub) > 1e5):
+                    debug_extreme_J[sub_idx] = J_sub
+                n_timepoints = len(J_sub)
+                covariance_matrix_sub = J_sub @ omega2 @ J_sub.T + np.diag(np.full(n_timepoints, sigma2))  + 1e-6 * np.eye(n_timepoints)
+                cov_matrix_i.append(covariance_matrix_sub)
+                if np.any(np.abs(np.diag(covariance_matrix_sub)) < 1e-5):
+                    debug_cov_diag_near_zero[sub_idx] = np.diag(covariance_matrix_sub)
+                
+                if np.all(np.abs(residuals_sub) < 1e-5) or np.all(np.abs(residuals_sub) > 1e5):
+                    debug_near_zero_resid[sub_idx] = residuals_sub
+                det_cov_matrix_i = np.linalg.det(covariance_matrix_sub)
+                inv_cov_matrix_i = np.linalg.inv(covariance_matrix_sub)
+                log_likelihood_i = (-0.5 * 
+                                    (n_timepoints * np.log(2 * np.pi) + np.log(det_cov_matrix_i) + residuals_sub.T @ inv_cov_matrix_i @ residuals_sub))
+                per_sub_direct_neg_ll = per_sub_direct_neg_ll + log_likelihood_i
+            
             b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omega2), J_sub.T @ residuals_sub)
     
     #compare to J_vec to verify the two are the same if needed        
-    alt_conv_blk_diag = block_diag(*cov_matrix_i)
-    return - per_sub_direct_neg_ll, b_i_approx
+    #alt_conv_blk_diag = block_diag(*cov_matrix_i)
+    neg_ll = [i for i in [neg_ll_chol,direct_neg_ll, per_sub_direct_neg_ll] if i is not None][0]
+    return - neg_ll, b_i_approx
     
 #@njit 
 def create_vectorizable_J(J, groups_idx, n_random_effects):

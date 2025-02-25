@@ -46,3 +46,8 @@ me_mod =  OneCompartmentModel(
 
 # %%
 me_mod.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me.jb', parallel=False, parallel_n_jobs=4)
+
+
+with open('me_mod_debug.jb', 'wb') as f:
+    jb.dump(me_mod, f)
+

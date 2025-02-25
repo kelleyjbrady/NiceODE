@@ -16,7 +16,7 @@ class OneCompartmentFODiffEq(object):
         return first_order_one_compartment_model
 
 
-@njit
+#@njit
 def first_order_one_compartment_model2(t, y, cl, vd):
     """
     Defines the differential equation for a one-compartment pharmacokinetic model.
