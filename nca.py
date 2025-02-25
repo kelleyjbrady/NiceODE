@@ -4,7 +4,9 @@ from scipy.stats import linregress
 from utils import safe_signed_log
 from sklearn.metrics import auc
 from typing import List
-
+import seaborn as sns
+import os
+import matplotlib.pyplot as plt
 
 def estimate_subject_slope_cv(df, time_col = 'TIME', conc_col = 'CONC_ln', id_col = 'ID',):
     df = df.copy()
@@ -46,7 +48,7 @@ def estimate_subject_slope_cv(df, time_col = 'TIME', conc_col = 'CONC_ln', id_co
                     slope_cv = None
                     start_idx_slopes_signs = None
                 results.append({
-                    'ID':work_df[id_col].unique()[0],
+                    id_col:work_df[id_col].unique()[0],
                     #'start_index': start_idx,
                     #'end_index': end_idx,
                     'auc_per_time':auc_per_time,
@@ -115,7 +117,7 @@ def indentify_low_conc_zones2(df,
                 
                 n = len(work_df[time_col].unique())
                 results.append({
-                    'ID':work_df[id_col].unique()[0],
+                    id_col:work_df[id_col].unique()[0],
                     #'start_index': start_idx,
                     #'end_index': end_idx,
                     'auc_per_time':auc_per_time,
@@ -129,10 +131,10 @@ def indentify_low_conc_zones2(df,
     return identify_low_conc_zones([tmp_res], low_frac = low_frac)
 
 
-def identify_low_conc_zones(dfs:List[pd.DataFrame], low_frac = 0.01):
+def identify_low_conc_zones(dfs:List[pd.DataFrame], low_frac = 0.01, id_col = 'ID'):
     subject_zero_zones = []
     for tmp in dfs:
-        id = tmp['ID'].values[0]
+        id = tmp[id_col].values[0]
         max_auc = tmp['auc_per_time'].max()
         #f1 = tmp['auc_per_time'] < max_auc*.01
         tmp.loc[tmp['auc_per_time'] < max_auc*low_frac, 'auc_per_time_gt_lim'] = 0
@@ -149,7 +151,7 @@ def identify_low_conc_zones(dfs:List[pd.DataFrame], low_frac = 0.01):
 
         subject_zero_zones.append(
             {
-                'ID':id, 
+                id_col:id, 
                 'zero_window_time_start':brack['start_time'].values[0] if len(brack) > 0 else np.inf,
                 'consecutive_zero_windows':len(brack)
                 
@@ -157,15 +159,15 @@ def identify_low_conc_zones(dfs:List[pd.DataFrame], low_frac = 0.01):
         )
     return pd.DataFrame(subject_zero_zones)
 
-def estimate_k_halflife(dfs, zero_zone_df = None, adj_r2_threshold = 0.8):
+def estimate_k_halflife(dfs, zero_zone_df = None, adj_r2_threshold = 0.8, id_col = 'ID'):
     zero_zone_df = identify_low_conc_zones(dfs) if zero_zone_df is None else zero_zone_df
     res = []
     adj_r2_ind_col = f"adj_r2_gte_{adj_r2_threshold}"
     for tmp in dfs:
-        if tmp['ID'].values[0] == 'M9':
+        if tmp[id_col].values[0] == 'M9':
             debugging = True
         #id = tmp['ID'].values[0]
-        tmp = tmp.merge(zero_zone_df, how = 'left', on = 'ID')#.copy()
+        tmp = tmp.merge(zero_zone_df, how = 'left', on = id_col)#.copy()
         f1 = tmp['start_time'] < tmp['zero_window_time_start']
         f2 = tmp['end_time'] <= tmp['zero_window_time_start']
         tmp = tmp.loc[f1 & f2, :]
@@ -447,3 +449,51 @@ def calculate_auc_from_sections(df):
     tmp = linear_up.merge(log_down, how = 'left', on = 'ID')
     tmp['linup_logdown_auc'] = tmp['section_auc'] + tmp['section_auc_log_trap']
     return tmp.merge(linear_only_auc, how = 'left', on = 'ID').copy()
+
+def plot_nca_sections(df, ks_df, id_col = 'ID', time_col = 'TIME', dv_col = 'CONC' ):
+    df = df.copy()
+    ks = ks_df.copy()
+    plot_dir = 'plots'
+    if not os.path.exists(plot_dir):
+        os.makedirs('plots')
+
+    for id in df[id_col].unique():
+        fig, axs = plt.subplots(2)
+        plot_me = df.loc[(df[id_col] == id) & (df[time_col] < 200), :].copy()
+        info_df = ks.loc[ks[id_col] == id, ]
+        plot_me['conc_ln'] = safe_signed_log(plot_me[dv_col])
+        sns.lineplot(plot_me, x = time_col, y = dv_col,ax = axs[0], marker='o')
+        y_max = plot_me[dv_col].max()
+        y_max_ln = plot_me['conc_ln'].max() 
+        terminal_slope_start = info_df['start_time'].values[0]
+        terminal_slope_end = info_df['end_time'].max()
+        x_max = plot_me[time_col].max()
+        zero_zone_start = info_df['zero_window_time_start'].values[0]
+        axs[0].fill_betweenx(y = np.linspace(0, y_max, 5),
+                            x1 = np.repeat(terminal_slope_start, 5),
+                            x2 = np.repeat(terminal_slope_end, 5),
+                            alpha = .5, color = 'green',
+                            label = 'Terminal Slope Zone'
+                            )
+        axs[0].fill_betweenx(y = np.linspace(0, y_max, 5),
+                            x1 = np.repeat(zero_zone_start, 5),
+                            x2 = np.repeat(x_max, 5),
+                            alpha = .5, color = 'red',
+                            label = '~0 AUC Zone'
+                            )
+        sns.lineplot(plot_me, x = time_col, y = 'conc_ln',ax = axs[1], marker = 'o')
+        axs[1].fill_betweenx(y = np.linspace(0, y_max_ln, 5),
+                            x1 = np.repeat(terminal_slope_start, 5),
+                            x2 = np.repeat(terminal_slope_end, 5),
+                            alpha = .5, color = 'green',
+                            label = 'Terminal Slope Zone'
+                            )
+        axs[1].fill_betweenx(y = np.linspace(0, y_max_ln, 5),
+                            x1 = np.repeat(zero_zone_start, 5),
+                            x2 = np.repeat(x_max, 5),
+                            alpha = .5, color = 'red',
+                            label = '~0 AUC Zone'
+                            )
+        plt.suptitle(f'{id} Concentration Time Profile')
+        
+        plt.savefig(os.path.join(plot_dir, f'{id}_conctime_new2.png'), dpi = 300)

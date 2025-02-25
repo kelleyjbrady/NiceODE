@@ -795,10 +795,30 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs_i, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs)
         return preds
-        
-    def fit2(self, data, parallel = False, parallel_n_jobs = -1 , warm_start = False, checkpoint_filename='check_test.jb'):
+    
+    def prepare_indiv_params(self, data,):
         pop_coeffs, omegas, betas, beta_data = self._assemble_pred_matrices(data)
-        init_params = [pop_coeffs.values,]
+        if self.n_subject_level_intercepts > 0:
+            #remove sigma from pop_coeffs if it is there
+            keep_cols = list(pop_coeffs.columns[:-1])
+            pop_coeffs = pop_coeffs[keep_cols]
+        init_params = pop_coeffs.values
+        if len(betas.values) > 0:
+            init_params.append(betas.values)
+        init_params = np.concatenate(init_params, axis = 1, dtype=np.float64).flatten()
+        return init_params, beta_data
+    
+    def fit_indiv(self, data):
+        init_params, beta_data = self.prepare_indiv_params(data)
+        fits = []
+        for idx, row in beta_data.iterrows():
+            fits.append()
+            
+        
+    
+    def fit2(self, data, parallel = False, parallel_n_jobs = -1 , warm_start = False, checkpoint_filename='check_test.jb', ):
+        pop_coeffs, omegas, betas, beta_data = self._assemble_pred_matrices(data)
+        init_params = [pop_coeffs.values,] #pop coeffs already includes sigma if needed, this is confusing
         if len(omegas.values) > 0:
             init_params.append(omegas.values)
         if len(betas.values) > 0:
@@ -911,6 +931,8 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     n_random_effects = len(omegas)
 
     b_i_approx = np.zeros((n_individuals, n_random_effects))
+    
+    #If there are any subjects with only one data point this will fail by dropping the entire subject
     if model_obj.ode_t0_vals_are_subject_y0:
         drop_idx = model_obj.subject_y0_idx
         J = np.delete(J, drop_idx, axis = 0)
