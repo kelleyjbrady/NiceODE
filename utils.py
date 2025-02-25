@@ -25,6 +25,7 @@ import pytensor.tensor as pt
 import inspect
 import ast
 from scipy.linalg import block_diag
+from scipy.optimize import approx_fprime
 
 def softplus(x):
     return np.log(1 + np.exp(x))
@@ -899,36 +900,51 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     #would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`) 
     # prepopulated with partial
     preds = model_obj._solve_ivp(model_coeffs, parallel = False, )
-    
-    y = np.copy(model_obj.y)
-    y_groups_idx = np.copy(model_obj.y_groups)
-    #compute the Jacobian using finite differences
-    plus_pop_coeffs = pop_coeffs.copy()
-    minus_pop_coeffs = pop_coeffs.copy()
-    epsilon = 1e-6
-    J = np.zeros((len(y), len(omegas)))
-    for omega_idx, omega_c in enumerate(omegas.columns):
-        c = omega_c[0]
-        plus_pop_coeffs[c] = plus_pop_coeffs[c] + epsilon
-        plus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(plus_pop_coeffs,
-                                                                          thetas, theta_data)
-        plus_preds = model_obj._solve_ivp(plus_model_coeffs, parallel = False, )
-        
-        minus_pop_coeffs[c] = minus_pop_coeffs[c] - epsilon
-        minus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(minus_pop_coeffs,
-                                                                          thetas, theta_data)
-        minus_preds = model_obj._solve_ivp(minus_model_coeffs, parallel = False, )
-
-        J[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
-        
     residuals = y - preds
     omegas = omegas.values.flatten() #omegas as SD, we want Variance, thus **2 below
     omega2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
     sigma = sigma.values[0]
     sigma2 = sigma**2
-    total_log_likelihood = 0.0
     n_individuals = len(model_obj.unique_groups)
     n_random_effects = len(omegas)
+    
+    y = np.copy(model_obj.y)
+    y_groups_idx = np.copy(model_obj.y_groups)
+    
+    cholsky_jac = True
+    central_diff_jax = True
+    if cholsky_jac:
+        def wrapped_solve_ivp(pop_coeffs_array):
+            #pop_coeffs_array will have shape n_pop, 
+            pop_coeffs_series = pd.Series(pop_coeffs_array, index = model_obj.pop_cols)
+            model_coeffs_local = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs_series, thetas, model_obj.theta_data)
+            return model_obj._solve_ivp(model_coeffs_local, parallel=False)
+        J = approx_fprime(pop_coeffs.values, wrapped_solve_ivp, epsilon=1e-6)
+        J = J.reshape(len(model_obj.y), n_random_effects)
+        J_chol = np.copy(J)
+    if central_diff_jax:
+        #compute the Jacobian using finite differences
+        plus_pop_coeffs = pop_coeffs.copy()
+        minus_pop_coeffs = pop_coeffs.copy()
+        epsilon = 1e-6
+        J = np.zeros((len(y), len(omegas)))
+        for omega_idx, omega_c in enumerate(omegas.columns):
+            c = omega_c[0]
+            plus_pop_coeffs[c] = plus_pop_coeffs[c] + epsilon
+            plus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(plus_pop_coeffs,
+                                                                            thetas, theta_data)
+            plus_preds = model_obj._solve_ivp(plus_model_coeffs, parallel = False, )
+            
+            minus_pop_coeffs[c] = minus_pop_coeffs[c] - epsilon
+            minus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(minus_pop_coeffs,
+                                                                            thetas, theta_data)
+            minus_preds = model_obj._solve_ivp(minus_model_coeffs, parallel = False, )
+
+            J[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
+        
+    
+    total_log_likelihood = 0.0
+    
 
     b_i_approx = np.zeros((n_individuals, n_random_effects))
     
@@ -946,16 +962,19 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
                          + np.diag(np.full(len(y), sigma2)) 
                          + 1e-6 * np.eye(len(y))
                          )
+
     det_cov_matrix = np.linalg.det(covariance_matrix)
     if ((det_cov_matrix == 0) 
         or (det_cov_matrix == np.inf) 
         or (det_cov_matrix == -np.inf)):
         need_debug = True
-    inv_cov_matrix = np.linalg.inv(covariance_matrix)
+    inv_cov_matrix = np.linalg.inv(covariance_matrix)\
+    #this rarely is usuable due to inf or zero determinant when vectorized
     total_log_likelihood_vec = (-0.5 * (len(y) * np.log(2 * np.pi)
                                     + np.log(det_cov_matrix) 
                                     + residuals.T @ inv_cov_matrix @ residuals))
     
+    #fallback method is used by default
     debug_extreme_J = {}
     debug_near_zero_resid = {}
     debug_cov_diag_near_zero = {}
@@ -981,7 +1000,8 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
         total_log_likelihood = total_log_likelihood + log_likelihood_i
         if solve_for_omegas:
             b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omega2), J_sub.T @ residuals_sub)
-            
+    
+    #compare to J_vec to verify the two are the same if needed        
     alt_conv_blk_diag = block_diag(*cov_matrix_i)
     return - total_log_likelihood, b_i_approx
     
