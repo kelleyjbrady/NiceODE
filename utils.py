@@ -1048,14 +1048,9 @@ def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
 
 def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, solve_for_omegas = False):
     
-    # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
+    #unpack some variables locally for clarity
     y = np.copy(model_obj.y)
     y_groups_idx = np.copy(model_obj.y_groups)
-    model_coeffs = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, theta_data)
-    #would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`) 
-    # prepopulated with partial
-    preds = model_obj._solve_ivp(model_coeffs, parallel = False, )
-    residuals = y - preds
     omegas_names = list(omegas.columns)
     omegas = omegas.values.flatten() #omegas as SD, we want Variance, thus **2 below
     omegas2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
@@ -1063,6 +1058,14 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     sigma2 = sigma**2
     n_individuals = len(model_obj.unique_groups)
     n_random_effects = len(omegas.columns)
+    
+    # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
+    model_coeffs = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, theta_data)
+    #would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`) 
+    # prepopulated with partial
+    preds = model_obj._solve_ivp(model_coeffs, parallel = False, )
+    residuals = y - preds
+    
     
     
     
@@ -1076,7 +1079,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     
     
 
-    b_i_approx = np.zeros((n_individuals, n_random_effects))
+    
     
     #If there are any subjects with only one data point this will fail by dropping the entire subject
     if model_obj.ode_t0_vals_are_subject_y0:
@@ -1100,7 +1103,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
                                          naive_cov_subj=per_sub_direct_neg_ll,
                                          )
     
-    
+    b_i_approx = np.zeros((n_individuals, n_random_effects))
     if solve_for_omegas:
         for sub_idx, sub in enumerate(model_obj.unique_groups):
             filt = y_groups_idx == sub
