@@ -203,7 +203,622 @@ def safe_signed_log(x):
     return sign * np.log1p(np.abs(x))
 
 
+def estimate_fprime_jac(pop_coeffs,thetas, theta_data, n_random_effects, y, model_obj):
+    def wrapped_solve_ivp(pop_coeffs_array):
+            #pop_coeffs_array will have shape n_pop, 
+            #pop_coeffs_series = pd.Series(pop_coeffs_array, index = model_obj.pop_cols)
+            pop_coeffs_inner = pd.DataFrame(pop_coeffs_array.reshape(1,-1), columns = pop_coeffs.columns)
+            model_coeffs_local = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs_inner, thetas, theta_data)
+            return model_obj._solve_ivp(model_coeffs_local, parallel=False)
+    J_afp = approx_fprime(pop_coeffs.values.flatten(), wrapped_solve_ivp, epsilon=1e-6)
+    J_afp = J_afp.reshape(len(y), n_random_effects)
+    return J_afp
+
+def estimate_cdiff_jac(pop_coeffs,
+                       thetas,
+                       theta_data,
+                       n_random_effects,
+                       omegas_names,
+                       y, model_obj):
+    plus_pop_coeffs = pop_coeffs.copy()
+    minus_pop_coeffs = pop_coeffs.copy()
+    epsilon = 1e-6
+    J_cd = np.zeros((len(y), n_random_effects))
+    for omega_idx, omega_c in enumerate(omegas_names):
+        c = omega_c[0]
+        plus_pop_coeffs[c] = plus_pop_coeffs[c] + epsilon
+        plus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(plus_pop_coeffs,
+                                                                        thetas, theta_data)
+        plus_preds = model_obj._solve_ivp(plus_model_coeffs, parallel = False, )
+        
+        minus_pop_coeffs[c] = minus_pop_coeffs[c] - epsilon
+        minus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(minus_pop_coeffs,
+                                                                        thetas, theta_data)
+        minus_preds = model_obj._solve_ivp(minus_model_coeffs, parallel = False, )
+
+        J_cd[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
+    return J_cd
+
+def estimate_jacobian(pop_coeffs:pd.DataFrame,
+                      thetas:pd.DataFrame,
+                      theta_data:List[pd.DataFrame],
+                      omega_names:List,
+                      y:np.array,
+                      model_obj,
+                      use_fprime:bool = True,
+                      use_cdiff:bool = True, 
+                      ):
+    n_random_effects = len(omega_names)
+    J_afp = None
+    J_cd = None
+    if use_fprime:
+        J_afp = estimate_fprime_jac(pop_coeffs,thetas, theta_data, n_random_effects, y, model_obj)
+    if use_cdiff:
+        J_cd = estimate_cdiff_jac(pop_coeffs,thetas, theta_data, n_random_effects, omega_names, model_obj)
+    J = [i for i in [J_afp, J_cd] if i is not None][0]
+    return J
+
+def estimate_cov_chol(J, y_groups_idx, y, residuals, sigma2, omegas2, model_obj):
+    #V_all = []
+    log_det_V = 0
+    L_all = []
+    for sub in model_obj.unique_groups:
+        filt = y_groups_idx == sub
+        J_sub = J[filt]
+        n_timepoints = len(J_sub)
+        R_i = sigma2 * np.eye(n_timepoints)  # Constant error
+        #Omega = np.diag(omegas**2) # Construct D matrix from omegas
+        V_i = R_i + J_sub @ omegas2 @ J_sub.T
+
+        L_i, lower = cho_factor(V_i)  # Cholesky of each V_i
+        L_all.append(L_i)
+        log_det_V += 2 * np.sum(np.log(np.diag(L_i)))  # log|V_i|
     
+    L_block = block_diag(*L_all) #key change from before
+    V_inv_residuals = cho_solve((L_block, True), residuals)
+    neg_ll_chol = -0.5 * (log_det_V + residuals.T @ V_inv_residuals + len(y) * np.log(2 * np.pi))
+    
+    return neg_ll_chol
+
+def estimate_cov_naive(J, y_groups_idx, y, residuals, sigma2,omega2, n_individuals, n_random_effects, ):
+    J_vec = create_vectorizable_J(J, y_groups_idx, n_random_effects)
+    Omega_expanded = np.kron(np.eye(n_individuals), omega2)
+    covariance_matrix = (J_vec @ Omega_expanded @ J_vec.T 
+                        + np.diag(np.full(len(y), sigma2)) 
+                        + 1e-6 * np.eye(len(y))
+                        )
+    det_cov_matrix = np.linalg.det(covariance_matrix)
+    if ((det_cov_matrix == 0) 
+        or (det_cov_matrix == np.inf) 
+        or (det_cov_matrix == -np.inf)):
+        need_debug = True
+    inv_cov_matrix = np.linalg.inv(covariance_matrix)
+    #this rarely is usuable due to inf or zero determinant when vectorized
+    direct_neg_ll = (-0.5 * (len(y) * np.log(2 * np.pi)
+                                    + np.log(det_cov_matrix) 
+                                + residuals.T @ inv_cov_matrix @ residuals))
+    return direct_neg_ll
+
+def estimate_cov_naive_subj(J, y_groups_idx, residuals, sigma2, omega2, model_obj):
+    per_sub_direct_neg_ll = 0.0
+    debug_extreme_J = {}
+    debug_near_zero_resid = {}
+    debug_cov_diag_near_zero = {}
+    cov_matrix_i = []
+    for sub_idx, sub in enumerate(model_obj.unique_groups):
+        filt = y_groups_idx == sub
+        J_sub = J[filt]
+        residuals_sub = residuals[filt]
+        if np.any(np.abs(J_sub) < 1e-5) or np.any(np.abs(J_sub) > 1e5):
+            debug_extreme_J[sub_idx] = J_sub
+        n_timepoints = len(J_sub)
+        covariance_matrix_sub = J_sub @ omega2 @ J_sub.T + np.diag(np.full(n_timepoints, sigma2))  + 1e-6 * np.eye(n_timepoints)
+        cov_matrix_i.append(covariance_matrix_sub)
+        if np.any(np.abs(np.diag(covariance_matrix_sub)) < 1e-5):
+            debug_cov_diag_near_zero[sub_idx] = np.diag(covariance_matrix_sub)
+        
+        if np.all(np.abs(residuals_sub) < 1e-5) or np.all(np.abs(residuals_sub) > 1e5):
+            debug_near_zero_resid[sub_idx] = residuals_sub
+        det_cov_matrix_i = np.linalg.det(covariance_matrix_sub)
+        inv_cov_matrix_i = np.linalg.inv(covariance_matrix_sub)
+        log_likelihood_i = (-0.5 * 
+                            (n_timepoints * np.log(2 * np.pi) + np.log(det_cov_matrix_i) + residuals_sub.T @ inv_cov_matrix_i @ residuals_sub))
+        per_sub_direct_neg_ll = per_sub_direct_neg_ll + log_likelihood_i
+    return per_sub_direct_neg_ll
+
+def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
+                 sigma2, omegas2, n_individuals,
+                 n_random_effects,model_obj ,
+                 cholsky_cov = True, 
+                 naive_cov_vec = False, 
+                 naive_cov_subj = False,
+                 ):
+    cholsky_neg_ll = None
+    naive_vec_neg_ll = None
+    naive_subj_neg_ll = None
+    if cholsky_cov:
+        cholsky_neg_ll = estimate_cov_chol(J, y_groups_idx, y, residuals, sigma2, omegas2, model_obj)
+    if naive_cov_vec:
+        naive_vec_neg_ll = estimate_cov_naive(J, y_groups_idx, y,
+                                              residuals, sigma2,omegas2,
+                                            n_individuals, n_random_effects,)
+    if naive_cov_subj:
+        naive_subj_neg_ll = estimate_cov_naive_subj(J, y_groups_idx,
+                                                   residuals, sigma2, omegas2, 
+                                                   model_obj)
+    neg_ll = [i for i in [cholsky_neg_ll,naive_vec_neg_ll, naive_subj_neg_ll] if i is not None][0]
+    
+    return neg_ll
+
+def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, b_i_init):
+    """Estimates b_i for a *single* individual using Newton-Raphson (or similar)."""
+
+    def conditional_log_likelihood(b_i, y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj):
+        # Combine the population coefficients and b_i for this individual
+        
+        combined_coeffs = pop_coeffs.copy()
+        # Ensure b_i is a Series with correct index for merging
+        b_i_series = pd.Series(b_i, index=model_obj.omega_cols)
+        for col in combined_coeffs.columns:
+            if col in b_i_series.index:
+                combined_coeffs[col] = pop_coeffs[col] + b_i_series[col]
+        # Generate the model coefficients for this individual
+        model_coeffs_i = model_obj._generate_pk_model_coeff_vectorized(combined_coeffs, thetas, beta_data)
+        # Solve the ODEs for this individual
+        preds_i = model_obj._solve_ivp(model_coeffs_i, parallel=False)
+        #compute residuals
+        residuals_i = y_i - preds_i
+        # Calculate the negative conditional log-likelihood
+        n_t = len(y_i)
+        R_i = sigma2 * np.eye(n_t)
+        try:
+            inv_R_i = np.linalg.inv(R_i)
+        except np.linalg.LinAlgError:
+            return np.inf #return inf if R is singular
+        
+        log_likelihood_data = -0.5 * (n_t * np.log(2 * np.pi) + np.log(np.linalg.det(R_i)) + residuals_i.T @ inv_R_i @ residuals_i)
+        
+        try:
+            inv_Omega = np.linalg.inv(Omega)
+        except np.linalg.LinAlgError:
+            return np.inf #return inf if Omega is singular
+
+        log_likelihood_prior = -0.5 * (len(b_i) * np.log(2 * np.pi) + np.log(np.linalg.det(Omega)) + b_i.T @ inv_Omega @ b_i)
+
+        return -(log_likelihood_data + log_likelihood_prior)
+    
+    y_i = model_obj.y[model_obj.y_groups == b_i_init.name] #b_i_init.name will contain subject id
+
+    # Use scipy.optimize.minimize for the inner optimization
+    result_b_i = minimize(
+        conditional_log_likelihood,
+        b_i_init.values.flatten(),  # Initial guess for b_i (flattened)
+        args=(y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj),
+        method='L-BFGS-B',  # Or another suitable method, BFGS, Nelder-Mead, etc.
+        # You might need bounds on b_i, depending on your model.
+    )
+
+    b_i_estimated = pd.Series(result_b_i.x, index = b_i_init.index, name = b_i_init.name)
+
+    return b_i_estimated
+
+
+def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None, **kwargs):
+    y = np.copy(model_obj.y)
+    y_groups_idx = np.copy(model_obj.y_groups)
+    omegas_names = list(omegas.columns)
+    omegas = omegas.values.flatten() #omegas as SD, we want Variance, thus **2 below
+    omegas2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
+    sigma = sigma.values[0]
+    sigma2 = sigma**2
+    n_individuals = len(model_obj.unique_groups)
+    n_random_effects = len(omegas.columns)
+    
+    b_i_estimates = []
+    for sub_idx, sub in enumerate(model_obj.unique_groups):
+        b_i_init = FO_b_i_apprx[sub_idx] if FO_b_i_apprx is not None else np.zeros_like(omegas)
+        b_i_init = pd.Series(b_i_init, index=omegas_names, name = sub)
+        #the inputs to the line below are for the whole dataset, probaly need to filter theta_data
+        b_i_est = _estimate_b_i(model_obj, pop_coeffs, thetas, model_obj.theta_data, sigma2, omegas2, b_i_init)
+        b_i_estimates.append(b_i_est)
+    b_i_estimates = pd.DataFrame(b_i_estimates)
+    
+    combined_coeffs = pop_coeffs.copy()
+    for col in b_i_estimates.columns:
+        if col in b_i_estimates.columns:
+            combined_coeffs[col] = combined_coeffs[col] + b_i_estimates[col]
+            
+    model_coeffs = model_obj._generate_pk_model_coeff_vectorized(combined_coeffs, thetas, theta_data)
+    #would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`) 
+    # prepopulated with partial
+    preds = model_obj._solve_ivp(model_coeffs, parallel = False, )
+    residuals = y - preds
+    
+    apprx_fprime_jac = True
+    central_diff_jac = False
+    J = estimate_jacobian(combined_coeffs,
+                          thetas, theta_data, omegas_names, y,
+                          model_obj, use_fprime = apprx_fprime_jac,
+                          use_cdiff = central_diff_jac)
+    
+    
+    
+
+
+def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, solve_for_omegas = False):
+    
+    #unpack some variables locally for clarity
+    y = np.copy(model_obj.y)
+    y_groups_idx = np.copy(model_obj.y_groups)
+    omegas_names = list(omegas.columns)
+    omegas = omegas.values.flatten() #omegas as SD, we want Variance, thus **2 below
+    omegas2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
+    sigma = sigma.values[0]
+    sigma2 = sigma**2
+    n_individuals = len(model_obj.unique_groups)
+    n_random_effects = len(omegas.columns)
+    
+    # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
+    model_coeffs = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, theta_data)
+    #would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`) 
+    # prepopulated with partial
+    preds = model_obj._solve_ivp(model_coeffs, parallel = False, )
+    residuals = y - preds
+    
+    #estimate jacobian
+    apprx_fprime_jac = True
+    central_diff_jac = False
+    J = estimate_jacobian(pop_coeffs,
+                          thetas, theta_data, omegas_names, y,
+                          model_obj, use_fprime = apprx_fprime_jac,
+                          use_cdiff = central_diff_jac)
+    
+    #drop initial values from relevant arrays if `model_obj.ode_t0_vals_are_subject_y0`
+    #perfect predictions can cause issues during optimization and also add no information to the loss
+    #If there are any subjects with only one data point this will fail by dropping the entire subject
+    if model_obj.ode_t0_vals_are_subject_y0:
+        drop_idx = model_obj.subject_y0_idx
+        J = np.delete(J, drop_idx, axis = 0)
+        residuals = np.delete(residuals, drop_idx)
+        y = np.delete(y, drop_idx)
+        y_groups_idx = np.delete(y_groups_idx, drop_idx)
+
+    #Estimate the covariance matrix, then estimate neg log likelihood
+    direct_det_cov = False
+    per_sub_direct_neg_ll = False
+    cholsky_cov = True
+    neg_ll = estimate_neg_log_likelihood(J, 
+                                         y_groups_idx, y, residuals,
+                                         sigma2, omegas2, n_individuals,
+                                         n_random_effects, model_obj, 
+                                         cholsky_cov=cholsky_cov, 
+                                         naive_cov_vec=direct_det_cov,
+                                         naive_cov_subj=per_sub_direct_neg_ll,
+                                         )
+    
+    #if predicting or debugging, solve for the optimal b_i given the first order apprx
+    b_i_approx = np.zeros((n_individuals, n_random_effects))
+    if solve_for_omegas:
+        for sub_idx, sub in enumerate(model_obj.unique_groups):
+            filt = y_groups_idx == sub        
+            J_sub = J[filt]
+            residuals_sub = residuals[filt] 
+            b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omegas2), J_sub.T @ residuals_sub)
+    
+
+    return - neg_ll, b_i_approx
+    
+#@njit 
+def create_vectorizable_J(J, groups_idx, n_random_effects):
+    unique_groups = np.unique(groups_idx)
+    J_reshaped = np.zeros((len(J), len(unique_groups) * n_random_effects))
+    start_row = 0
+    for g_idx, group in enumerate(unique_groups):
+        n_timepoints = np.sum(groups_idx == group)
+        end_row = start_row + n_timepoints
+        for j in range(n_random_effects):
+            #start_row = g_idx * n_timepoints
+            #end_row = (g_idx + 1) * n_timepoints
+            start_col_original = j # Use j directly
+            start_col_reshaped = g_idx * n_random_effects + j
+            end_col_reshaped = start_col_reshaped + 1
+            J_tmp = J[start_row:end_row, start_col_original:start_col_original+1]
+            J_reshaped[start_row:end_row, start_col_reshaped:end_col_reshaped] = J_tmp
+        start_row = end_row
+    return J_reshaped
+
+
+def arbitrary_objective_function(params, data, model_function=one_compartment_model, subject_id_c='SUBJID', conc_at_time_c='DV',
+                                 time_c='TIME', population_coeff=['k', 'vd'],
+                                 dep_vars={'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
+                                           'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]},
+                                 verbose=False,
+                                 parallel=False
+                                 ):
+    for c in population_coeff:
+        if c not in (i for i in dep_vars):
+            dep_vars[c] = []
+    assert population_coeff == [i for i in dep_vars]
+    # change how this in unpacked to be based on the length of `population_coeff`
+    k_pop, Vd_pop, *other = params
+    population_coeff = {}  # overwrite the list with a dict in the same order
+    for idx, coeff in enumerate(dep_vars):
+        population_coeff[coeff] = params[idx]
+    betas = {}
+    params = []
+    other_params_idx = 0
+    for model_param in dep_vars:
+        # beta_names.extend([f'{model_param}_i' for i in dep_vars[model_param]])
+        betas[model_param] = {}
+        for param_col_obj in dep_vars[model_param]:
+            param_col = param_col_obj.column_name
+            betas[model_param][param_col] = ObjectiveFunctionBeta(column_name=param_col, model_method=param_col_obj.model_method,
+                                                                  value=other[other_params_idx],
+                                                                  allometric_norm_value=param_col_obj.allometric_norm_value)
+            params.append(param_col)
+            other_params_idx = other_params_idx + 1
+    subject_coeffs_history = {}
+    predictions = []
+    subject_iter_obj = tqdm(data[subject_id_c].unique(
+    )) if verbose else data[subject_id_c].unique()
+    for subject in subject_iter_obj:
+        subject_filt = data[subject_id_c] == subject
+        subject_data = data.loc[subject_filt, :].copy()
+        initial_conc = subject_data[conc_at_time_c].values[0]
+        subject_coeff = deepcopy(population_coeff)
+        subject_coeff_history = [subject_coeff]
+        allometric_effects = []
+        for model_param in betas:  # for each of the coeff to be input to the model
+            # for each of the columns in the data which contribute to `model_param`
+            for param_col in betas[model_param]:
+                param_beta_obj = betas[model_param][param_col]
+                param_beta = param_beta_obj.value
+                param_beta_method = param_beta_obj.model_method
+                param_value = subject_data[param_col].values[0]
+                if param_beta_method == 'linear':
+                    subject_coeff[model_param] = subject_coeff[model_param] + \
+                        (param_beta*param_value)
+                    subject_coeff_history.append(subject_coeff)
+                elif param_beta_method == 'allometric':
+                    norm_val = param_beta_obj.allometric_norm_value
+                    param_value = 1e-6 if param_value == 0 else param_value
+                    norm_val = 1e-6 if norm_val == 0 else norm_val
+                    allometric_effects.append(
+                        # (param_value/70)**(param_beta)
+                        np.sign(param_value/norm_val) * \
+                        ((np.abs(param_value/norm_val))**param_beta)
+                    )
+            for allometic_effect in allometric_effects:
+                subject_coeff[model_param] = subject_coeff[model_param] * \
+                    allometic_effect
+                subject_coeff_history.append(subject_coeff)
+        subject_coeffs_history[subject] = subject_coeff_history
+        subject_coeff = {model_param: np.exp(
+            subject_coeff[model_param]) for model_param in subject_coeff}
+        subject_coeff = [subject_coeff[i] for i in subject_coeff]
+        sol = solve_ivp(model_function, [subject_data[time_c].min(), subject_data[time_c].max()],
+                        [initial_conc],
+                        t_eval=subject_data[time_c], args=(*subject_coeff, 1))
+        predictions.extend(sol.y[0])
+    # Calculate the difference between observed and predicted values
+    residuals = data[conc_at_time_c] - predictions
+    sse = np.sum(residuals**2)  # Calculate the sum of squared errors
+    return sse
+
+# j = arbitrary_objective_function(params = (1,2,3,4,5,6), data = pd.DataFrame())
+
+
+def objective_function(params, data, subject_id_c='SUBJID', dose_c='DOSR', time_c='TIME', conc_at_time_c='DV'):
+    """
+    Calculates the sum of squared errors (SSE) between observed and predicted drug 
+    concentrations.
+
+    This function simulates drug concentrations for each subject in the dataset using 
+    a one-compartment model and compares the predictions to the actual observations. 
+    The SSE is used as a measure of the goodness of fit for the given model parameters.
+
+    Args:
+      params (tuple): Tuple containing the model parameters (k, Vd).
+      data (DataFrame): Pandas DataFrame containing the pharmacokinetic data, with columns
+                        for 'SUBJID', 'DOSR', 'DV' (observed concentration), and 'TIME'.
+
+    Returns:
+      float: The sum of squared errors (SSE).
+    """
+    k, Vd = params  # Unpack parameters
+    # Vd = Vd + 1e-6 if Vd == 0 else Vd  # Add a small value to Vd to avoid division by zero (commented out)
+    predictions = []
+    # Loop through each subject in the dataset
+    for subject in tqdm(data[subject_id_c].unique()):
+        # Extract dose information for the subject
+        d = data.loc[data[subject_id_c] == subject, dose_c]
+        d = d.drop_duplicates()  # Ensure only one dose value is used
+        dose = d.values[0]  # Get the dose value
+        # Get data for the current subject
+        subject_data = data[data[subject_id_c] == subject]
+        # Get the initial concentration
+        initial_conc = subject_data[conc_at_time_c].values[0]
+
+        # Solve the differential equation for the current subject
+        sol = solve_ivp(one_compartment_model, [subject_data[time_c].min(), subject_data[time_c].max()], [initial_conc],
+                        t_eval=subject_data[time_c], args=(k, Vd, dose))
+
+        # Add the predictions for this subject to the list
+        predictions.extend(sol.y[0])
+
+    # Calculate the difference between observed and predicted values
+    residuals = data[conc_at_time_c] - predictions
+    sse = np.sum(residuals**2)  # Calculate the sum of squared errors
+    return sse
+
+
+def objective_function__mgkg_age(params, data, subject_id_c='SUBJID', dose_c='DOSR', time_c='TIME', conc_at_time_c='DV', mgkg_c='MGKG', age_c='AGE'):
+    """
+    Calculates the sum of squared errors (SSE) between observed and predicted drug 
+    concentrations.
+
+    This function simulates drug concentrations for each subject in the dataset using 
+    a one-compartment model and compares the predictions to the actual observations. 
+    The SSE is used as a measure of the goodness of fit for the given model parameters.
+
+    Args:
+    params (tuple): Tuple containing the model parameters (k, Vd).
+    data (DataFrame): Pandas DataFrame containing the pharmacokinetic data, with columns
+                        for 'SUBJID', 'DOSR', 'DV' (observed concentration), and 'TIME'.
+
+    Returns:
+    float: The sum of squared errors (SSE).
+    """
+    k_pop, Vd_pop, k_beta_age, k_beta_mgkg, Vd_beta_age, Vd_beta_mgkg = params  # Unpack parameters
+    # Vd = Vd + 1e-6 if Vd == 0 else Vd  # Add a small value to Vd to avoid division by zero (commented out)
+    predictions = []
+    # Loop through each subject in the dataset
+    for subject in data[subject_id_c].unique():
+        subject_filt = data[subject_id_c] == subject
+        subject_data = data.loc[subject_filt, :].copy()
+
+        # Extract dose information for the subject
+        mgkg = subject_data[mgkg_c].values[0]
+        age = subject_data[age_c].values[0]
+        # Get data for the current subject
+        # Get the initial concentration
+        initial_conc = subject_data[conc_at_time_c].values[0]
+        with np.errstate(over='ignore'):
+            k_i = np.exp(k_pop + (k_beta_age * age) + (k_beta_mgkg * mgkg))
+            Vd_i = np.exp(Vd_pop + (Vd_beta_age * age) + (Vd_beta_mgkg * mgkg))
+        # Solve the differential equation for the current subject
+        sol = solve_ivp(one_compartment_model, [subject_data[time_c].min(), subject_data[time_c].max()], [initial_conc],
+                        t_eval=subject_data[time_c], args=(k_i, Vd_i, mgkg))
+
+        # Add the predictions for this subject to the list
+        predictions.extend(sol.y[0])
+
+    # Calculate the difference between observed and predicted values
+    residuals = data[conc_at_time_c] - predictions
+    sse = np.sum(residuals**2)  # Calculate the sum of squared errors
+    return sse
+
+
+def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename, *args, warm_start = False, tol = None, **kwargs):
+    """
+    Optimizes a function using scipy.optimize.minimize() with checkpointing every n iterations,
+    using joblib for saving and loading checkpoints.
+
+    Args:
+        func: The objective function to be minimized.
+        x0: The initial guess.
+        n_checkpoint: The number of iterations between checkpoints.
+        checkpoint_filename: The filename to save checkpoints to.
+        *args: Additional positional arguments to be passed to minimize().
+        **kwargs: Additional keyword arguments to be passed to minimize().
+
+    Returns:
+        The optimization result from scipy.optimize.minimize().
+    """
+
+    iteration = 0
+
+    # Try to load a previous checkpoint if it exists
+    check_name = checkpoint_filename.replace('.jb', '')
+    if not os.path.exists('logs'):
+        os.mkdir('logs')    
+    checkpoints = [i.replace('.jb', '') for i in os.listdir('logs') if check_name in i]
+    max_check_idx = [i.split('__')[-1] for i in checkpoints if len(i.split('__')) > 1]
+    try:
+        max_check_idx = [int(i) for i in max_check_idx]
+    except ValueError:
+        max_check_idx = []
+    max_check_idx = f"__{np.max(max_check_idx)}" if len(max_check_idx) > 1 else ''
+    checkpoint_filename = os.path.join('logs',check_name + f'{max_check_idx}.jb')
+    if warm_start:
+        try:
+            checkpoint = load(checkpoint_filename)
+            x0 = checkpoint['x']
+            iteration = checkpoint['iteration']
+            print(f"Resuming optimization from iteration {iteration}")
+        except FileNotFoundError:
+            print("No checkpoint found, starting from initial guess.")
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}, starting from initial guess.")
+
+    def callback_with_checkpoint(xk, checkpoint_filename):
+        nonlocal iteration
+        iteration += 1
+        #print(iteration)
+        if iteration % n_checkpoint == 0:
+            checkpoint = {
+                'x': xk,
+                'iteration': iteration
+            }
+            checkpoint_filename = checkpoint_filename.replace(
+                '.jb', f'__{iteration}.jb')
+            dump(checkpoint, checkpoint_filename)
+            print(f"Iteration {iteration}: Checkpoint saved to {
+                  checkpoint_filename}")
+        #print('no log')
+
+    # Ensure callback is not already in kwargs
+    if 'callback' not in kwargs:
+        kwargs['callback'] = partial(
+            callback_with_checkpoint, checkpoint_filename=checkpoint_filename)
+    else:
+        # If callback exists, combine it with the existing one
+        user_callback = kwargs['callback']
+
+        def combined_callback(xk):
+            callback_with_checkpoint(xk, checkpoint_filename)
+            user_callback(xk)
+
+        kwargs['callback'] = combined_callback
+
+    result = minimize(func, x0, *args, tol = tol, options= {'disp':True}, **kwargs, )
+
+    # Remove checkpoint file at end.
+    # try:
+    #    os.remove(checkpoint_filename)
+    # except:
+    #    pass
+
+    return result
+
+
+def stack_ivp_predictions(ivp_predictions, time_c='TIME', pred_DV_c='Pred_DV', subject_id_c='SUBJID'):
+    dfs = []
+    for subject in ivp_predictions:
+        loop_df = pd.DataFrame()
+        time_vector = ivp_predictions[subject].t
+        preds_vector = ivp_predictions[subject].y[0]
+        loop_df[time_c] = time_vector
+        loop_df[pred_DV_c] = preds_vector
+        loop_df[subject_id_c] = subject
+        dfs.append(loop_df)
+    return pd.concat(dfs)
+
+
+def merge_ivp_predictions(df, ivp_predictions, time_c='TIME', pred_DV_c='Pred_DV', subject_id_c='SUBJID'):
+    df = df.copy()
+    result_df = stack_ivp_predictions(
+        ivp_predictions, time_c, pred_DV_c, subject_id_c)
+    merge_df = df.merge(result_df, how='left', on=[subject_id_c, time_c])
+    return merge_df
+
+
+def generate_ivp_predictions(optimized_result, df, subject_id_c='SUBJID', dose_c='DOSR', time_c='TIME', conc_at_time_c='DV'):
+    predictions = {}
+    est_k, est_vd = optimized_result.x
+    data = df.copy()
+    for subject in data[subject_id_c].unique():
+        d = data.loc[data[subject_id_c] == subject, dose_c]
+        d = d.drop_duplicates()
+        dose = d.values[0]
+        subject_data = data[data[subject_id_c] == subject]
+
+        initial_conc = subject_data[conc_at_time_c].values[0]
+        # the initial value is initial_conc in this setup. If absorbtion was being modeled it would be [dose/est_vd]
+        sol = solve_ivp(one_compartment_model, [subject_data[time_c].min(), subject_data[time_c].max()], [initial_conc],
+                        t_eval=subject_data[time_c], args=(est_k, est_vd, dose))
+        predictions[subject] = sol
+    return predictions
 
 class OneCompartmentModel(RegressorMixin, BaseEstimator):
 
@@ -900,621 +1515,3 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.fit_result_summary_ = pd.DataFrame(res_df)
 
         return deepcopy(self)
-
-
-def estimate_fprime_jac(pop_coeffs,thetas, theta_data, n_random_effects, y, model_obj):
-    def wrapped_solve_ivp(pop_coeffs_array):
-            #pop_coeffs_array will have shape n_pop, 
-            #pop_coeffs_series = pd.Series(pop_coeffs_array, index = model_obj.pop_cols)
-            pop_coeffs_inner = pd.DataFrame(pop_coeffs_array.reshape(1,-1), columns = pop_coeffs.columns)
-            model_coeffs_local = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs_inner, thetas, theta_data)
-            return model_obj._solve_ivp(model_coeffs_local, parallel=False)
-    J_afp = approx_fprime(pop_coeffs.values.flatten(), wrapped_solve_ivp, epsilon=1e-6)
-    J_afp = J_afp.reshape(len(y), n_random_effects)
-    return J_afp
-
-def estimate_cdiff_jac(pop_coeffs,
-                       thetas,
-                       theta_data,
-                       n_random_effects,
-                       omegas_names,
-                       y, model_obj):
-    plus_pop_coeffs = pop_coeffs.copy()
-    minus_pop_coeffs = pop_coeffs.copy()
-    epsilon = 1e-6
-    J_cd = np.zeros((len(y), n_random_effects))
-    for omega_idx, omega_c in enumerate(omegas_names):
-        c = omega_c[0]
-        plus_pop_coeffs[c] = plus_pop_coeffs[c] + epsilon
-        plus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(plus_pop_coeffs,
-                                                                        thetas, theta_data)
-        plus_preds = model_obj._solve_ivp(plus_model_coeffs, parallel = False, )
-        
-        minus_pop_coeffs[c] = minus_pop_coeffs[c] - epsilon
-        minus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(minus_pop_coeffs,
-                                                                        thetas, theta_data)
-        minus_preds = model_obj._solve_ivp(minus_model_coeffs, parallel = False, )
-
-        J_cd[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
-    return J_cd
-
-def estimate_jacobian(pop_coeffs:pd.DataFrame,
-                      thetas:pd.DataFrame,
-                      theta_data:List[pd.DataFrame],
-                      omega_names:List,
-                      y:np.array,
-                      model_obj,
-                      use_fprime:bool = True,
-                      use_cdiff:bool = True, 
-                      ):
-    n_random_effects = len(omega_names)
-    J_afp = None
-    J_cd = None
-    if use_fprime:
-        J_afp = estimate_fprime_jac(pop_coeffs,thetas, theta_data, n_random_effects, y, model_obj)
-    if use_cdiff:
-        J_cd = estimate_cdiff_jac(pop_coeffs,thetas, theta_data, n_random_effects, omega_names, model_obj)
-    J = [i for i in [J_afp, J_cd] if i is not None][0]
-    return J
-
-def estimate_cov_chol(J, y_groups_idx, y, residuals, sigma2, omegas2, model_obj):
-    #V_all = []
-    log_det_V = 0
-    L_all = []
-    for sub in model_obj.unique_groups:
-        filt = y_groups_idx == sub
-        J_sub = J[filt]
-        n_timepoints = len(J_sub)
-        R_i = sigma2 * np.eye(n_timepoints)  # Constant error
-        #Omega = np.diag(omegas**2) # Construct D matrix from omegas
-        V_i = R_i + J_sub @ omegas2 @ J_sub.T
-
-        L_i, lower = cho_factor(V_i)  # Cholesky of each V_i
-        L_all.append(L_i)
-        log_det_V += 2 * np.sum(np.log(np.diag(L_i)))  # log|V_i|
-    
-    L_block = block_diag(*L_all) #key change from before
-    V_inv_residuals = cho_solve((L_block, True), residuals)
-    neg_ll_chol = -0.5 * (log_det_V + residuals.T @ V_inv_residuals + len(y) * np.log(2 * np.pi))
-    
-    return neg_ll_chol
-
-def estimate_cov_naive(J, y_groups_idx, y, residuals, sigma2,omega2, n_individuals, n_random_effects, ):
-    J_vec = create_vectorizable_J(J, y_groups_idx, n_random_effects)
-    Omega_expanded = np.kron(np.eye(n_individuals), omega2)
-    covariance_matrix = (J_vec @ Omega_expanded @ J_vec.T 
-                        + np.diag(np.full(len(y), sigma2)) 
-                        + 1e-6 * np.eye(len(y))
-                        )
-    det_cov_matrix = np.linalg.det(covariance_matrix)
-    if ((det_cov_matrix == 0) 
-        or (det_cov_matrix == np.inf) 
-        or (det_cov_matrix == -np.inf)):
-        need_debug = True
-    inv_cov_matrix = np.linalg.inv(covariance_matrix)
-    #this rarely is usuable due to inf or zero determinant when vectorized
-    direct_neg_ll = (-0.5 * (len(y) * np.log(2 * np.pi)
-                                    + np.log(det_cov_matrix) 
-                                + residuals.T @ inv_cov_matrix @ residuals))
-    return direct_neg_ll
-
-def estimate_cov_naive_subj(J, y_groups_idx, residuals, sigma2, omega2, model_obj):
-    per_sub_direct_neg_ll = 0.0
-    debug_extreme_J = {}
-    debug_near_zero_resid = {}
-    debug_cov_diag_near_zero = {}
-    cov_matrix_i = []
-    for sub_idx, sub in enumerate(model_obj.unique_groups):
-        filt = y_groups_idx == sub
-        J_sub = J[filt]
-        residuals_sub = residuals[filt]
-        if np.any(np.abs(J_sub) < 1e-5) or np.any(np.abs(J_sub) > 1e5):
-            debug_extreme_J[sub_idx] = J_sub
-        n_timepoints = len(J_sub)
-        covariance_matrix_sub = J_sub @ omega2 @ J_sub.T + np.diag(np.full(n_timepoints, sigma2))  + 1e-6 * np.eye(n_timepoints)
-        cov_matrix_i.append(covariance_matrix_sub)
-        if np.any(np.abs(np.diag(covariance_matrix_sub)) < 1e-5):
-            debug_cov_diag_near_zero[sub_idx] = np.diag(covariance_matrix_sub)
-        
-        if np.all(np.abs(residuals_sub) < 1e-5) or np.all(np.abs(residuals_sub) > 1e5):
-            debug_near_zero_resid[sub_idx] = residuals_sub
-        det_cov_matrix_i = np.linalg.det(covariance_matrix_sub)
-        inv_cov_matrix_i = np.linalg.inv(covariance_matrix_sub)
-        log_likelihood_i = (-0.5 * 
-                            (n_timepoints * np.log(2 * np.pi) + np.log(det_cov_matrix_i) + residuals_sub.T @ inv_cov_matrix_i @ residuals_sub))
-        per_sub_direct_neg_ll = per_sub_direct_neg_ll + log_likelihood_i
-    return per_sub_direct_neg_ll
-
-def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
-                 sigma2, omegas2, n_individuals,
-                 n_random_effects,model_obj ,
-                 cholsky_cov = True, 
-                 naive_cov_vec = False, 
-                 naive_cov_subj = False,
-                 ):
-    cholsky_neg_ll = None
-    naive_vec_neg_ll = None
-    naive_subj_neg_ll = None
-    if cholsky_cov:
-        cholsky_neg_ll = estimate_cov_chol(J, y_groups_idx, y, residuals, sigma2, omegas2, model_obj)
-    if naive_cov_vec:
-        naive_vec_neg_ll = estimate_cov_naive(J, y_groups_idx, y,
-                                              residuals, sigma2,omegas2,
-                                            n_individuals, n_random_effects,)
-    if naive_cov_subj:
-        naive_subj_neg_ll = estimate_cov_naive_subj(J, y_groups_idx,
-                                                   residuals, sigma2, omegas2, 
-                                                   model_obj)
-    neg_ll = [i for i in [cholsky_neg_ll,naive_vec_neg_ll, naive_subj_neg_ll] if i is not None][0]
-    
-    return neg_ll
-
-def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, b_i_init):
-    """Estimates b_i for a *single* individual using Newton-Raphson (or similar)."""
-
-    def conditional_log_likelihood(b_i, y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj):
-        # Combine the population coefficients and b_i for this individual
-        
-        combined_coeffs = pop_coeffs.copy()
-        # Ensure b_i is a Series with correct index for merging
-        b_i_series = pd.Series(b_i, index=model_obj.omega_cols)
-        for col in combined_coeffs.columns:
-            if col in b_i_series.index:
-                combined_coeffs[col] = pop_coeffs[col] + b_i_series[col]
-        # Generate the model coefficients for this individual
-        model_coeffs_i = model_obj._generate_pk_model_coeff_vectorized(combined_coeffs, thetas, beta_data)
-        # Solve the ODEs for this individual
-        preds_i = model_obj._solve_ivp(model_coeffs_i, parallel=False)
-        #compute residuals
-        residuals_i = y_i - preds_i
-        # Calculate the negative conditional log-likelihood
-        n_t = len(y_i)
-        R_i = sigma2 * np.eye(n_t)
-        try:
-            inv_R_i = np.linalg.inv(R_i)
-        except np.linalg.LinAlgError:
-            return np.inf #return inf if R is singular
-        
-        log_likelihood_data = -0.5 * (n_t * np.log(2 * np.pi) + np.log(np.linalg.det(R_i)) + residuals_i.T @ inv_R_i @ residuals_i)
-        
-        try:
-            inv_Omega = np.linalg.inv(Omega)
-        except np.linalg.LinAlgError:
-            return np.inf #return inf if Omega is singular
-
-        log_likelihood_prior = -0.5 * (len(b_i) * np.log(2 * np.pi) + np.log(np.linalg.det(Omega)) + b_i.T @ inv_Omega @ b_i)
-
-        return -(log_likelihood_data + log_likelihood_prior)
-    
-    y_i = model_obj.y[model_obj.y_groups == b_i_init.name] #b_i_init.name will contain subject id
-
-    # Use scipy.optimize.minimize for the inner optimization
-    result_b_i = minimize(
-        conditional_log_likelihood,
-        b_i_init.values.flatten(),  # Initial guess for b_i (flattened)
-        args=(y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj),
-        method='L-BFGS-B',  # Or another suitable method, BFGS, Nelder-Mead, etc.
-        # You might need bounds on b_i, depending on your model.
-    )
-
-    b_i_estimated = pd.Series(result_b_i.x, index = b_i_init.index, name = b_i_init.name)
-
-    return b_i_estimated
-
-
-def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None, **kwargs):
-    y = np.copy(model_obj.y)
-    y_groups_idx = np.copy(model_obj.y_groups)
-    omegas_names = list(omegas.columns)
-    omegas = omegas.values.flatten() #omegas as SD, we want Variance, thus **2 below
-    omegas2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
-    sigma = sigma.values[0]
-    sigma2 = sigma**2
-    n_individuals = len(model_obj.unique_groups)
-    n_random_effects = len(omegas.columns)
-    
-    b_i_estimates = []
-    for sub_idx, sub in enumerate(model_obj.unique_groups):
-        b_i_init = FO_b_i_apprx[sub_idx] if FO_b_i_apprx is not None else np.zeros_like(omegas)
-        b_i_init = pd.Series(b_i_init, index=omegas_names, name = sub)
-        #the inputs to the line below are for the whole dataset, probaly need to filter theta_data
-        b_i_est = _estimate_b_i(model_obj, pop_coeffs, thetas, model_obj.theta_data, sigma2, omegas2, b_i_init)
-        b_i_estimates.append(b_i_est)
-    b_i_estimates = pd.DataFrame(b_i_estimates)
-    
-    combined_coeffs = pop_coeffs.copy()
-    for col in b_i_estimates.columns:
-        if col in b_i_estimates.columns:
-            combined_coeffs[col] = combined_coeffs[col] + b_i_estimates[col]
-            
-    model_coeffs = model_obj._generate_pk_model_coeff_vectorized(combined_coeffs, thetas, theta_data)
-    #would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`) 
-    # prepopulated with partial
-    preds = model_obj._solve_ivp(model_coeffs, parallel = False, )
-    residuals = y - preds
-    
-    apprx_fprime_jac = True
-    central_diff_jac = False
-    J = estimate_jacobian(combined_coeffs,
-                          thetas, theta_data, omegas_names, y,
-                          model_obj, use_fprime = apprx_fprime_jac,
-                          use_cdiff = central_diff_jac)
-    
-    
-    
-
-
-def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, solve_for_omegas = False):
-    
-    #unpack some variables locally for clarity
-    y = np.copy(model_obj.y)
-    y_groups_idx = np.copy(model_obj.y_groups)
-    omegas_names = list(omegas.columns)
-    omegas = omegas.values.flatten() #omegas as SD, we want Variance, thus **2 below
-    omegas2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
-    sigma = sigma.values[0]
-    sigma2 = sigma**2
-    n_individuals = len(model_obj.unique_groups)
-    n_random_effects = len(omegas.columns)
-    
-    # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
-    model_coeffs = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, theta_data)
-    #would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`) 
-    # prepopulated with partial
-    preds = model_obj._solve_ivp(model_coeffs, parallel = False, )
-    residuals = y - preds
-    
-    #estimate jacobian
-    apprx_fprime_jac = True
-    central_diff_jac = False
-    J = estimate_jacobian(pop_coeffs,
-                          thetas, theta_data, omegas_names, y,
-                          model_obj, use_fprime = apprx_fprime_jac,
-                          use_cdiff = central_diff_jac)
-    
-    #drop initial values from relevant arrays if `model_obj.ode_t0_vals_are_subject_y0`
-    #perfect predictions can cause issues during optimization and also add no information to the loss
-    #If there are any subjects with only one data point this will fail by dropping the entire subject
-    if model_obj.ode_t0_vals_are_subject_y0:
-        drop_idx = model_obj.subject_y0_idx
-        J = np.delete(J, drop_idx, axis = 0)
-        residuals = np.delete(residuals, drop_idx)
-        y = np.delete(y, drop_idx)
-        y_groups_idx = np.delete(y_groups_idx, drop_idx)
-
-    #Estimate the covariance matrix, then estimate neg log likelihood
-    direct_det_cov = False
-    per_sub_direct_neg_ll = False
-    cholsky_cov = True
-    neg_ll = estimate_neg_log_likelihood(J, 
-                                         y_groups_idx, y, residuals,
-                                         sigma2, omegas2, n_individuals,
-                                         n_random_effects, model_obj, 
-                                         cholsky_cov=cholsky_cov, 
-                                         naive_cov_vec=direct_det_cov,
-                                         naive_cov_subj=per_sub_direct_neg_ll,
-                                         )
-    
-    #if predicting or debugging, solve for the optimal b_i given the first order apprx
-    b_i_approx = np.zeros((n_individuals, n_random_effects))
-    if solve_for_omegas:
-        for sub_idx, sub in enumerate(model_obj.unique_groups):
-            filt = y_groups_idx == sub        
-            J_sub = J[filt]
-            residuals_sub = residuals[filt] 
-            b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omegas2), J_sub.T @ residuals_sub)
-    
-
-    return - neg_ll, b_i_approx
-    
-#@njit 
-def create_vectorizable_J(J, groups_idx, n_random_effects):
-    unique_groups = np.unique(groups_idx)
-    J_reshaped = np.zeros((len(J), len(unique_groups) * n_random_effects))
-    start_row = 0
-    for g_idx, group in enumerate(unique_groups):
-        n_timepoints = np.sum(groups_idx == group)
-        end_row = start_row + n_timepoints
-        for j in range(n_random_effects):
-            #start_row = g_idx * n_timepoints
-            #end_row = (g_idx + 1) * n_timepoints
-            start_col_original = j # Use j directly
-            start_col_reshaped = g_idx * n_random_effects + j
-            end_col_reshaped = start_col_reshaped + 1
-            J_tmp = J[start_row:end_row, start_col_original:start_col_original+1]
-            J_reshaped[start_row:end_row, start_col_reshaped:end_col_reshaped] = J_tmp
-        start_row = end_row
-    return J_reshaped
-
-
-def arbitrary_objective_function(params, data, model_function=one_compartment_model, subject_id_c='SUBJID', conc_at_time_c='DV',
-                                 time_c='TIME', population_coeff=['k', 'vd'],
-                                 dep_vars={'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
-                                           'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]},
-                                 verbose=False,
-                                 parallel=False
-                                 ):
-    for c in population_coeff:
-        if c not in (i for i in dep_vars):
-            dep_vars[c] = []
-    assert population_coeff == [i for i in dep_vars]
-    # change how this in unpacked to be based on the length of `population_coeff`
-    k_pop, Vd_pop, *other = params
-    population_coeff = {}  # overwrite the list with a dict in the same order
-    for idx, coeff in enumerate(dep_vars):
-        population_coeff[coeff] = params[idx]
-    betas = {}
-    params = []
-    other_params_idx = 0
-    for model_param in dep_vars:
-        # beta_names.extend([f'{model_param}_i' for i in dep_vars[model_param]])
-        betas[model_param] = {}
-        for param_col_obj in dep_vars[model_param]:
-            param_col = param_col_obj.column_name
-            betas[model_param][param_col] = ObjectiveFunctionBeta(column_name=param_col, model_method=param_col_obj.model_method,
-                                                                  value=other[other_params_idx],
-                                                                  allometric_norm_value=param_col_obj.allometric_norm_value)
-            params.append(param_col)
-            other_params_idx = other_params_idx + 1
-    subject_coeffs_history = {}
-    predictions = []
-    subject_iter_obj = tqdm(data[subject_id_c].unique(
-    )) if verbose else data[subject_id_c].unique()
-    for subject in subject_iter_obj:
-        subject_filt = data[subject_id_c] == subject
-        subject_data = data.loc[subject_filt, :].copy()
-        initial_conc = subject_data[conc_at_time_c].values[0]
-        subject_coeff = deepcopy(population_coeff)
-        subject_coeff_history = [subject_coeff]
-        allometric_effects = []
-        for model_param in betas:  # for each of the coeff to be input to the model
-            # for each of the columns in the data which contribute to `model_param`
-            for param_col in betas[model_param]:
-                param_beta_obj = betas[model_param][param_col]
-                param_beta = param_beta_obj.value
-                param_beta_method = param_beta_obj.model_method
-                param_value = subject_data[param_col].values[0]
-                if param_beta_method == 'linear':
-                    subject_coeff[model_param] = subject_coeff[model_param] + \
-                        (param_beta*param_value)
-                    subject_coeff_history.append(subject_coeff)
-                elif param_beta_method == 'allometric':
-                    norm_val = param_beta_obj.allometric_norm_value
-                    param_value = 1e-6 if param_value == 0 else param_value
-                    norm_val = 1e-6 if norm_val == 0 else norm_val
-                    allometric_effects.append(
-                        # (param_value/70)**(param_beta)
-                        np.sign(param_value/norm_val) * \
-                        ((np.abs(param_value/norm_val))**param_beta)
-                    )
-            for allometic_effect in allometric_effects:
-                subject_coeff[model_param] = subject_coeff[model_param] * \
-                    allometic_effect
-                subject_coeff_history.append(subject_coeff)
-        subject_coeffs_history[subject] = subject_coeff_history
-        subject_coeff = {model_param: np.exp(
-            subject_coeff[model_param]) for model_param in subject_coeff}
-        subject_coeff = [subject_coeff[i] for i in subject_coeff]
-        sol = solve_ivp(model_function, [subject_data[time_c].min(), subject_data[time_c].max()],
-                        [initial_conc],
-                        t_eval=subject_data[time_c], args=(*subject_coeff, 1))
-        predictions.extend(sol.y[0])
-    # Calculate the difference between observed and predicted values
-    residuals = data[conc_at_time_c] - predictions
-    sse = np.sum(residuals**2)  # Calculate the sum of squared errors
-    return sse
-
-# j = arbitrary_objective_function(params = (1,2,3,4,5,6), data = pd.DataFrame())
-
-
-def objective_function(params, data, subject_id_c='SUBJID', dose_c='DOSR', time_c='TIME', conc_at_time_c='DV'):
-    """
-    Calculates the sum of squared errors (SSE) between observed and predicted drug 
-    concentrations.
-
-    This function simulates drug concentrations for each subject in the dataset using 
-    a one-compartment model and compares the predictions to the actual observations. 
-    The SSE is used as a measure of the goodness of fit for the given model parameters.
-
-    Args:
-      params (tuple): Tuple containing the model parameters (k, Vd).
-      data (DataFrame): Pandas DataFrame containing the pharmacokinetic data, with columns
-                        for 'SUBJID', 'DOSR', 'DV' (observed concentration), and 'TIME'.
-
-    Returns:
-      float: The sum of squared errors (SSE).
-    """
-    k, Vd = params  # Unpack parameters
-    # Vd = Vd + 1e-6 if Vd == 0 else Vd  # Add a small value to Vd to avoid division by zero (commented out)
-    predictions = []
-    # Loop through each subject in the dataset
-    for subject in tqdm(data[subject_id_c].unique()):
-        # Extract dose information for the subject
-        d = data.loc[data[subject_id_c] == subject, dose_c]
-        d = d.drop_duplicates()  # Ensure only one dose value is used
-        dose = d.values[0]  # Get the dose value
-        # Get data for the current subject
-        subject_data = data[data[subject_id_c] == subject]
-        # Get the initial concentration
-        initial_conc = subject_data[conc_at_time_c].values[0]
-
-        # Solve the differential equation for the current subject
-        sol = solve_ivp(one_compartment_model, [subject_data[time_c].min(), subject_data[time_c].max()], [initial_conc],
-                        t_eval=subject_data[time_c], args=(k, Vd, dose))
-
-        # Add the predictions for this subject to the list
-        predictions.extend(sol.y[0])
-
-    # Calculate the difference between observed and predicted values
-    residuals = data[conc_at_time_c] - predictions
-    sse = np.sum(residuals**2)  # Calculate the sum of squared errors
-    return sse
-
-
-def objective_function__mgkg_age(params, data, subject_id_c='SUBJID', dose_c='DOSR', time_c='TIME', conc_at_time_c='DV', mgkg_c='MGKG', age_c='AGE'):
-    """
-    Calculates the sum of squared errors (SSE) between observed and predicted drug 
-    concentrations.
-
-    This function simulates drug concentrations for each subject in the dataset using 
-    a one-compartment model and compares the predictions to the actual observations. 
-    The SSE is used as a measure of the goodness of fit for the given model parameters.
-
-    Args:
-    params (tuple): Tuple containing the model parameters (k, Vd).
-    data (DataFrame): Pandas DataFrame containing the pharmacokinetic data, with columns
-                        for 'SUBJID', 'DOSR', 'DV' (observed concentration), and 'TIME'.
-
-    Returns:
-    float: The sum of squared errors (SSE).
-    """
-    k_pop, Vd_pop, k_beta_age, k_beta_mgkg, Vd_beta_age, Vd_beta_mgkg = params  # Unpack parameters
-    # Vd = Vd + 1e-6 if Vd == 0 else Vd  # Add a small value to Vd to avoid division by zero (commented out)
-    predictions = []
-    # Loop through each subject in the dataset
-    for subject in data[subject_id_c].unique():
-        subject_filt = data[subject_id_c] == subject
-        subject_data = data.loc[subject_filt, :].copy()
-
-        # Extract dose information for the subject
-        mgkg = subject_data[mgkg_c].values[0]
-        age = subject_data[age_c].values[0]
-        # Get data for the current subject
-        # Get the initial concentration
-        initial_conc = subject_data[conc_at_time_c].values[0]
-        with np.errstate(over='ignore'):
-            k_i = np.exp(k_pop + (k_beta_age * age) + (k_beta_mgkg * mgkg))
-            Vd_i = np.exp(Vd_pop + (Vd_beta_age * age) + (Vd_beta_mgkg * mgkg))
-        # Solve the differential equation for the current subject
-        sol = solve_ivp(one_compartment_model, [subject_data[time_c].min(), subject_data[time_c].max()], [initial_conc],
-                        t_eval=subject_data[time_c], args=(k_i, Vd_i, mgkg))
-
-        # Add the predictions for this subject to the list
-        predictions.extend(sol.y[0])
-
-    # Calculate the difference between observed and predicted values
-    residuals = data[conc_at_time_c] - predictions
-    sse = np.sum(residuals**2)  # Calculate the sum of squared errors
-    return sse
-
-
-def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename, *args, warm_start = False, tol = None, **kwargs):
-    """
-    Optimizes a function using scipy.optimize.minimize() with checkpointing every n iterations,
-    using joblib for saving and loading checkpoints.
-
-    Args:
-        func: The objective function to be minimized.
-        x0: The initial guess.
-        n_checkpoint: The number of iterations between checkpoints.
-        checkpoint_filename: The filename to save checkpoints to.
-        *args: Additional positional arguments to be passed to minimize().
-        **kwargs: Additional keyword arguments to be passed to minimize().
-
-    Returns:
-        The optimization result from scipy.optimize.minimize().
-    """
-
-    iteration = 0
-
-    # Try to load a previous checkpoint if it exists
-    check_name = checkpoint_filename.replace('.jb', '')
-    if not os.path.exists('logs'):
-        os.mkdir('logs')    
-    checkpoints = [i.replace('.jb', '') for i in os.listdir('logs') if check_name in i]
-    max_check_idx = [i.split('__')[-1] for i in checkpoints if len(i.split('__')) > 1]
-    try:
-        max_check_idx = [int(i) for i in max_check_idx]
-    except ValueError:
-        max_check_idx = []
-    max_check_idx = f"__{np.max(max_check_idx)}" if len(max_check_idx) > 1 else ''
-    checkpoint_filename = os.path.join('logs',check_name + f'{max_check_idx}.jb')
-    if warm_start:
-        try:
-            checkpoint = load(checkpoint_filename)
-            x0 = checkpoint['x']
-            iteration = checkpoint['iteration']
-            print(f"Resuming optimization from iteration {iteration}")
-        except FileNotFoundError:
-            print("No checkpoint found, starting from initial guess.")
-        except Exception as e:
-            print(f"Error loading checkpoint: {e}, starting from initial guess.")
-
-    def callback_with_checkpoint(xk, checkpoint_filename):
-        nonlocal iteration
-        iteration += 1
-        #print(iteration)
-        if iteration % n_checkpoint == 0:
-            checkpoint = {
-                'x': xk,
-                'iteration': iteration
-            }
-            checkpoint_filename = checkpoint_filename.replace(
-                '.jb', f'__{iteration}.jb')
-            dump(checkpoint, checkpoint_filename)
-            print(f"Iteration {iteration}: Checkpoint saved to {
-                  checkpoint_filename}")
-        #print('no log')
-
-    # Ensure callback is not already in kwargs
-    if 'callback' not in kwargs:
-        kwargs['callback'] = partial(
-            callback_with_checkpoint, checkpoint_filename=checkpoint_filename)
-    else:
-        # If callback exists, combine it with the existing one
-        user_callback = kwargs['callback']
-
-        def combined_callback(xk):
-            callback_with_checkpoint(xk, checkpoint_filename)
-            user_callback(xk)
-
-        kwargs['callback'] = combined_callback
-
-    result = minimize(func, x0, *args, tol = tol, options= {'disp':True}, **kwargs, )
-
-    # Remove checkpoint file at end.
-    # try:
-    #    os.remove(checkpoint_filename)
-    # except:
-    #    pass
-
-    return result
-
-
-def stack_ivp_predictions(ivp_predictions, time_c='TIME', pred_DV_c='Pred_DV', subject_id_c='SUBJID'):
-    dfs = []
-    for subject in ivp_predictions:
-        loop_df = pd.DataFrame()
-        time_vector = ivp_predictions[subject].t
-        preds_vector = ivp_predictions[subject].y[0]
-        loop_df[time_c] = time_vector
-        loop_df[pred_DV_c] = preds_vector
-        loop_df[subject_id_c] = subject
-        dfs.append(loop_df)
-    return pd.concat(dfs)
-
-
-def merge_ivp_predictions(df, ivp_predictions, time_c='TIME', pred_DV_c='Pred_DV', subject_id_c='SUBJID'):
-    df = df.copy()
-    result_df = stack_ivp_predictions(
-        ivp_predictions, time_c, pred_DV_c, subject_id_c)
-    merge_df = df.merge(result_df, how='left', on=[subject_id_c, time_c])
-    return merge_df
-
-
-def generate_ivp_predictions(optimized_result, df, subject_id_c='SUBJID', dose_c='DOSR', time_c='TIME', conc_at_time_c='DV'):
-    predictions = {}
-    est_k, est_vd = optimized_result.x
-    data = df.copy()
-    for subject in data[subject_id_c].unique():
-        d = data.loc[data[subject_id_c] == subject, dose_c]
-        d = d.drop_duplicates()
-        dose = d.values[0]
-        subject_data = data[data[subject_id_c] == subject]
-
-        initial_conc = subject_data[conc_at_time_c].values[0]
-        # the initial value is initial_conc in this setup. If absorbtion was being modeled it would be [dose/est_vd]
-        sol = solve_ivp(one_compartment_model, [subject_data[time_c].min(), subject_data[time_c].max()], [initial_conc],
-                        t_eval=subject_data[time_c], args=(est_k, est_vd, dose))
-        predictions[subject] = sol
-    return predictions
