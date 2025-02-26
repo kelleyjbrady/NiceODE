@@ -837,6 +837,9 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                                                            bounds=self.bounds
                                                            )
         return deepcopy(self)
+    
+
+    #def fit_result():
 
 
     def fit(self, data, parallel = False, parallel_n_jobs = -1 , warm_start = False, checkpoint_filename='check_test.jb'):
@@ -893,6 +896,61 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         return deepcopy(self)
 
 
+def estimate_fprime_jac(pop_coeffs,thetas, theta_data, n_random_effects, y, model_obj):
+    def wrapped_solve_ivp(pop_coeffs_array):
+            #pop_coeffs_array will have shape n_pop, 
+            #pop_coeffs_series = pd.Series(pop_coeffs_array, index = model_obj.pop_cols)
+            pop_coeffs_inner = pd.DataFrame(pop_coeffs_array.reshape(1,-1), columns = pop_coeffs.columns)
+            model_coeffs_local = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs_inner, thetas, theta_data)
+            return model_obj._solve_ivp(model_coeffs_local, parallel=False)
+    J_afp = approx_fprime(pop_coeffs.values.flatten(), wrapped_solve_ivp, epsilon=1e-6)
+    J_afp = J_afp.reshape(len(y), n_random_effects)
+    return J_afp
+
+def estimate_cdiff_jac(pop_coeffs,
+                       thetas,
+                       theta_data,
+                       n_random_effects,
+                       omegas_names,
+                       y, model_obj):
+    plus_pop_coeffs = pop_coeffs.copy()
+    minus_pop_coeffs = pop_coeffs.copy()
+    epsilon = 1e-6
+    J_cd = np.zeros((len(y), n_random_effects))
+    for omega_idx, omega_c in enumerate(omegas_names):
+        c = omega_c[0]
+        plus_pop_coeffs[c] = plus_pop_coeffs[c] + epsilon
+        plus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(plus_pop_coeffs,
+                                                                        thetas, theta_data)
+        plus_preds = model_obj._solve_ivp(plus_model_coeffs, parallel = False, )
+        
+        minus_pop_coeffs[c] = minus_pop_coeffs[c] - epsilon
+        minus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(minus_pop_coeffs,
+                                                                        thetas, theta_data)
+        minus_preds = model_obj._solve_ivp(minus_model_coeffs, parallel = False, )
+
+        J_cd[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
+    return J_cd
+
+def estimate_jacobian(pop_coeffs:pd.DataFrame,
+                      thetas:pd.DataFrame,
+                      theta_data:List[pd.DataFrame],
+                      omegas:pd.DataFrame,
+                      y:np.array,
+                      model_obj,
+                      use_fprime:bool = True,
+                      use_cdiff:bool = True, 
+                      ):
+    omega_names = list(omegas.columns)
+    n_random_effects = len(omega_names)
+    if use_fprime:
+        J_afp = estimate_fprime_jac(pop_coeffs,thetas, theta_data, n_random_effects, y, model_obj)
+    if use_cdiff:
+        J_cd = estimate_cdiff_jac(pop_coeffs,thetas, theta_data, n_random_effects, omega_names, model_obj)
+    J = [i for i in [J_afp, J_cd] if i is not None][0]
+    return J
+
+
 def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, solve_for_omegas = False):
     
     # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
@@ -909,7 +967,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     sigma = sigma.values[0]
     sigma2 = sigma**2
     n_individuals = len(model_obj.unique_groups)
-    n_random_effects = len(omegas)
+    n_random_effects = len(omegas.columns)
     
     
     
