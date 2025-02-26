@@ -935,13 +935,12 @@ def estimate_cdiff_jac(pop_coeffs,
 def estimate_jacobian(pop_coeffs:pd.DataFrame,
                       thetas:pd.DataFrame,
                       theta_data:List[pd.DataFrame],
-                      omegas:pd.DataFrame,
+                      omega_names:List,
                       y:np.array,
                       model_obj,
                       use_fprime:bool = True,
                       use_cdiff:bool = True, 
                       ):
-    omega_names = list(omegas.columns)
     n_random_effects = len(omega_names)
     J_afp = None
     J_cd = None
@@ -1059,7 +1058,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     residuals = y - preds
     omegas_names = list(omegas.columns)
     omegas = omegas.values.flatten() #omegas as SD, we want Variance, thus **2 below
-    omega2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
+    omegas2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
     sigma = sigma.values[0]
     sigma2 = sigma**2
     n_individuals = len(model_obj.unique_groups)
@@ -1070,7 +1069,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     apprx_fprime_jac = True
     central_diff_jac = False
     J = estimate_jacobian(pop_coeffs,
-                          thetas, theta_data, omegas, y,
+                          thetas, theta_data, omegas_names, y,
                           model_obj, use_fprime = apprx_fprime_jac,
                           use_cdiff = central_diff_jac)
     
@@ -1094,7 +1093,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
 
     neg_ll = estimate_neg_log_likelihood(J, 
                                          y_groups_idx, y, residuals,
-                                         sigma2, omega2, n_individuals,
+                                         sigma2, omegas2, n_individuals,
                                          n_random_effects, model_obj, 
                                          cholsky_cov=cholsky_cov, 
                                          naive_cov_vec=direct_det_cov,
@@ -1110,7 +1109,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
             residuals_sub = residuals[filt]
             
             
-            b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omega2), J_sub.T @ residuals_sub)
+            b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omegas2), J_sub.T @ residuals_sub)
     
 
     return - neg_ll, b_i_approx
