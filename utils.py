@@ -1089,57 +1089,18 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
 
     
     direct_det_cov = False
-    direct_neg_ll = None
-    
-    cholsky_cov = True
-    neg_ll_chol = None
-    if cholsky_cov:
-        V_all = []
-        for sub in model_obj.unique_groups:
-            filt = y_groups_idx == sub
-            J_sub = J[filt]
-            n_timepoints = len(J_sub)
-            R_i = sigma2 * np.eye(n_timepoints)  # Constant error
-            Omega = np.diag(omegas**2) # Construct D matrix from omegas
-            V_i = R_i + J_sub @ Omega @ J_sub.T
-            V_all.append(V_i)
-        #V_all = np.array(V_all)
-        log_det_V = 0
-        L_all = []
-        for V_i in V_all: #could do this within the loop above to save a tiny bit of time
-            L_i, lower = cho_factor(V_i)  # Cholesky of each V_i
-            L_all.append(L_i)
-            log_det_V += 2 * np.sum(np.log(np.diag(L_i)))  # log|V_i|
-        
-        L_block = block_diag(*L_all) #key change from before
-        V_inv_residuals = cho_solve((L_block, True), residuals)
-        neg_ll_chol = -0.5 * (log_det_V + residuals.T @ V_inv_residuals + len(y) * np.log(2 * np.pi))
-        
-    if direct_det_cov:
-        J_vec = create_vectorizable_J(J, y_groups_idx, n_random_effects)
-        Omega_expanded = np.kron(np.eye(n_individuals), omega2)
-        covariance_matrix = (J_vec @ Omega_expanded @ J_vec.T 
-                            + np.diag(np.full(len(y), sigma2)) 
-                            + 1e-6 * np.eye(len(y))
-                            )
-        det_cov_matrix = np.linalg.det(covariance_matrix)
-        if ((det_cov_matrix == 0) 
-            or (det_cov_matrix == np.inf) 
-            or (det_cov_matrix == -np.inf)):
-            need_debug = True
-        inv_cov_matrix = np.linalg.inv(covariance_matrix)
-        #this rarely is usuable due to inf or zero determinant when vectorized
-        direct_neg_ll = (-0.5 * (len(y) * np.log(2 * np.pi)
-                                        + np.log(det_cov_matrix) 
-                                    + residuals.T @ inv_cov_matrix @ residuals))
-    
-    #fallback method is used by default
     per_sub_direct_neg_ll = False
-    debug_extreme_J = {}
-    debug_near_zero_resid = {}
-    debug_cov_diag_near_zero = {}
-    cov_matrix_i = []
-    per_sub_direct_neg_ll = 0.0 if per_sub_direct_neg_ll else None
+    cholsky_cov = True
+
+    neg_ll = estimate_neg_log_likelihood(J, 
+                                         y_groups_idx, y, residuals,
+                                         sigma2, omega2, n_individuals,
+                                         n_random_effects, model_obj, 
+                                         cholsky_cov=cholsky_cov, 
+                                         naive_cov_vec=direct_det_cov,
+                                         naive_cov_subj=per_sub_direct_neg_ll,
+                                         )
+    
     
     if solve_for_omegas:
         for sub_idx, sub in enumerate(model_obj.unique_groups):
@@ -1147,28 +1108,11 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
             
             J_sub = J[filt]
             residuals_sub = residuals[filt]
-            if per_sub_direct_neg_ll:
-                if np.any(np.abs(J_sub) < 1e-5) or np.any(np.abs(J_sub) > 1e5):
-                    debug_extreme_J[sub_idx] = J_sub
-                n_timepoints = len(J_sub)
-                covariance_matrix_sub = J_sub @ omega2 @ J_sub.T + np.diag(np.full(n_timepoints, sigma2))  + 1e-6 * np.eye(n_timepoints)
-                cov_matrix_i.append(covariance_matrix_sub)
-                if np.any(np.abs(np.diag(covariance_matrix_sub)) < 1e-5):
-                    debug_cov_diag_near_zero[sub_idx] = np.diag(covariance_matrix_sub)
-                
-                if np.all(np.abs(residuals_sub) < 1e-5) or np.all(np.abs(residuals_sub) > 1e5):
-                    debug_near_zero_resid[sub_idx] = residuals_sub
-                det_cov_matrix_i = np.linalg.det(covariance_matrix_sub)
-                inv_cov_matrix_i = np.linalg.inv(covariance_matrix_sub)
-                log_likelihood_i = (-0.5 * 
-                                    (n_timepoints * np.log(2 * np.pi) + np.log(det_cov_matrix_i) + residuals_sub.T @ inv_cov_matrix_i @ residuals_sub))
-                per_sub_direct_neg_ll = per_sub_direct_neg_ll + log_likelihood_i
+            
             
             b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omega2), J_sub.T @ residuals_sub)
     
-    #compare to J_vec to verify the two are the same if needed        
-    #alt_conv_blk_diag = block_diag(*cov_matrix_i)
-    neg_ll = [i for i in [neg_ll_chol,direct_neg_ll, per_sub_direct_neg_ll] if i is not None][0]
+
     return - neg_ll, b_i_approx
     
 #@njit 
