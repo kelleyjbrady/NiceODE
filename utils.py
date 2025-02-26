@@ -952,6 +952,100 @@ def estimate_jacobian(pop_coeffs:pd.DataFrame,
     J = [i for i in [J_afp, J_cd] if i is not None][0]
     return J
 
+def estimate_cov_chol(J, y_groups_idx, y, residuals, sigma2, omegas2, model_obj):
+    #V_all = []
+    log_det_V = 0
+    L_all = []
+    for sub in model_obj.unique_groups:
+        filt = y_groups_idx == sub
+        J_sub = J[filt]
+        n_timepoints = len(J_sub)
+        R_i = sigma2 * np.eye(n_timepoints)  # Constant error
+        #Omega = np.diag(omegas**2) # Construct D matrix from omegas
+        V_i = R_i + J_sub @ omegas2 @ J_sub.T
+
+        L_i, lower = cho_factor(V_i)  # Cholesky of each V_i
+        L_all.append(L_i)
+        log_det_V += 2 * np.sum(np.log(np.diag(L_i)))  # log|V_i|
+    
+    L_block = block_diag(*L_all) #key change from before
+    V_inv_residuals = cho_solve((L_block, True), residuals)
+    neg_ll_chol = -0.5 * (log_det_V + residuals.T @ V_inv_residuals + len(y) * np.log(2 * np.pi))
+    
+    return neg_ll_chol
+
+def estimate_cov_naive(J, y_groups_idx, y, residuals, sigma2,omega2, n_individuals, n_random_effects, ):
+    J_vec = create_vectorizable_J(J, y_groups_idx, n_random_effects)
+    Omega_expanded = np.kron(np.eye(n_individuals), omega2)
+    covariance_matrix = (J_vec @ Omega_expanded @ J_vec.T 
+                        + np.diag(np.full(len(y), sigma2)) 
+                        + 1e-6 * np.eye(len(y))
+                        )
+    det_cov_matrix = np.linalg.det(covariance_matrix)
+    if ((det_cov_matrix == 0) 
+        or (det_cov_matrix == np.inf) 
+        or (det_cov_matrix == -np.inf)):
+        need_debug = True
+    inv_cov_matrix = np.linalg.inv(covariance_matrix)
+    #this rarely is usuable due to inf or zero determinant when vectorized
+    direct_neg_ll = (-0.5 * (len(y) * np.log(2 * np.pi)
+                                    + np.log(det_cov_matrix) 
+                                + residuals.T @ inv_cov_matrix @ residuals))
+    return direct_neg_ll
+
+def estimate_cov_naive_subj(J, y_groups_idx, residuals, sigma2, omega2, model_obj):
+    per_sub_direct_neg_ll = 0.0
+    debug_extreme_J = {}
+    debug_near_zero_resid = {}
+    debug_cov_diag_near_zero = {}
+    cov_matrix_i = []
+    for sub_idx, sub in enumerate(model_obj.unique_groups):
+        filt = y_groups_idx == sub
+        J_sub = J[filt]
+        residuals_sub = residuals[filt]
+        if np.any(np.abs(J_sub) < 1e-5) or np.any(np.abs(J_sub) > 1e5):
+            debug_extreme_J[sub_idx] = J_sub
+        n_timepoints = len(J_sub)
+        covariance_matrix_sub = J_sub @ omega2 @ J_sub.T + np.diag(np.full(n_timepoints, sigma2))  + 1e-6 * np.eye(n_timepoints)
+        cov_matrix_i.append(covariance_matrix_sub)
+        if np.any(np.abs(np.diag(covariance_matrix_sub)) < 1e-5):
+            debug_cov_diag_near_zero[sub_idx] = np.diag(covariance_matrix_sub)
+        
+        if np.all(np.abs(residuals_sub) < 1e-5) or np.all(np.abs(residuals_sub) > 1e5):
+            debug_near_zero_resid[sub_idx] = residuals_sub
+        det_cov_matrix_i = np.linalg.det(covariance_matrix_sub)
+        inv_cov_matrix_i = np.linalg.inv(covariance_matrix_sub)
+        log_likelihood_i = (-0.5 * 
+                            (n_timepoints * np.log(2 * np.pi) + np.log(det_cov_matrix_i) + residuals_sub.T @ inv_cov_matrix_i @ residuals_sub))
+        per_sub_direct_neg_ll = per_sub_direct_neg_ll + log_likelihood_i
+    return per_sub_direct_neg_ll
+
+def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
+                 sigma2, omegas2, n_individuals,
+                 n_random_effects,model_obj ,
+                 cholsky_cov = True, 
+                 naive_cov_vec = False, 
+                 naive_cov_subj = False,
+                 ):
+    cholsky_neg_ll = None
+    naive_vec_neg_ll = None
+    naive_subj_neg_ll = None
+    if cholsky_cov:
+        cholsky_neg_ll = estimate_cov_chol(J, y_groups_idx, y, residuals, sigma2, omegas2, model_obj)
+    if naive_cov_vec:
+        naive_vec_neg_ll = estimate_cov_naive(J, y_groups_idx, y,
+                                              residuals, sigma2,omegas2,
+                                            n_individuals, n_random_effects,)
+    if naive_cov_subj:
+        naive_subj_neg_ll = estimate_cov_naive_subj(J, y_groups_idx,
+                                                   residuals, sigma2, omegas2, 
+                                                   model_obj)
+    neg_ll = [i for i in [cholsky_neg_ll,naive_vec_neg_ll, naive_subj_neg_ll] if i is not None][0]
+    
+    return neg_ll
+ 
+    
+
 
 def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, solve_for_omegas = False):
     
