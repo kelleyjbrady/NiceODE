@@ -915,7 +915,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     
     apprx_fprime_jac = True
     J_afp = None
-    central_diff_jax = False
+    central_diff_jac = False
     J_cd = None
     if apprx_fprime_jac:
         def wrapped_solve_ivp(pop_coeffs_array):
@@ -926,7 +926,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
             return model_obj._solve_ivp(model_coeffs_local, parallel=False)
         J_afp = approx_fprime(pop_coeffs.values.flatten(), wrapped_solve_ivp, epsilon=1e-6)
         J_afp = J_afp.reshape(len(model_obj.y), n_random_effects)
-    if central_diff_jax:
+    if central_diff_jac:
         #compute the Jacobian using finite differences
         plus_pop_coeffs = pop_coeffs.copy()
         minus_pop_coeffs = pop_coeffs.copy()
@@ -979,7 +979,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
         #V_all = np.array(V_all)
         log_det_V = 0
         L_all = []
-        for V_i in V_all:
+        for V_i in V_all: #could do this within the loop above to save a tiny bit of time
             L_i, lower = cho_factor(V_i)  # Cholesky of each V_i
             L_all.append(L_i)
             log_det_V += 2 * np.sum(np.log(np.diag(L_i)))  # log|V_i|
