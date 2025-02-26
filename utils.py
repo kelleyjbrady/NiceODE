@@ -943,6 +943,8 @@ def estimate_jacobian(pop_coeffs:pd.DataFrame,
                       ):
     omega_names = list(omegas.columns)
     n_random_effects = len(omega_names)
+    J_afp = None
+    J_cd = None
     if use_fprime:
         J_afp = estimate_fprime_jac(pop_coeffs,thetas, theta_data, n_random_effects, y, model_obj)
     if use_cdiff:
@@ -972,38 +974,11 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     
     
     apprx_fprime_jac = True
-    J_afp = None
     central_diff_jac = False
-    J_cd = None
-    if apprx_fprime_jac:
-        def wrapped_solve_ivp(pop_coeffs_array):
-            #pop_coeffs_array will have shape n_pop, 
-            #pop_coeffs_series = pd.Series(pop_coeffs_array, index = model_obj.pop_cols)
-            pop_coeffs_inner = pd.DataFrame(pop_coeffs_array.reshape(1,-1), columns = pop_coeffs.columns)
-            model_coeffs_local = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs_inner, thetas, theta_data)
-            return model_obj._solve_ivp(model_coeffs_local, parallel=False)
-        J_afp = approx_fprime(pop_coeffs.values.flatten(), wrapped_solve_ivp, epsilon=1e-6)
-        J_afp = J_afp.reshape(len(model_obj.y), n_random_effects)
-    if central_diff_jac:
-        #compute the Jacobian using finite differences
-        plus_pop_coeffs = pop_coeffs.copy()
-        minus_pop_coeffs = pop_coeffs.copy()
-        epsilon = 1e-6
-        J_cd = np.zeros((len(y), n_random_effects))
-        for omega_idx, omega_c in enumerate(omegas_names):
-            c = omega_c[0]
-            plus_pop_coeffs[c] = plus_pop_coeffs[c] + epsilon
-            plus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(plus_pop_coeffs,
-                                                                            thetas, theta_data)
-            plus_preds = model_obj._solve_ivp(plus_model_coeffs, parallel = False, )
-            
-            minus_pop_coeffs[c] = minus_pop_coeffs[c] - epsilon
-            minus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(minus_pop_coeffs,
-                                                                            thetas, theta_data)
-            minus_preds = model_obj._solve_ivp(minus_model_coeffs, parallel = False, )
-
-            J_cd[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
-    J = [i for i in [J_afp, J_cd] if i is not None][0]
+    J = estimate_jacobian(pop_coeffs,
+                          thetas, theta_data, omegas, y,
+                          model_obj, use_fprime = apprx_fprime_jac,
+                          use_cdiff = central_diff_jac)
     
     
     
