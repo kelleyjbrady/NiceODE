@@ -792,7 +792,11 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             pop_coeffs_i = pd.DataFrame(dtype = np.float64, columns = pop_coeffs.columns)
             assert len(pop_coeffs) == 1
             for c in pop_coeffs_i.columns:
-                pop_coeffs_i[c] = np.repeat(pop_coeffs[c].values[0], len(b_i_approx)) + b_i_approx[c].values.flatten()
+                if c in b_i_approx.columns:
+                    b_i_c = b_i_approx[c].values.flatten()
+                else:
+                    b_i_c = np.repeat(0.0, len(b_i_approx))
+                pop_coeffs_i[c] = np.repeat(pop_coeffs[c].values[0], len(b_i_approx)) + b_i_c
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs_i, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs)
         return preds
@@ -1042,7 +1046,80 @@ def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
     neg_ll = [i for i in [cholsky_neg_ll,naive_vec_neg_ll, naive_subj_neg_ll] if i is not None][0]
     
     return neg_ll
- 
+
+def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, b_i_init):
+    """Estimates b_i for a *single* individual using Newton-Raphson (or similar)."""
+
+    def conditional_log_likelihood(b_i, y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj):
+        # Combine the population coefficients and b_i for this individual
+        
+        combined_coeffs = pop_coeffs.copy()
+        # Ensure b_i is a Series with correct index for merging
+        b_i_series = pd.Series(b_i, index=model_obj.omega_cols)
+        for col in combined_coeffs.columns:
+            if col in b_i_series.index:
+                combined_coeffs[col] = pop_coeffs[col] + b_i_series[col]
+        # Generate the model coefficients for this individual
+        model_coeffs_i = model_obj._generate_pk_model_coeff_vectorized(combined_coeffs, thetas, beta_data)
+        # Solve the ODEs for this individual
+        preds_i = model_obj._solve_ivp(model_coeffs_i, parallel=False)
+        #compute residuals
+        residuals_i = y_i - preds_i
+        # Calculate the negative conditional log-likelihood
+        n_t = len(y_i)
+        R_i = sigma2 * np.eye(n_t)
+        try:
+            inv_R_i = np.linalg.inv(R_i)
+        except np.linalg.LinAlgError:
+            return np.inf #return inf if R is singular
+        
+        log_likelihood_data = -0.5 * (n_t * np.log(2 * np.pi) + np.log(np.linalg.det(R_i)) + residuals_i.T @ inv_R_i @ residuals_i)
+        
+        try:
+            inv_Omega = np.linalg.inv(Omega)
+        except np.linalg.LinAlgError:
+            return np.inf #return inf if Omega is singular
+
+        log_likelihood_prior = -0.5 * (len(b_i) * np.log(2 * np.pi) + np.log(np.linalg.det(Omega)) + b_i.T @ inv_Omega @ b_i)
+
+        return -(log_likelihood_data + log_likelihood_prior)
+    
+    y_i = model_obj.y[model_obj.y_groups == b_i_init.name] #b_i_init.name will contain subject id
+
+    # Use scipy.optimize.minimize for the inner optimization
+    result_b_i = minimize(
+        conditional_log_likelihood,
+        b_i_init.values.flatten(),  # Initial guess for b_i (flattened)
+        args=(y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj),
+        method='L-BFGS-B',  # Or another suitable method, BFGS, Nelder-Mead, etc.
+        # You might need bounds on b_i, depending on your model.
+    )
+
+    b_i_estimated = pd.Series(result_b_i.x, index = b_i_init.index, name = b_i_init.name)
+
+    return b_i_estimated
+
+
+def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None):
+    y = np.copy(model_obj.y)
+    y_groups_idx = np.copy(model_obj.y_groups)
+    omegas_names = list(omegas.columns)
+    omegas = omegas.values.flatten() #omegas as SD, we want Variance, thus **2 below
+    omegas2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
+    sigma = sigma.values[0]
+    sigma2 = sigma**2
+    n_individuals = len(model_obj.unique_groups)
+    n_random_effects = len(omegas.columns)
+    
+    b_i_estimates = []
+    for sub_idx, sub in enumerate(model_obj.unique_groups):
+        b_i_init = FO_b_i_apprx[sub_idx] if FO_b_i_apprx is not None else np.zeros_like(omegas)
+        b_i_init = pd.Series(b_i_init, index=omegas_names, name = sub)
+        b_i_est = _estimate_b_i(model_obj, pop_coeffs, thetas, model_obj.theta_data, sigma2, omegas2, b_i_init)
+        b_i_estimates.append(b_i_est)
+    b_i_estimates = pd.DataFrame(b_i_estimates)
+    
+    
     
 
 
@@ -1066,9 +1143,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     preds = model_obj._solve_ivp(model_coeffs, parallel = False, )
     residuals = y - preds
     
-    
-    
-    
+    #estimate jacobian
     apprx_fprime_jac = True
     central_diff_jac = False
     J = estimate_jacobian(pop_coeffs,
@@ -1076,11 +1151,8 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
                           model_obj, use_fprime = apprx_fprime_jac,
                           use_cdiff = central_diff_jac)
     
-    
-    
-
-    
-    
+    #drop initial values from relevant arrays if `model_obj.ode_t0_vals_are_subject_y0`
+    #perfect predictions can cause issues during optimization and also add no information to the loss
     #If there are any subjects with only one data point this will fail by dropping the entire subject
     if model_obj.ode_t0_vals_are_subject_y0:
         drop_idx = model_obj.subject_y0_idx
@@ -1089,11 +1161,10 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
         y = np.delete(y, drop_idx)
         y_groups_idx = np.delete(y_groups_idx, drop_idx)
 
-    
+    #Estimate the covariance matrix, then estimate neg log likelihood
     direct_det_cov = False
     per_sub_direct_neg_ll = False
     cholsky_cov = True
-
     neg_ll = estimate_neg_log_likelihood(J, 
                                          y_groups_idx, y, residuals,
                                          sigma2, omegas2, n_individuals,
@@ -1103,15 +1174,13 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
                                          naive_cov_subj=per_sub_direct_neg_ll,
                                          )
     
+    #if predicting or debugging, solve for the optimal b_i given the first order apprx
     b_i_approx = np.zeros((n_individuals, n_random_effects))
     if solve_for_omegas:
         for sub_idx, sub in enumerate(model_obj.unique_groups):
-            filt = y_groups_idx == sub
-            
+            filt = y_groups_idx == sub        
             J_sub = J[filt]
-            residuals_sub = residuals[filt]
-            
-            
+            residuals_sub = residuals[filt] 
             b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omegas2), J_sub.T @ residuals_sub)
     
 
