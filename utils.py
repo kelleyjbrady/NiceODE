@@ -219,8 +219,9 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             PopulationCoeffcient('k', 0.6), PopulationCoeffcient('vd', 2.0)],
         dep_vars: Dict[str, ObjectiveFunctionColumn] = {'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
                                                         'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]},
-        loss_function = mean_squared_error,
-        loss_params = {},
+        no_me_loss_function = mean_squared_error,
+        no_me_loss_params = {},
+        me_loss_function = FO_approx_ll_loss, 
         optimizer_tol = None,
         verbose=False, 
         ode_solver_method = 'RK45',
@@ -244,7 +245,8 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                 assigned_args = [obj.coeff_name for obj in population_coeff]
                 if arg_name not in assigned_args:
                     population_coeff.append(PopulationCoeffcient(arg_name))
-        self.loss_function = loss_function
+        self.no_me_loss_function = no_me_loss_function
+        self.me_loss_function = me_loss_function
         # not sure if the section below needs to be in two places
         for coef_obj in population_coeff:
             c = coef_obj.coeff_name
@@ -257,7 +259,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         self.dep_vars = dep_vars
         self.init_vals = self._unpack_init_vals()
         self.bounds = self._unpack_upper_lower_bounds()
-        self.loss_params = loss_params
+        self.no_me_loss_params = no_me_loss_params
         self.optimzer_tol = optimizer_tol
     
     def _validate_ode_t0_vals_size(self, ode_t0_vals):
@@ -740,7 +742,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         preds = self.predict(data, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
         #residuals = data[self.conc_at_time_col] - preds
         #sse = np.sum(residuals**2)
-        error = self.loss_function(data[self.conc_at_time_col], preds, **self.loss_params)
+        error = self.no_me_loss_function(data[self.conc_at_time_col], preds, **self.no_me_loss_params)
         return error
     
     def _objective_function2(self, params, beta_data,  parallel = None, parallel_n_jobs = None ,):
@@ -749,7 +751,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), columns = self.init_betas.columns)
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
-            error = self.loss_function(self.y, preds, **self.loss_params)
+            error = self.no_me_loss_function(self.y, preds, **self.no_me_loss_params)
         elif self.n_subject_level_intercepts > 0:
             n_pop_c = self.n_population_coeff
             pop_coeffs = pd.DataFrame(params[:n_pop_c].reshape(1,-1), columns = self.init_pop_coeffs.columns[:n_pop_c])
@@ -761,7 +763,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), columns = self.subject_level_intercepts.columns)
             start_idx = end_idx
             thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), columns = self.init_betas.columns)
-            error, _ = FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, beta_data, self)
+            error, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self)
 
         return error
     
@@ -787,7 +789,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
             omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), columns = self.subject_level_intercepts.columns)
             start_idx = end_idx
             thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), columns = self.init_betas.columns)
-            error, b_i_approx = FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
+            error, b_i_approx = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
             b_i_approx = pd.DataFrame(b_i_approx, columns = omegas.columns)
             pop_coeffs_i = pd.DataFrame(dtype = np.float64, columns = pop_coeffs.columns)
             assert len(pop_coeffs) == 1
@@ -1100,7 +1102,7 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, b_i_i
     return b_i_estimated
 
 
-def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None):
+def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None, **kwargs):
     y = np.copy(model_obj.y)
     y_groups_idx = np.copy(model_obj.y_groups)
     omegas_names = list(omegas.columns)
@@ -1115,9 +1117,28 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
     for sub_idx, sub in enumerate(model_obj.unique_groups):
         b_i_init = FO_b_i_apprx[sub_idx] if FO_b_i_apprx is not None else np.zeros_like(omegas)
         b_i_init = pd.Series(b_i_init, index=omegas_names, name = sub)
+        #the inputs to the line below are for the whole dataset, probaly need to filter theta_data
         b_i_est = _estimate_b_i(model_obj, pop_coeffs, thetas, model_obj.theta_data, sigma2, omegas2, b_i_init)
         b_i_estimates.append(b_i_est)
     b_i_estimates = pd.DataFrame(b_i_estimates)
+    
+    combined_coeffs = pop_coeffs.copy()
+    for col in b_i_estimates.columns:
+        if col in b_i_estimates.columns:
+            combined_coeffs[col] = combined_coeffs[col] + b_i_estimates[col]
+            
+    model_coeffs = model_obj._generate_pk_model_coeff_vectorized(combined_coeffs, thetas, theta_data)
+    #would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`) 
+    # prepopulated with partial
+    preds = model_obj._solve_ivp(model_coeffs, parallel = False, )
+    residuals = y - preds
+    
+    apprx_fprime_jac = True
+    central_diff_jac = False
+    J = estimate_jacobian(combined_coeffs,
+                          thetas, theta_data, omegas_names, y,
+                          model_obj, use_fprime = apprx_fprime_jac,
+                          use_cdiff = central_diff_jac)
     
     
     
