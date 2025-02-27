@@ -27,6 +27,7 @@ import ast
 from scipy.linalg import block_diag, cho_factor, cho_solve
 from scipy.optimize import approx_fprime
 import warnings
+from tqdm import tqdm
 
 
 
@@ -211,7 +212,7 @@ def estimate_fprime_jac(pop_coeffs,thetas, theta_data, apprx_fprime_j_cols_filt,
             #pop_coeffs_array will have shape n_pop, 
             #pop_coeffs_series = pd.Series(pop_coeffs_array, index = model_obj.pop_cols)
             pop_coeffs_array = pop_coeffs_array.reshape(1,-1) if len(pop_coeffs_array.shape) == 1 else pop_coeffs_array
-            pop_coeffs_inner = pd.DataFrame(pop_coeffs_array, columns = pop_coeffs.columns)
+            pop_coeffs_inner = pd.DataFrame(pop_coeffs_array, dtype = pd.Float64Dtype(), columns = pop_coeffs.columns)
             model_coeffs_local = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs_inner, thetas, theta_data)
             return model_obj._solve_ivp(model_coeffs_local, parallel=False)
     #the flatten is causing issues when pop_coeffs is not one row
@@ -384,13 +385,14 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
         # Ensure b_i is a Series with correct index for merging
         b_i_series = pd.Series(b_i, index=omega_names)
         b_i_series.index = pd.MultiIndex.from_tuples(b_i_series.index)
-        b_i_df = pd.DataFrame(b_i.reshape(1, -1), columns=omega_names)
+        b_i_df = pd.DataFrame(b_i.reshape(1, -1), dtype = pd.Float64Dtype(), columns=omega_names)
         b_i_df.columns = pd.MultiIndex.from_tuples(b_i_df.columns)
         
         
 
         for col in combined_coeffs.columns:
             if col in b_i_df.columns:
+                #not sure why these need to be flattened now, but that seems like the case. 
                 combined_coeffs[col] = pop_coeffs[col].values + b_i_df[col].values
         # Generate the model coefficients for this individual
         model_coeffs_i = model_obj._generate_pk_model_coeff_vectorized(combined_coeffs, thetas, beta_data, expected_len_out = 1)
@@ -436,12 +438,13 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
         # You might need bounds on b_i, depending on your model.
     )
 
-    b_i_estimated = pd.DataFrame(result_b_i.x.reshape(1,-1), columns=  b_i_init.columns, )
+    b_i_estimated = pd.DataFrame(result_b_i.x.reshape(1,-1), dtype = pd.Float64Dtype(), columns=  b_i_init.columns, )
 
     return b_i_estimated
 
 
 def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None, **kwargs):
+    print('Objective Call Start')
     y = np.copy(model_obj.y)
     y_groups_idx = np.copy(model_obj.y_groups)
     omegas_names = list(omegas.columns)
@@ -451,12 +454,12 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
     sigma2 = sigma**2
     n_individuals = len(model_obj.unique_groups)
     n_random_effects = len(omegas_names)
-    
+    print('Inner Loop Optimizing b_i')
     b_i_estimates = []
-    for sub_idx, sub in enumerate(model_obj.unique_groups):
+    for sub_idx, sub in enumerate(tqdm(model_obj.unique_groups)):
         b_i_init = FO_b_i_apprx[sub_idx] if FO_b_i_apprx is not None else np.zeros_like(omegas)
         b_i_init_s = pd.Series(b_i_init, index=omegas_names, name = sub)
-        b_i_init = pd.DataFrame(b_i_init.reshape(1,-1), columns = omegas_names)
+        b_i_init = pd.DataFrame(b_i_init.reshape(1,-1), columns = omegas_names, dtype = pd.Float64Dtype())
         b_i_init.columns = pd.MultiIndex.from_tuples(b_i_init.columns)
         thetas_i = thetas.iloc[sub_idx, :] if len(thetas) > 1 else thetas
         theta_data_i = theta_data.iloc[sub_idx, :] if len(theta_data) > 1 else theta_data
@@ -464,6 +467,8 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
         time_mask_i = model_obj.time_mask[sub_idx, :] #very confusing to have these sometimes be arrays
         y_i = model_obj.y[model_obj.y_groups == sub]
         #something is wrong with _estimate_b_i. Everything beyond is suspect. 
+        print(f"b_i: {b_i_init}\n")
+        print(f"pop_coeffs: {pop_coeffs}\n")
         b_i_est = _estimate_b_i(model_obj, pop_coeffs, thetas_i, theta_data_i, sigma2, omegas2, omegas_names, b_i_init, ode_t0_i, time_mask_i, y_i, sub)
         b_i_estimates.append(b_i_est)
     b_i_estimates = pd.concat(b_i_estimates)
@@ -509,7 +514,7 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
                                          naive_cov_vec=direct_det_cov,
                                          naive_cov_subj=per_sub_direct_neg_ll,
                                          )
-    
+    print('Objective Call Complete')
     return - neg_ll, b_i_estimates
     
     
@@ -1286,7 +1291,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             model_coeffs[c] = out
         if len(model_coeffs) != expected_len_out:
             tmp_coeff = np.tile(model_coeffs.values, (expected_len_out, 1))
-            model_coeffs = pd.DataFrame(tmp_coeff, columns = model_coeffs.columns)
+            model_coeffs = pd.DataFrame(tmp_coeff, columns = model_coeffs.columns, dtype = pd.Float64Dtype())
         return model_coeffs.copy()
     
     def _solve_ivp_parallel(self, y0, args, tspan = None, teval = None, fun = None, method = None):
@@ -1436,22 +1441,22 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     
     def _objective_function2(self, params, beta_data,  parallel = None, parallel_n_jobs = None ,):
         if self.n_subject_level_intercepts == 0:
-            pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), columns = self.init_pop_coeffs.columns)
-            thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), columns = self.init_betas.columns)
+            pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns)
+            thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_betas.columns)
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
             error = self.no_me_loss_function(self.y, preds, **self.no_me_loss_params)
         elif self.n_subject_level_intercepts > 0:
             n_pop_c = self.n_population_coeff
-            pop_coeffs = pd.DataFrame(params[:n_pop_c].reshape(1,-1), columns = self.init_pop_coeffs.columns[:n_pop_c])
+            pop_coeffs = pd.DataFrame(params[:n_pop_c].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns[:n_pop_c])
             start_idx = n_pop_c
             end_idx = start_idx + 1
-            sigma = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), columns = self.init_pop_coeffs.columns[start_idx:end_idx])
+            sigma = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns[start_idx:end_idx])
             start_idx = end_idx
             end_idx = start_idx + self.n_subject_level_intercepts
-            omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), columns = self.subject_level_intercepts.columns)
+            omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.subject_level_intercepts.columns)
             start_idx = end_idx
-            thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), columns = self.init_betas.columns)
+            thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_betas.columns)
             error, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self)
 
         return error
@@ -1463,24 +1468,24 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         pop_coeffs, _, _, beta_data = self._assemble_pred_matrices(data)
         if self.n_subject_level_intercepts == 0:
            
-            pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), columns = self.init_pop_coeffs.columns)
-            thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), columns = self.init_betas.columns)
+            pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns)
+            thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_betas.columns)
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs, timepoints = timepoints)
         elif self.n_subject_level_intercepts > 0:
             n_pop_c = self.n_population_coeff
-            pop_coeffs = pd.DataFrame(params[:n_pop_c].reshape(1,-1), columns = self.init_pop_coeffs.columns[:n_pop_c])
+            pop_coeffs = pd.DataFrame(params[:n_pop_c].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns[:n_pop_c])
             start_idx = n_pop_c
             end_idx = start_idx + 1
-            sigma = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), columns = self.init_pop_coeffs.columns[start_idx:end_idx])
+            sigma = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns[start_idx:end_idx])
             start_idx = end_idx
             end_idx = start_idx + self.n_subject_level_intercepts
-            omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), columns = self.subject_level_intercepts.columns)
+            omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.subject_level_intercepts.columns)
             start_idx = end_idx
-            thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), columns = self.init_betas.columns)
+            thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_betas.columns)
             error, b_i_approx = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
-            b_i_approx = pd.DataFrame(b_i_approx, columns = omegas.columns)
-            pop_coeffs_i = pd.DataFrame(dtype = np.float64, columns = pop_coeffs.columns)
+            b_i_approx = pd.DataFrame(b_i_approx, dtype = pd.Float64Dtype(), columns = omegas.columns)
+            pop_coeffs_i = pd.DataFrame(dtype = pd.Float64Dtype(), columns = pop_coeffs.columns)
             assert len(pop_coeffs) == 1
             for c in pop_coeffs_i.columns:
                 if c in b_i_approx.columns:
