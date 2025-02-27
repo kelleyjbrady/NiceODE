@@ -15,6 +15,7 @@ from diffeqs import( OneCompartmentFODiffEq,
                     parallel_elim_one_compartment_model, 
                     one_compartment_absorption
                     )
+import numpy as np
 
 # %%
 diffeq_obj = OneCompartmentFODiffEq()
@@ -36,8 +37,9 @@ with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
 me_mod =  CompartmentalModel(
           ode_t0_cols=[ODEInitVals('DV')],
           population_coeff=[PopulationCoeffcient('cl', 25, subject_level_intercept=True,
+                                                 optimization_upper_bound = np.log(1000),
                                                  subject_level_intercept_init_val = 0.2),
-                            PopulationCoeffcient('vd', 80, ),
+                            PopulationCoeffcient('vd', 80, optimization_upper_bound=np.log(1000)),
                          ],
           dep_vars= None, 
                                    no_me_loss_function=sum_of_squares_loss, 

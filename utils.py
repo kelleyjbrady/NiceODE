@@ -1005,10 +1005,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                   for obj in self.population_coeff]
         #then sigma
         if any([obj.subject_level_intercept for obj in self.population_coeff]):
-            bounds.append((1e-6, None))
+            bounds.append((1e-6, 1000))
         
         #then omega2s
-        bounds.extend([(1e-6, None) for obj in self.population_coeff if obj.subject_level_intercept])
+        bounds.extend([(1e-6, 1000) for obj in self.population_coeff if obj.subject_level_intercept])
         
         #then dep var bounds
         for model_coeff in self.dep_vars:
