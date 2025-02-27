@@ -26,6 +26,9 @@ import inspect
 import ast
 from scipy.linalg import block_diag, cho_factor, cho_solve
 from scipy.optimize import approx_fprime
+import warnings
+
+
 
 def softplus(x):
     return np.log(1 + np.exp(x))
@@ -364,24 +367,35 @@ def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
     
     return neg_ll
 
-def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega_names, b_i_init, ode_t0_val, time_mask_i, y_i):
+def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega_names, b_i_init, ode_t0_val, time_mask_i, y_i, sub):
     """Estimates b_i for a *single* individual using Newton-Raphson (or similar)."""
 
     def conditional_log_likelihood(b_i, y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj):
         # Combine the population coefficients and b_i for this individual
         
+        
+        check_pos_inf = np.any(np.isinf(b_i))
+        check_neg_inf = np.any(np.isneginf(b_i))
+        if check_pos_inf or check_neg_inf:
+            warnings.warn(f'Estimated b_i for subject {sub} was infinite, setting b_i to zero.')
+            b_i[check_pos_inf] = 0
+            b_i[check_neg_inf] = 0
         combined_coeffs = pop_coeffs.copy()
         # Ensure b_i is a Series with correct index for merging
         b_i_series = pd.Series(b_i, index=omega_names)
         b_i_series.index = pd.MultiIndex.from_tuples(b_i_series.index)
         b_i_df = pd.DataFrame(b_i.reshape(1, -1), columns=omega_names)
         b_i_df.columns = pd.MultiIndex.from_tuples(b_i_df.columns)
+        
+        
+
         for col in combined_coeffs.columns:
             if col in b_i_df.columns:
                 combined_coeffs[col] = pop_coeffs[col].values + b_i_df[col].values
         # Generate the model coefficients for this individual
         model_coeffs_i = model_obj._generate_pk_model_coeff_vectorized(combined_coeffs, thetas, beta_data, expected_len_out = 1)
         # Solve the ODEs for this individual
+        
         preds_i = model_obj._solve_ivp(model_coeffs_i,ode_t0_val,time_mask_i, parallel=False)
         #compute residuals
         residuals_i = y_i - preds_i
@@ -443,7 +457,7 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
         time_mask_i = model_obj.time_mask[sub_idx, :] #very confusing to have these sometimes be arrays
         y_i = model_obj.y[model_obj.y_groups == sub]
         #something is wrong with _estimate_b_i. Everything beyond is suspect. 
-        b_i_est = _estimate_b_i(model_obj, pop_coeffs, thetas_i, theta_data_i, sigma2, omegas2, omegas_names, b_i_init, ode_t0_i, time_mask_i, y_i)
+        b_i_est = _estimate_b_i(model_obj, pop_coeffs, thetas_i, theta_data_i, sigma2, omegas2, omegas_names, b_i_init, ode_t0_i, time_mask_i, y_i, sub)
         b_i_estimates.append(b_i_est)
     b_i_estimates = pd.concat(b_i_estimates)
     b_i_estimates.columns = pd.MultiIndex.from_tuples(b_i_estimates.columns)
@@ -1492,7 +1506,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             
         
     
-    def fit2(self, data, parallel = False, parallel_n_jobs = -1 , warm_start = False, checkpoint_filename='check_test.jb', ):
+    def fit2(self, data, parallel = False, parallel_n_jobs = -1 , n_iters_per_checkpoint = 5, warm_start = False, checkpoint_filename='check_test.jb', ):
         pop_coeffs, omegas, betas, beta_data = self._assemble_pred_matrices(data)
         init_params = [pop_coeffs.values,] #pop coeffs already includes sigma if needed, this is confusing
         if len(omegas.values) > 0:
@@ -1504,7 +1518,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         objective_function = partial(self._objective_function2, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
         self.fit_result_ = optimize_with_checkpoint_joblib(objective_function,
                                                            init_params,
-                                                           n_checkpoint=5,
+                                                           n_checkpoint=n_iters_per_checkpoint,
                                                            checkpoint_filename=checkpoint_filename,
                                                            args=(beta_data,),
                                                            warm_start=warm_start,

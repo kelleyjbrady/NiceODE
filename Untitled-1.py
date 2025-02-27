@@ -7,7 +7,7 @@ import joblib as jb
 
 
 # %%
-from utils import OneCompartmentModel, FOCE_approx_ll_loss, FO_approx_ll_loss
+from utils import CompartmentalModel, FOCE_approx_ll_loss, FO_approx_ll_loss
 from diffeqs import( OneCompartmentFODiffEq,
                     mm_one_compartment_model,
                     first_order_one_compartment_model,
@@ -33,7 +33,7 @@ with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
 
 
 # %%
-me_mod =  OneCompartmentModel(
+me_mod =  CompartmentalModel(
           ode_t0_cols=[ODEInitVals('DV')],
           population_coeff=[PopulationCoeffcient('cl', 25, subject_level_intercept=True,
                                                  subject_level_intercept_init_val = 0.2),
@@ -49,7 +49,7 @@ me_mod =  OneCompartmentModel(
 
 
 # %%
-me_mod.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me.jb', parallel=False, parallel_n_jobs=4)
+me_mod.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
 
 
 with open('me_mod_debug.jb', 'wb') as f:
