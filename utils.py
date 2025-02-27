@@ -870,7 +870,7 @@ def generate_ivp_predictions(optimized_result, df, subject_id_c='SUBJID', dose_c
         predictions[subject] = sol
     return predictions
 
-class OneCompartmentModel(RegressorMixin, BaseEstimator):
+class CompartmentalModel(RegressorMixin, BaseEstimator):
 
     def __init__(
         self,
@@ -1469,6 +1469,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                 pop_coeffs_i[c] = np.repeat(pop_coeffs[c].values[0], len(b_i_approx)) + b_i_c
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs_i, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs)
+            self.b_i_approx = b_i_approx
         return preds
     
     def prepare_indiv_params(self, data,):
@@ -1510,6 +1511,9 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                                                            tol = self.optimzer_tol,
                                                            bounds=self.bounds
                                                            )
+        #after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
+        if len(omegas.values) > 0:
+            _ = self.predict2(data, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
         return deepcopy(self)
     
 
