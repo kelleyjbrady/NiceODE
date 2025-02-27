@@ -207,10 +207,19 @@ def estimate_fprime_jac(pop_coeffs,thetas, theta_data, apprx_fprime_j_cols_filt,
     def wrapped_solve_ivp(pop_coeffs_array):
             #pop_coeffs_array will have shape n_pop, 
             #pop_coeffs_series = pd.Series(pop_coeffs_array, index = model_obj.pop_cols)
-            pop_coeffs_inner = pd.DataFrame(pop_coeffs_array.reshape(1,-1), columns = pop_coeffs.columns)
+            pop_coeffs_array = pop_coeffs_array.reshape(1,-1) if len(pop_coeffs_array.shape) == 1 else pop_coeffs_array
+            pop_coeffs_inner = pd.DataFrame(pop_coeffs_array, columns = pop_coeffs.columns)
             model_coeffs_local = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs_inner, thetas, theta_data)
             return model_obj._solve_ivp(model_coeffs_local, parallel=False)
-    J_afp = approx_fprime(pop_coeffs.values.flatten(), wrapped_solve_ivp, epsilon=1e-6)
+    #the flatten is causing issues when pop_coeffs is not one row
+    if pop_coeffs.shape[0] == 1:
+        pop_coeffs_in = np.copy(pop_coeffs.values.flatten())
+    else:
+        pop_coeffs_in = np.copy(pop_coeffs.values)
+    #need to call for each row in pop_coeffs_in when it is not one row long
+    # this is way slower than the loop in `estimate_cdiff_jac`
+    # Thus, this only works for the FO approximation, not FOCE
+    J_afp = approx_fprime(pop_coeffs_in, wrapped_solve_ivp, epsilon=1e-6)
     #J_afp = J_afp.reshape(len(y), len(pop_coeffs.columns))
     #The reshape below will fail when there are less random effects than pop_coeffs
     #J_afp = J_afp.reshape(len(y), n_random_effects)
@@ -256,10 +265,10 @@ def estimate_jacobian(pop_coeffs:pd.DataFrame,
                                 for pc in pop_coeffs.columns]
     J_afp = None
     J_cd = None
-    if use_fprime:
+    if use_fprime: #this method currently only works when there is only one pop_coeffs 
         J_afp = estimate_fprime_jac(pop_coeffs,thetas, theta_data, apprx_fprime_j_cols_filt, y, model_obj)
     if use_cdiff:
-        J_cd = estimate_cdiff_jac(pop_coeffs,thetas, theta_data, n_random_effects, omega_names, model_obj)
+        J_cd = estimate_cdiff_jac(pop_coeffs,thetas, theta_data, n_random_effects, omega_names, y, model_obj)
     J = [i for i in [J_afp, J_cd] if i is not None][0]
     return J
 
@@ -439,12 +448,14 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
     b_i_estimates = pd.concat(b_i_estimates)
     b_i_estimates.columns = pd.MultiIndex.from_tuples(b_i_estimates.columns)
     
-    combined_coeffs = pd.DataFrame(dtype = np.float64,columns = pop_coeffs.columns)
-    #combined_coeffs.columns = pd.MultiIndex.from_tuples(combined_coeffs.columns)
-    for col in pop_coeffs.columns:
+    combined_coeffs = pd.DataFrame(np.tile(pop_coeffs.values, (b_i_estimates.shape[0], 1))
+                                   , dtype=np.float64
+                                   ,columns = pop_coeffs.columns
+                                   )
+    for col in combined_coeffs.columns:
         if col in b_i_estimates.columns:
             #so much fuckery with these df . . . 
-            combined_coeffs[col] = pop_coeffs[col].values + b_i_estimates[col].values.flatten()
+            combined_coeffs[col] = combined_coeffs[col].values + b_i_estimates[col].values.flatten()
             
     model_coeffs = model_obj._generate_pk_model_coeff_vectorized(combined_coeffs, thetas, theta_data)
     #would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`) 
@@ -452,12 +463,33 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
     preds = model_obj._solve_ivp(model_coeffs, parallel = False, )
     residuals = y - preds
     
-    apprx_fprime_jac = True
-    central_diff_jac = False
+    apprx_fprime_jac = False
+    central_diff_jac = True
     J = estimate_jacobian(combined_coeffs,
                           thetas, theta_data, omegas_names, y,
                           model_obj, use_fprime = apprx_fprime_jac,
                           use_cdiff = central_diff_jac)
+    
+    if model_obj.ode_t0_vals_are_subject_y0:
+        drop_idx = model_obj.subject_y0_idx
+        J = np.delete(J, drop_idx, axis = 0)
+        residuals = np.delete(residuals, drop_idx)
+        y = np.delete(y, drop_idx)
+        y_groups_idx = np.delete(y_groups_idx, drop_idx)
+        
+    direct_det_cov = False
+    per_sub_direct_neg_ll = False
+    cholsky_cov = True
+    neg_ll = estimate_neg_log_likelihood(J, 
+                                         y_groups_idx, y, residuals,
+                                         sigma2, omegas2, n_individuals,
+                                         n_random_effects, model_obj, 
+                                         cholsky_cov=cholsky_cov, 
+                                         naive_cov_vec=direct_det_cov,
+                                         naive_cov_subj=per_sub_direct_neg_ll,
+                                         )
+    
+    return - neg_ll, b_i_estimates
     
     
     

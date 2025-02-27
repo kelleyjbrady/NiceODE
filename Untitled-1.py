@@ -43,7 +43,7 @@ me_mod =  OneCompartmentModel(
                                    no_me_loss_function=sum_of_squares_loss, 
                                    optimizer_tol=None, 
                                    pk_model_function=first_order_one_compartment_model2, 
-                                   me_loss_function=FO_approx_ll_loss,
+                                   me_loss_function=FOCE_approx_ll_loss,
                                    #ode_solver_method='BDF'
                                    )
 
