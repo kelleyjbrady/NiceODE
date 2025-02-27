@@ -420,12 +420,19 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
     
     #y_i = model_obj.y[model_obj.y_groups == b_i_init.name] #b_i_init.name will contain subject id
 
+    b_i_bounds = []
+    for omega in np.diag(Omega)**0.5:  # Iterate through standard deviations
+        lower_bound = -6 * omega  # Example:  +/- 5 standard deviations
+        upper_bound = 6 * omega
+        b_i_bounds.append((lower_bound, upper_bound))
+    
     # Use scipy.optimize.minimize for the inner optimization
     result_b_i = minimize(
         conditional_log_likelihood,
         b_i_init.values.flatten(),  # Initial guess for b_i (flattened)
         args=(y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj),
         method='L-BFGS-B',  # Or another suitable method, BFGS, Nelder-Mead, etc.
+        bounds=b_i_bounds
         # You might need bounds on b_i, depending on your model.
     )
 
