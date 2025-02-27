@@ -350,7 +350,7 @@ def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
     
     return neg_ll
 
-def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, b_i_init):
+def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega_names, b_i_init, ode_t0_val, time_mask_i, y_i):
     """Estimates b_i for a *single* individual using Newton-Raphson (or similar)."""
 
     def conditional_log_likelihood(b_i, y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj):
@@ -358,14 +358,17 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, b_i_i
         
         combined_coeffs = pop_coeffs.copy()
         # Ensure b_i is a Series with correct index for merging
-        b_i_series = pd.Series(b_i, index=model_obj.omega_cols)
+        b_i_series = pd.Series(b_i, index=omega_names)
+        b_i_series.index = pd.MultiIndex.from_tuples(b_i_series.index)
+        b_i_df = pd.DataFrame(b_i.reshape(1, -1), columns=omega_names)
+        b_i_df.columns = pd.MultiIndex.from_tuples(b_i_df.columns)
         for col in combined_coeffs.columns:
-            if col in b_i_series.index:
-                combined_coeffs[col] = pop_coeffs[col] + b_i_series[col]
+            if col in b_i_df.columns:
+                combined_coeffs[col] = pop_coeffs[col].values + b_i_df[col].values
         # Generate the model coefficients for this individual
-        model_coeffs_i = model_obj._generate_pk_model_coeff_vectorized(combined_coeffs, thetas, beta_data)
+        model_coeffs_i = model_obj._generate_pk_model_coeff_vectorized(combined_coeffs, thetas, beta_data, expected_len_out = 1)
         # Solve the ODEs for this individual
-        preds_i = model_obj._solve_ivp(model_coeffs_i, parallel=False)
+        preds_i = model_obj._solve_ivp(model_coeffs_i,ode_t0_val,time_mask_i, parallel=False)
         #compute residuals
         residuals_i = y_i - preds_i
         # Calculate the negative conditional log-likelihood
@@ -387,7 +390,7 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, b_i_i
 
         return -(log_likelihood_data + log_likelihood_prior)
     
-    y_i = model_obj.y[model_obj.y_groups == b_i_init.name] #b_i_init.name will contain subject id
+    #y_i = model_obj.y[model_obj.y_groups == b_i_init.name] #b_i_init.name will contain subject id
 
     # Use scipy.optimize.minimize for the inner optimization
     result_b_i = minimize(
@@ -398,7 +401,7 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, b_i_i
         # You might need bounds on b_i, depending on your model.
     )
 
-    b_i_estimated = pd.Series(result_b_i.x, index = b_i_init.index, name = b_i_init.name)
+    b_i_estimated = pd.DataFrame(result_b_i.x.reshape(1,-1), columns=  b_i_init.columns, )
 
     return b_i_estimated
 
@@ -412,21 +415,31 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
     sigma = sigma.values[0]
     sigma2 = sigma**2
     n_individuals = len(model_obj.unique_groups)
-    n_random_effects = len(omegas.columns)
+    n_random_effects = len(omegas_names)
     
     b_i_estimates = []
     for sub_idx, sub in enumerate(model_obj.unique_groups):
         b_i_init = FO_b_i_apprx[sub_idx] if FO_b_i_apprx is not None else np.zeros_like(omegas)
-        b_i_init = pd.Series(b_i_init, index=omegas_names, name = sub)
-        #the inputs to the line below are for the whole dataset, probaly need to filter theta_data
-        b_i_est = _estimate_b_i(model_obj, pop_coeffs, thetas, model_obj.theta_data, sigma2, omegas2, b_i_init)
+        b_i_init_s = pd.Series(b_i_init, index=omegas_names, name = sub)
+        b_i_init = pd.DataFrame(b_i_init.reshape(1,-1), columns = omegas_names)
+        b_i_init.columns = pd.MultiIndex.from_tuples(b_i_init.columns)
+        thetas_i = thetas.iloc[sub_idx, :] if len(thetas) > 1 else thetas
+        theta_data_i = theta_data.iloc[sub_idx, :] if len(theta_data) > 1 else theta_data
+        ode_t0_i = model_obj.ode_t0_vals.iloc[[sub_idx], :]
+        time_mask_i = model_obj.time_mask[sub_idx, :] #very confusing to have these sometimes be arrays
+        y_i = model_obj.y[model_obj.y_groups == sub]
+        #something is wrong with _estimate_b_i. Everything beyond is suspect. 
+        b_i_est = _estimate_b_i(model_obj, pop_coeffs, thetas_i, theta_data_i, sigma2, omegas2, omegas_names, b_i_init, ode_t0_i, time_mask_i, y_i)
         b_i_estimates.append(b_i_est)
-    b_i_estimates = pd.DataFrame(b_i_estimates)
+    b_i_estimates = pd.concat(b_i_estimates)
+    b_i_estimates.columns = pd.MultiIndex.from_tuples(b_i_estimates.columns)
     
-    combined_coeffs = pop_coeffs.copy()
-    for col in b_i_estimates.columns:
+    combined_coeffs = pd.DataFrame(dtype = np.float64,columns = pop_coeffs.columns)
+    #combined_coeffs.columns = pd.MultiIndex.from_tuples(combined_coeffs.columns)
+    for col in pop_coeffs.columns:
         if col in b_i_estimates.columns:
-            combined_coeffs[col] = combined_coeffs[col] + b_i_estimates[col]
+            #so much fuckery with these df . . . 
+            combined_coeffs[col] = pop_coeffs[col].values + b_i_estimates[col].values.flatten()
             
     model_coeffs = model_obj._generate_pk_model_coeff_vectorized(combined_coeffs, thetas, theta_data)
     #would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`) 
@@ -456,7 +469,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, 
     sigma = sigma.values[0]
     sigma2 = sigma**2
     n_individuals = len(model_obj.unique_groups)
-    n_random_effects = len(omegas.columns)
+    n_random_effects = len(omegas_names)
     
     # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
     model_coeffs = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, theta_data)
@@ -1199,21 +1212,22 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
         #this is too many things to return in this manner
         return pop_coeffs.copy(), subject_level_intercepts.copy(), thetas.copy(), theta_data.copy()
     
-    def _generate_pk_model_coeff_vectorized(self, pop_coeffs, betas, beta_data):
+    def _generate_pk_model_coeff_vectorized(self, pop_coeffs, betas, beta_data, expected_len_out = None):
+        expected_len_out = len(self.subject_y0) if expected_len_out is None else expected_len_out
         model_coeffs = pd.DataFrame(dtype = pd.Float64Dtype())
         for c in pop_coeffs.columns:
             pop_coeff = pop_coeffs[c].values
             theta = betas[c].values.flatten() if c in betas.columns else np.zeros_like(pop_coeff)
             X = beta_data[c].values if c in beta_data.columns else np.zeros_like(pop_coeff)
             out = np.exp((X @ theta) + pop_coeff) + 1e-6
-            if len(out) != len(self.subject_y0):
-                out = np.repeat(out, len(self.subject_y0))
+            if len(out) != expected_len_out:
+                out = np.repeat(out, expected_len_out)
             if c not in model_coeffs.columns:
-                model_coeffs[c] = np.repeat(np.nan, len(self.subject_y0))
+                model_coeffs[c] = np.repeat(np.nan, expected_len_out)
                 model_coeffs[c] = model_coeffs[c].astype(pd.Float64Dtype())
             model_coeffs[c] = out
-        if len(model_coeffs) != len(self.subject_y0):
-            tmp_coeff = np.tile(model_coeffs.values, (len(self.subject_y0), 1))
+        if len(model_coeffs) != expected_len_out:
+            tmp_coeff = np.tile(model_coeffs.values, (expected_len_out, 1))
             model_coeffs = pd.DataFrame(tmp_coeff, columns = model_coeffs.columns)
         return model_coeffs.copy()
     
@@ -1226,8 +1240,10 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                             args=(*args,))
         
     
-    def _solve_ivp(self,model_coeffs,parallel = False,parallel_n_jobs = None, timepoints = None):
-        iter_obj =  zip(model_coeffs.iterrows(), self.ode_t0_vals.iterrows())
+    def _solve_ivp(self,model_coeffs,ode_t0_vals = None, time_mask = None, parallel = False,parallel_n_jobs = None, timepoints = None):
+        ode_t0_vals = self.ode_t0_vals if ode_t0_vals is None else ode_t0_vals
+        time_mask = self.time_mask if time_mask is None else time_mask
+        iter_obj =  zip(model_coeffs.iterrows(), ode_t0_vals.iterrows())
         partial_solve_ivp = partial(self._solve_ivp_parallel,
                                  fun = self.pk_model_function,
                                  tspan = self.global_tspan,
@@ -1258,7 +1274,7 @@ class OneCompartmentModel(RegressorMixin, BaseEstimator):
                     sol.append(ode_sol.y[0])
         sol = np.concatenate(sol)
         if timepoints is None:
-            sol = sol[self.time_mask.flatten()]
+            sol = sol[time_mask.flatten()]
         return sol
 
             
