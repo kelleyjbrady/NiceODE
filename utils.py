@@ -203,7 +203,7 @@ def safe_signed_log(x):
     return sign * np.log1p(np.abs(x))
 
 
-def estimate_fprime_jac(pop_coeffs,thetas, theta_data, n_random_effects, y, model_obj):
+def estimate_fprime_jac(pop_coeffs,thetas, theta_data, apprx_fprime_j_cols_filt, y, model_obj):
     def wrapped_solve_ivp(pop_coeffs_array):
             #pop_coeffs_array will have shape n_pop, 
             #pop_coeffs_series = pd.Series(pop_coeffs_array, index = model_obj.pop_cols)
@@ -211,7 +211,10 @@ def estimate_fprime_jac(pop_coeffs,thetas, theta_data, n_random_effects, y, mode
             model_coeffs_local = model_obj._generate_pk_model_coeff_vectorized(pop_coeffs_inner, thetas, theta_data)
             return model_obj._solve_ivp(model_coeffs_local, parallel=False)
     J_afp = approx_fprime(pop_coeffs.values.flatten(), wrapped_solve_ivp, epsilon=1e-6)
-    J_afp = J_afp.reshape(len(y), len(pop_coeffs.columns))
+    #J_afp = J_afp.reshape(len(y), len(pop_coeffs.columns))
+    #The reshape below will fail when there are less random effects than pop_coeffs
+    #J_afp = J_afp.reshape(len(y), n_random_effects)
+    J_afp = J_afp[:, apprx_fprime_j_cols_filt]
     return J_afp
 
 def estimate_cdiff_jac(pop_coeffs,
@@ -223,9 +226,9 @@ def estimate_cdiff_jac(pop_coeffs,
     plus_pop_coeffs = pop_coeffs.copy()
     minus_pop_coeffs = pop_coeffs.copy()
     epsilon = 1e-6
-    J_cd = np.zeros((len(y), len(pop_coeffs.columns)))
-    for pop_coeff_idx, pop_coeff_i in enumerate(pop_coeffs.columns):
-        c = pop_coeff_i[0]
+    J_cd = np.zeros((len(y), n_random_effects))
+    for omega_idx, omega_i in enumerate(omegas_names):
+        c = omega_i[0]
         plus_pop_coeffs[c] = plus_pop_coeffs[c] + epsilon
         plus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(plus_pop_coeffs,
                                                                         thetas, theta_data)
@@ -236,7 +239,7 @@ def estimate_cdiff_jac(pop_coeffs,
                                                                         thetas, theta_data)
         minus_preds = model_obj._solve_ivp(minus_model_coeffs, parallel = False, )
 
-        J_cd[:, pop_coeff_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
+        J_cd[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
     return J_cd
 
 def estimate_jacobian(pop_coeffs:pd.DataFrame,
@@ -249,10 +252,12 @@ def estimate_jacobian(pop_coeffs:pd.DataFrame,
                       use_cdiff:bool = True, 
                       ):
     n_random_effects = len(omega_names)
+    apprx_fprime_j_cols_filt = [pc in [i[0] for i in omega_names]
+                                for pc in pop_coeffs.columns]
     J_afp = None
     J_cd = None
     if use_fprime:
-        J_afp = estimate_fprime_jac(pop_coeffs,thetas, theta_data, n_random_effects, y, model_obj)
+        J_afp = estimate_fprime_jac(pop_coeffs,thetas, theta_data, apprx_fprime_j_cols_filt, y, model_obj)
     if use_cdiff:
         J_cd = estimate_cdiff_jac(pop_coeffs,thetas, theta_data, n_random_effects, omega_names, model_obj)
     J = [i for i in [J_afp, J_cd] if i is not None][0]
