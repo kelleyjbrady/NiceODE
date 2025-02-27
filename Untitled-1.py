@@ -35,16 +35,15 @@ with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
 # %%
 me_mod =  OneCompartmentModel(
           ode_t0_cols=[ODEInitVals('DV')],
-          population_coeff=[PopulationCoeffcient('cl', 5, subject_level_intercept=True,
+          population_coeff=[PopulationCoeffcient('cl', 25, subject_level_intercept=True,
                                                  subject_level_intercept_init_val = 0.2),
-                            PopulationCoeffcient('vd', 20, subject_level_intercept=True,
-                                                 subject_level_intercept_init_val = 0.2),
+                            PopulationCoeffcient('vd', 80, ),
                          ],
           dep_vars= None, 
                                    no_me_loss_function=sum_of_squares_loss, 
                                    optimizer_tol=None, 
                                    pk_model_function=first_order_one_compartment_model2, 
-                                   me_loss_function=FOCE_approx_ll_loss,
+                                   me_loss_function=FO_approx_ll_loss,
                                    #ode_solver_method='BDF'
                                    )
 
