@@ -132,6 +132,9 @@ class PopulationCoeffcient:
     optimization_upper_bound: np.float64 = None
     subject_level_intercept:bool = False
     subject_level_intercept_sd_init_val:np.float64 = None
+    subject_level_intercept_opt_step_size:np.float64 = None
+    subject_level_intercept_intial_val_column_name:str = None
+
 
 
 
@@ -971,7 +974,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.time_col = time_col
         self.verbose = verbose
         self.pk_model_function = pk_model_function
-        self.pk_args_diffeq = get_function_args(pk_model_function)[2:]
+        self.pk_args_diffeq = get_function_args(pk_model_function)[2:] #this relys on defining the dif eqs as I have done
         for arg_name in self.pk_args_diffeq:
             if len(population_coeff) == 0:
                 population_coeff.append(PopulationCoeffcient(arg_name))
@@ -1020,6 +1023,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 'allometric_norm_value':None,
                 'subject_level_intercept':pop_coeff.subject_level_intercept, 
                 'subject_level_intercept_sd_init_val':pop_coeff.subject_level_intercept_sd_init_val,
+                'subject_level_intercept_init_vals_column_name':pop_coeff.subject_level_intercept_init_vals_column_name,
                 'subject_level_intercect_var_lower_bound':1e-6 if pop_coeff.subject_level_intercept else None,
                 'subject_level_intercect_var_upper_bound':None
             })
@@ -1040,6 +1044,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     'allometric_norm_value':coeff_dep_var.allometric_norm_value, 
                     'subject_level_intercept':False, 
                     'subject_level_intercept_sd_init_val':False,
+                    'subject_level_intercept_init_vals_column_name':None,
                     'subject_level_intercect_var_lower_bound':None,
                     'subject_level_intercect_var_upper_bound':None
                 })
@@ -1314,17 +1319,17 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         self.subject_level_intercept_sds = deepcopy(subject_level_intercept_sds)
         self.init_pop_coeffs = deepcopy(pop_coeffs)
-        self.init_betas = deepcopy(thetas)
+        self.init_thetas = deepcopy(thetas)
         #this is too many things to return in this manner
         return pop_coeffs.copy(), subject_level_intercept_sds.copy(), thetas.copy(), theta_data.copy()
     
-    def _generate_pk_model_coeff_vectorized(self, pop_coeffs, betas, beta_data, expected_len_out = None):
+    def _generate_pk_model_coeff_vectorized(self, pop_coeffs, thetas, theta_data, expected_len_out = None):
         expected_len_out = len(self.subject_y0) if expected_len_out is None else expected_len_out
         model_coeffs = pd.DataFrame(dtype = pd.Float64Dtype())
         for c in pop_coeffs.columns:
             pop_coeff = pop_coeffs[c].values
-            theta = betas[c].values.flatten() if c in betas.columns else np.zeros_like(pop_coeff)
-            X = beta_data[c].values if c in beta_data.columns else np.zeros_like(pop_coeff)
+            theta = thetas[c].values.flatten() if c in thetas.columns else np.zeros_like(pop_coeff)
+            X = theta_data[c].values if c in theta_data.columns else np.zeros_like(pop_coeff)
             out = np.exp((X @ theta) + pop_coeff) + 1e-6
             if len(out) != expected_len_out:
                 out = np.repeat(out, expected_len_out)
@@ -1485,7 +1490,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     def _objective_function2(self, params, beta_data,  parallel = None, parallel_n_jobs = None ,):
         if self.n_subject_level_intercept_sds == 0:
             pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns)
-            thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_betas.columns)
+            thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
             error = self.no_me_loss_function(self.y, preds, **self.no_me_loss_params)
@@ -1499,7 +1504,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             end_idx = start_idx + self.n_subject_level_intercept_sds
             omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.subject_level_intercept_sds.columns)
             start_idx = end_idx
-            thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_betas.columns)
+            thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
             error, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self)
 
         return error
@@ -1512,7 +1517,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if self.n_subject_level_intercept_sds == 0:
            
             pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns)
-            thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_betas.columns)
+            thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs, timepoints = timepoints)
         elif self.n_subject_level_intercept_sds > 0:
@@ -1525,7 +1530,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             end_idx = start_idx + self.n_subject_level_intercept_sds
             omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.subject_level_intercept_sds.columns)
             start_idx = end_idx
-            thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_betas.columns)
+            thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
             error, b_i_approx = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
             b_i_approx = pd.DataFrame(b_i_approx, dtype = pd.Float64Dtype(), columns = omegas.columns)
             pop_coeffs_i = pd.DataFrame(dtype = pd.Float64Dtype(), columns = pop_coeffs.columns)
