@@ -29,6 +29,10 @@ from scipy.optimize import approx_fprime
 import warnings
 from tqdm import tqdm
 
+def debug_print(print_obj, debug = False):
+    if debug:
+        if isinstance(print_obj, str):
+            print(print_obj)
 
 
 def softplus(x):
@@ -239,7 +243,7 @@ def estimate_cdiff_jac(pop_coeffs,
     plus_pop_coeffs = pop_coeffs.copy()
     minus_pop_coeffs = pop_coeffs.copy()
     epsilon = 1e-6
-    J_cd = np.zeros((len(y), n_random_effects))
+    J_cd = np.zeros((len(y), n_random_effects), dtype = np.float64)
     for omega_idx, omega_i in enumerate(omegas_names):
         c = omega_i[0]
         plus_pop_coeffs[c] = plus_pop_coeffs[c] + epsilon
@@ -368,12 +372,24 @@ def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
     
     return neg_ll
 
-def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega_names, b_i_init, ode_t0_val, time_mask_i, y_i, sub):
+def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega_names, b_i_init, ode_t0_val, time_mask_i, y_i, sub, debug = True, debug_print = debug_print):
     """Estimates b_i for a *single* individual using Newton-Raphson (or similar)."""
+    
+    debug_print = partial(debug_print, debug = debug)
 
-    def conditional_log_likelihood(b_i, y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj):
+    def conditional_log_likelihood(b_i, y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj, debug = True, debug_print = debug_print):
+        debug_print = partial(debug_print, debug = debug)
+
         # Combine the population coefficients and b_i for this individual
-        
+        debug_print("INNER OPTIMIZATION START ===================")
+        #debug_print(f"inner_opt_calls: {inner_opt_calls}\n")
+        debug_print(f"sub: {sub}\n")
+        debug_print(f"b_i: {b_i}\n")
+        debug_print(f"pop_coeffs: {pop_coeffs}\n")
+        debug_print(f"thetas: {thetas}\n")
+        debug_print(f"beta_data: {beta_data}\n")
+        debug_print(f"sigma2: {sigma2}\n")
+        debug_print(f"Omega: {Omega}\n")
         
         check_pos_inf = np.any(np.isinf(b_i))
         check_neg_inf = np.any(np.isneginf(b_i))
@@ -383,9 +399,9 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
             b_i[check_neg_inf] = 0
         combined_coeffs = pop_coeffs.copy()
         # Ensure b_i is a Series with correct index for merging
-        b_i_series = pd.Series(b_i, index=omega_names)
-        b_i_series.index = pd.MultiIndex.from_tuples(b_i_series.index)
-        b_i_df = pd.DataFrame(b_i.reshape(1, -1), dtype = pd.Float64Dtype(), columns=omega_names)
+
+        b_i = b_i.reshape(1, -1)
+        b_i_df = pd.DataFrame(b_i, dtype = pd.Float64Dtype(), columns=omega_names)
         b_i_df.columns = pd.MultiIndex.from_tuples(b_i_df.columns)
         
         
@@ -393,7 +409,10 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
         for col in combined_coeffs.columns:
             if col in b_i_df.columns:
                 #not sure why these need to be flattened now, but that seems like the case. 
-                combined_coeffs[col] = pop_coeffs[col].values + b_i_df[col].values
+                #these are flattened elsewhere, orginally didn't need to be b/v b_i_df was b_i_series
+                #and this is the only place where pd.Series is being used, although it is probably 
+                #better to use pd.Series
+                combined_coeffs[col] = pop_coeffs[col].values + b_i_df[col].values.flatten()
         # Generate the model coefficients for this individual
         model_coeffs_i = model_obj._generate_pk_model_coeff_vectorized(combined_coeffs, thetas, beta_data, expected_len_out = 1)
         # Solve the ODEs for this individual
@@ -418,24 +437,28 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
 
         log_likelihood_prior = -0.5 * (len(b_i) * np.log(2 * np.pi) + np.log(np.linalg.det(Omega)) + b_i.T @ inv_Omega @ b_i)
 
+        debug_print(f"log_likelihood_data: {-log_likelihood_data}\n")
+        debug_print(f"log_likelihood_prior: {-log_likelihood_prior}\n")
+        debug_print(f"total log_likelihood: {-log_likelihood_data - log_likelihood_prior}\n")
+        debug_print("INNER OPTIMIZATION END ===================")
         return -(log_likelihood_data + log_likelihood_prior)
     
     #y_i = model_obj.y[model_obj.y_groups == b_i_init.name] #b_i_init.name will contain subject id
-
+    
     b_i_bounds = []
     for omega in np.diag(Omega)**0.5:  # Iterate through standard deviations
-        lower_bound = -6 * omega  # Example:  +/- 5 standard deviations
+        lower_bound = -6 * omega  
         upper_bound = 6 * omega
         b_i_bounds.append((lower_bound, upper_bound))
-    
+    print(f"INNER b_i_bounds: {b_i_bounds}")
     # Use scipy.optimize.minimize for the inner optimization
     result_b_i = minimize(
         conditional_log_likelihood,
         b_i_init.values.flatten(),  # Initial guess for b_i (flattened)
         args=(y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj),
-        method='L-BFGS-B',  # Or another suitable method, BFGS, Nelder-Mead, etc.
+        method='L-BFGS-B', 
         bounds=b_i_bounds
-        # You might need bounds on b_i, depending on your model.
+        
     )
 
     b_i_estimated = pd.DataFrame(result_b_i.x.reshape(1,-1), dtype = pd.Float64Dtype(), columns=  b_i_init.columns, )
@@ -443,8 +466,12 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
     return b_i_estimated
 
 
-def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None, **kwargs):
-    print('Objective Call Start')
+            
+
+
+def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None,tqdm_bi = True,debug = True,debug_print =debug_print, **kwargs):
+    debug_print = partial(debug_print, debug = debug)
+    debug_print('Objective Call Start')
     y = np.copy(model_obj.y)
     y_groups_idx = np.copy(model_obj.y_groups)
     omegas_names = list(omegas.columns)
@@ -454,9 +481,13 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
     sigma2 = sigma**2
     n_individuals = len(model_obj.unique_groups)
     n_random_effects = len(omegas_names)
-    print('Inner Loop Optimizing b_i')
+    debug_print('Inner Loop Optimizing b_i ================= INNER LOOP ==================')
     b_i_estimates = []
-    for sub_idx, sub in enumerate(tqdm(model_obj.unique_groups)):
+    if tqdm_bi:
+        iter_obj = tqdm(model_obj.unique_groups)
+    else:
+        iter_obj = model_obj.unique_groups
+    for sub_idx, sub in enumerate(iter_obj):
         b_i_init = FO_b_i_apprx[sub_idx] if FO_b_i_apprx is not None else np.zeros_like(omegas)
         b_i_init_s = pd.Series(b_i_init, index=omegas_names, name = sub)
         b_i_init = pd.DataFrame(b_i_init.reshape(1,-1), columns = omegas_names, dtype = pd.Float64Dtype())
@@ -466,9 +497,19 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
         ode_t0_i = model_obj.ode_t0_vals.iloc[[sub_idx], :]
         time_mask_i = model_obj.time_mask[sub_idx, :] #very confusing to have these sometimes be arrays
         y_i = model_obj.y[model_obj.y_groups == sub]
-        #something is wrong with _estimate_b_i. Everything beyond is suspect. 
-        print(f"b_i: {b_i_init}\n")
-        print(f"pop_coeffs: {pop_coeffs}\n")
+        debug_print("INNER LOOP VALUES IN START =================")
+        debug_print(f"sub_idx: {sub_idx}\n")
+        debug_print(f"sub: {sub}\n")
+        debug_print(f"b_i: {b_i_init}\n")
+        debug_print(f"pop_coeffs: {pop_coeffs}\n")
+        debug_print(f"thetas_i: {thetas_i}\n")
+        debug_print(f"theta_data_i: {theta_data_i}\n" )
+        debug_print(f"ode_t0_i: {ode_t0_i}\n")
+        debug_print(f"time_mask_i: {time_mask_i}\n")
+        debug_print(f"y_i: {y_i}\n")
+        debug_print(f"omegas2: {omegas2}")
+        debug_print("INNER LOOP VALUES IN END ===================")
+        
         b_i_est = _estimate_b_i(model_obj, pop_coeffs, thetas_i, theta_data_i, sigma2, omegas2, omegas_names, b_i_init, ode_t0_i, time_mask_i, y_i, sub)
         b_i_estimates.append(b_i_est)
     b_i_estimates = pd.concat(b_i_estimates)
@@ -514,7 +555,9 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
                                          naive_cov_vec=direct_det_cov,
                                          naive_cov_subj=per_sub_direct_neg_ll,
                                          )
-    print('Objective Call Complete')
+    debug_print('Objective Call Complete ============= OBEJECTIVE CALL COMPLETE =======================')
+    debug_print(f"Loss: {-neg_ll}\n")
+    debug_print(f"b_i_estimates: {b_i_estimates}\n")
     return - neg_ll, b_i_estimates
     
     
@@ -1010,10 +1053,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                   for obj in self.population_coeff]
         #then sigma
         if any([obj.subject_level_intercept for obj in self.population_coeff]):
-            bounds.append((1e-6, 1000))
+            bounds.append((1e-6, 25))
         
         #then omega2s
-        bounds.extend([(1e-6, 1000) for obj in self.population_coeff if obj.subject_level_intercept])
+        bounds.extend([(1e-6, 25) for obj in self.population_coeff if obj.subject_level_intercept])
         
         #then dep var bounds
         for model_coeff in self.dep_vars:

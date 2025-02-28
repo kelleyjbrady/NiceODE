@@ -51,7 +51,7 @@ me_mod =  CompartmentalModel(
 
 
 # %%
-me_mod.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+me_mod.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_foce.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
 
 
 with open('me_mod_debug.jb', 'wb') as f:
