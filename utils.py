@@ -131,9 +131,9 @@ class PopulationCoeffcient:
     optimization_lower_bound: np.float64 = None
     optimization_upper_bound: np.float64 = None
     subject_level_intercept:bool = False
-    subject_level_intercept_sd_init_val:np.float64 = None
+    subject_level_intercept_sd_init_val:np.float64 = None #this is on the log scale, but the opt inti val is not, confusing
     subject_level_intercept_opt_step_size:np.float64 = None
-    subject_level_intercept_intial_val_column_name:str = None
+    subject_level_intercept_init_vals_column_name:str = None
 
 
 
@@ -491,7 +491,11 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
     else:
         iter_obj = model_obj.unique_groups
     for sub_idx, sub in enumerate(iter_obj):
-        b_i_init = FO_b_i_apprx[sub_idx] if FO_b_i_apprx is not None else np.zeros_like(omegas)
+        FO_b_i_approx_exists = False
+        if FO_b_i_apprx is not None:
+            if FO_b_i_apprx.size > 0:
+                FO_b_i_approx_exists = True          
+        b_i_init = FO_b_i_apprx.iloc[sub_idx, :].to_numpy().flatten() if FO_b_i_approx_exists else np.zeros_like(omegas)
         b_i_init_s = pd.Series(b_i_init, index=omegas_names, name = sub)
         b_i_init = pd.DataFrame(b_i_init.reshape(1,-1), columns = omegas_names, dtype = pd.Float64Dtype())
         b_i_init.columns = pd.MultiIndex.from_tuples(b_i_init.columns)
@@ -1262,8 +1266,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     
     def _unpack_prepare_pop_coeffs(self,model_params:pd.DataFrame):
         pop_coeffs = pd.DataFrame()
-        subject_level_intercept_sds = pd.DataFrame()
-        subject_level_intercept_init_vals = pd.DataFrame()
+        subject_level_intercept_sds = pd.DataFrame(dtype = pd.Float64Dtype())
+        subject_level_intercept_init_vals = pd.DataFrame(dtype=pd.Float64Dtype())
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
             if coeff_name not in pop_coeffs.columns:
@@ -1278,7 +1282,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     subject_level_intercept_sds[col] = [np.nan]
                     subject_level_intercept_sds[col] = subject_level_intercept_sds[col].astype(pd.Float64Dtype())
                 subject_level_intercept_sds[col] = [row['subject_level_intercept_sd_init_val']] #this is terrible, referencing the names like this
-                subject_level_intercept_init_vals[col]  = self.subject_data['subject_level_intercept_init_vals_column_name']
+                init_vals_col = row['subject_level_intercept_init_vals_column_name']
+                if init_vals_col in self.subject_data.columns:
+                    subject_level_intercept_init_vals[col]  = self.subject_data[init_vals_col].copy().astype(pd.Float64Dtype())
         subject_level_intercept_sds.columns = (pd.MultiIndex.from_tuples(subject_level_intercept_sds.columns)
             if len(subject_level_intercept_sds.columns) > 0 else subject_level_intercept_sds.columns)
         subject_level_intercept_init_vals.columns = (pd.MultiIndex.from_tuples(subject_level_intercept_init_vals.columns)
