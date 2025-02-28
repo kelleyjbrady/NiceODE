@@ -448,11 +448,18 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
     
     #y_i = model_obj.y[model_obj.y_groups == b_i_init.name] #b_i_init.name will contain subject id
     
+    
     b_i_bounds = []
-    for omega in np.diag(Omega)**0.5:  # Iterate through standard deviations
-        lower_bound = -6 * omega  
-        upper_bound = 6 * omega
-        b_i_bounds.append((lower_bound, upper_bound))
+    if np.any(b_i_init == 0):
+        for omega in np.diag(Omega)**0.5:  # Iterate through standard deviations
+            lower_bound = -6 * omega  
+            upper_bound = 6 * omega
+            b_i_bounds.append((lower_bound, upper_bound))
+    else:
+        for b_i in b_i_init.to_numpy().flatten():
+            lower_bound = b_i - 3*b_i
+            upper_bound = b_i + 3*b_i
+            b_i_bounds.append((lower_bound, upper_bound))
     print(f"INNER b_i_bounds: {b_i_bounds}")
     # Use scipy.optimize.minimize for the inner optimization
     result_b_i = minimize(
