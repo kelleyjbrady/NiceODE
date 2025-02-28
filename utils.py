@@ -567,7 +567,9 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
     
 
 
-def FO_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj, solve_for_omegas = False):
+def FO_approx_ll_loss(pop_coeffs, sigma,
+                      omegas, thetas, theta_data,
+                      model_obj, solve_for_omegas = False, **kwargs):
     
     #unpack some variables locally for clarity
     y = np.copy(model_obj.y)
@@ -1261,6 +1263,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     def _unpack_prepare_pop_coeffs(self,model_params:pd.DataFrame):
         pop_coeffs = pd.DataFrame()
         subject_level_intercept_sds = pd.DataFrame()
+        subject_level_intercept_init_vals = pd.DataFrame()
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
             if coeff_name not in pop_coeffs.columns:
@@ -1274,10 +1277,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 if col not in subject_level_intercept_sds.columns:
                     subject_level_intercept_sds[col] = [np.nan]
                     subject_level_intercept_sds[col] = subject_level_intercept_sds[col].astype(pd.Float64Dtype())
-                subject_level_intercept_sds[col] = [row['subject_level_intercept_sd_init_val']]
-                
+                subject_level_intercept_sds[col] = [row['subject_level_intercept_sd_init_val']] #this is terrible, referencing the names like this
+                subject_level_intercept_init_vals[col]  = self.subject_data['subject_level_intercept_init_vals_column_name']
         subject_level_intercept_sds.columns = (pd.MultiIndex.from_tuples(subject_level_intercept_sds.columns)
             if len(subject_level_intercept_sds.columns) > 0 else subject_level_intercept_sds.columns)
+        subject_level_intercept_init_vals.columns = (pd.MultiIndex.from_tuples(subject_level_intercept_init_vals.columns)
+            if len(subject_level_intercept_init_vals.columns) > 0 else subject_level_intercept_init_vals.columns)
         
         #if there are subject level intercepts, then we need to have model error sigma to perform FO, FOCE etc.
         if len(subject_level_intercept_sds.columns) > 0:
@@ -1287,7 +1292,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 pop_coeffs[coeff_name] = pop_coeffs[coeff_name].astype(pd.Float64Dtype())
             pop_coeffs[coeff_name] = [4]
                 
-        return pop_coeffs, subject_level_intercept_sds
+        return pop_coeffs, (subject_level_intercept_sds, subject_level_intercept_init_vals)
+    
+
         
         
     
@@ -1301,6 +1308,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.y_groups = np.array(data[subject_id_c].values)
         self.y = np.array(data[conc_at_time_c].values, dtype = np.float64)
         subject_data = data.drop_duplicates(subset=subject_id_c, keep = 'first').copy()
+        self.subject_data = subject_data.copy()
         self.subject_y0 = np.array(subject_data[conc_at_time_c].values, dtype = np.float64)
         self.subject_y0_idx = np.array(subject_data.index.values, dtype = np.int64)
         ode_init_val_cols = [i.column_name for i in self.ode_t0_cols]
@@ -1314,7 +1322,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         model_param_dep_vars = init_vals.loc[init_vals['population_coeff'] == False, :]
         self._homongenize_timepoints(data, subject_id_c, time_col)
         thetas, theta_data = self._unpack_prepare_thetas(model_param_dep_vars, subject_data)
-        pop_coeffs, subject_level_intercept_sds = self._unpack_prepare_pop_coeffs(model_params)
+        pop_coeffs, subject_level_intercept_info = self._unpack_prepare_pop_coeffs(model_params)
+        subject_level_intercept_sds = subject_level_intercept_info[0]
+        subject_level_intercept_init_vals = subject_level_intercept_info[1] #this is so bad, fast tho
+        self.subject_level_intercept_init_vals = subject_level_intercept_init_vals.copy()
         self.n_subject_level_intercept_sds = len(subject_level_intercept_sds.columns)
         
         self.subject_level_intercept_sds = deepcopy(subject_level_intercept_sds)
@@ -1487,7 +1498,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         error = self.no_me_loss_function(data[self.conc_at_time_col], preds, **self.no_me_loss_params)
         return error
     
-    def _objective_function2(self, params, beta_data,  parallel = None, parallel_n_jobs = None ,):
+    def _objective_function2(self, params, beta_data, subject_level_intercept_init_vals = None,  parallel = None, parallel_n_jobs = None ,):
         if self.n_subject_level_intercept_sds == 0:
             pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns)
             thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
@@ -1505,7 +1516,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.subject_level_intercept_sds.columns)
             start_idx = end_idx
             thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
-            error, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self)
+            error, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, FO_b_i_apprx = subject_level_intercept_init_vals)
 
         return error
     
@@ -1567,20 +1578,24 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
     
     def fit2(self, data, parallel = False, parallel_n_jobs = -1 , n_iters_per_checkpoint = 5, warm_start = False, checkpoint_filename='check_test.jb', ):
-        pop_coeffs, omegas, betas, beta_data = self._assemble_pred_matrices(data)
+        pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data)
+        subject_level_intercept_init_vals = self.subject_level_intercept_init_vals
         init_params = [pop_coeffs.values,] #pop coeffs already includes sigma if needed, this is confusing
         if len(omegas.values) > 0:
             init_params.append(omegas.values)
-        if len(betas.values) > 0:
-            init_params.append(betas.values)
+        if len(thetas.values) > 0:
+            init_params.append(thetas.values)
         init_params = np.concatenate(init_params, axis = 1, dtype=np.float64).flatten()
         
-        objective_function = partial(self._objective_function2, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
+        objective_function = partial(self._objective_function2,
+                                     subject_level_intercept_init_vals = subject_level_intercept_init_vals,
+                                     parallel = parallel,
+                                     parallel_n_jobs = parallel_n_jobs)
         self.fit_result_ = optimize_with_checkpoint_joblib(objective_function,
                                                            init_params,
                                                            n_checkpoint=n_iters_per_checkpoint,
                                                            checkpoint_filename=checkpoint_filename,
-                                                           args=(beta_data,),
+                                                           args=(theta_data,),
                                                            warm_start=warm_start,
                                                            tol = self.optimzer_tol,
                                                            bounds=self.bounds
