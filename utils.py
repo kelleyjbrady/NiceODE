@@ -29,7 +29,7 @@ from scipy.optimize import approx_fprime
 import warnings
 from tqdm import tqdm
 
-def debug_print(print_obj, debug = False):
+def debug_print(print_obj, debug = True):
     if debug:
         if isinstance(print_obj, str):
             print(print_obj)
@@ -377,12 +377,12 @@ def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
     
     return neg_ll
 
-def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega_names, b_i_init, ode_t0_val, time_mask_i, y_i, sub, debug = False, debug_print = debug_print):
+def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega_names, b_i_init, ode_t0_val, time_mask_i, y_i, sub, debug = True, debug_print = debug_print):
     """Estimates b_i for a *single* individual using Newton-Raphson (or similar)."""
     
     debug_print = partial(debug_print, debug = debug)
 
-    def conditional_log_likelihood(b_i, y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj, debug = False, debug_print = debug_print):
+    def conditional_log_likelihood(b_i, y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj, debug = True, debug_print = debug_print):
         debug_print = partial(debug_print, debug = debug)
 
         # Combine the population coefficients and b_i for this individual
@@ -470,7 +470,7 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
         args=(y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj),
         method='L-BFGS-B', 
         bounds=b_i_bounds, 
-        tol = 1e-6
+        #tol = 1e-6
         
     )
 
@@ -482,7 +482,7 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
             
 
 
-def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None,tqdm_bi = False,debug = False,debug_print =debug_print, **kwargs):
+def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None,tqdm_bi = True,debug = True,debug_print =debug_print, **kwargs):
     debug_print = partial(debug_print, debug = debug)
     debug_print('Objective Call Start')
     y = np.copy(model_obj.y)
@@ -1016,7 +1016,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.population_coeff = population_coeff
         self.dep_vars = dep_vars
         self.init_vals = self._unpack_init_vals()
-        self.bounds = self._unpack_upper_lower_bounds()
+        self.bounds = self._unpack_upper_lower_bounds(me_model_error)
         self.no_me_loss_params = no_me_loss_params
         self.optimzer_tol = optimizer_tol
     

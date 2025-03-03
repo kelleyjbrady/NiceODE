@@ -39,15 +39,15 @@ with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
 me_mod_fo =  CompartmentalModel(
           ode_t0_cols=[ODEInitVals('DV')],
           population_coeff=[PopulationCoeffcient('cl', 25, subject_level_intercept=True,
-                                                 optimization_upper_bound = np.log(1000),
-                                                 subject_level_intercept_sd_init_val = 0.2),
-                            PopulationCoeffcient('vd', 80, optimization_upper_bound=np.log(1000)),
+                                                 subject_level_intercept_sd_init_val = 0.2, 
+                                                 subject_level_intercept_sd_lower_bound=1e-6
+                                                 ),
+                            PopulationCoeffcient('vd', 80, ),
                          ],
           dep_vars= None, 
                                    no_me_loss_function=sum_of_squares_loss, 
                                    optimizer_tol=None, 
                                    pk_model_function=first_order_one_compartment_model2, 
-                                   me_loss_function=FO_approx_ll_loss,
                                    #ode_solver_method='BDF'
                                    )
 
@@ -62,19 +62,30 @@ scale_df = (scale_df.merge(b_i_apprx_df, how = 'left', on = 'SUBJID')
 me_mod_foce =  CompartmentalModel(
           ode_t0_cols=[ODEInitVals('DV')],
           population_coeff=[PopulationCoeffcient('cl', 25, subject_level_intercept=True,
-                                                 optimization_upper_bound = np.log(1000),
-                                                 subject_level_intercept_sd_init_val = 0.2, 
-                                                 subject_level_intercept_init_vals_column_name= 'b_i_fo_cl',
+                                                 optimization_lower_bound = np.log(15), 
+                                                 optimization_upper_bound = np.log(40),
+                                                 subject_level_intercept_sd_init_val = 0.38, 
+                                                 subject_level_intercept_sd_lower_bound = .001, 
+                                                 subject_level_intercept_sd_upper_bound = 2,
+                                                 subject_level_intercept_init_vals_column_name='b_i_fo_cl',
                                                  ),
-                            PopulationCoeffcient('vd', 80, optimization_upper_bound=np.log(1000)),
+                            PopulationCoeffcient('vd', 80
+                                                 , optimization_lower_bound = np.log(70)
+                                                 , optimization_upper_bound = np.log(90)
+                                                 
+                                                 ),
                          ],
           dep_vars= None, 
                                    no_me_loss_function=sum_of_squares_loss, 
-                                   optimizer_tol=0.01, 
+                                   #optimizer_tol=.00001, 
                                    pk_model_function=first_order_one_compartment_model2, 
-                                   me_loss_function=FOCE_approx_ll_loss,
+                                   me_loss_function=FOCE_approx_ll_loss, 
+                                   me_model_error=PopulationCoeffcient('sigma', .18, optimization_lower_bound=.001, 
+                                                                       optimization_upper_bound=4
+                                                                       )
                                    #ode_solver_method='BDF'
                                    )
+
 
 
 # %%
