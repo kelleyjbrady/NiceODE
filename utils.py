@@ -28,6 +28,7 @@ from scipy.linalg import block_diag, cho_factor, cho_solve
 from scipy.optimize import approx_fprime
 import warnings
 from tqdm import tqdm
+import numdifftools as nd
 
 def debug_print(print_obj, debug = True):
     if debug:
@@ -377,13 +378,11 @@ def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
     
     return neg_ll
 
-def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega_names, b_i_init, ode_t0_val, time_mask_i, y_i, sub, debug = True, debug_print = debug_print):
+def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega_names, b_i_init, ode_t0_val, time_mask_i, y_i, sub, debug_print = debug_print):
     """Estimates b_i for a *single* individual using Newton-Raphson (or similar)."""
     
-    debug_print = partial(debug_print, debug = debug)
 
-    def conditional_log_likelihood(b_i, y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj, debug = True, debug_print = debug_print):
-        debug_print = partial(debug_print, debug = debug)
+    def conditional_log_likelihood(b_i, y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj, debug_print = debug_print):
 
         # Combine the population coefficients and b_i for this individual
         debug_print("INNER OPTIMIZATION START ===================")
@@ -1546,13 +1545,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if self.fit_result_ is None:
             raise ValueError("The Model must be fit before prediction")
         params = self.fit_result_['x']
-        pop_coeffs, _, _, beta_data = self._assemble_pred_matrices(data)
+        _, _, _, beta_data = self._assemble_pred_matrices(data)
         if self.n_subject_level_intercept_sds == 0:
            
             pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns)
             thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs, timepoints = timepoints)
+            #hess_objective = self.no_me_loss_function        
         elif self.n_subject_level_intercept_sds > 0:
             n_pop_c = self.n_population_coeff
             pop_coeffs = pd.DataFrame(params[:n_pop_c].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns[:n_pop_c])
@@ -1577,6 +1577,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs_i, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs)
             self.b_i_approx = b_i_approx
+            
+            #CI95% construction
+            
         return preds
     
     def prepare_indiv_params(self, data,):
@@ -1622,6 +1625,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                            tol = self.optimzer_tol,
                                                            bounds=self.bounds
                                                            )
+        hess_fun = nd.Hessian()
         #after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
         if len(omegas.values) > 0:
             _ = self.predict2(data, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
