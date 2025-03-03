@@ -132,6 +132,8 @@ class PopulationCoeffcient:
     optimization_upper_bound: np.float64 = None
     subject_level_intercept:bool = False
     subject_level_intercept_sd_init_val:np.float64 = None #this is on the log scale, but the opt inti val is not, confusing
+    subject_level_intercept_sd_lower_bound:np.float64 = None
+    subject_level_intercept_sd_upper_bound:np.float64 = None
     subject_level_intercept_opt_step_size:np.float64 = None
     subject_level_intercept_init_vals_column_name:str = None
 
@@ -375,12 +377,12 @@ def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
     
     return neg_ll
 
-def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega_names, b_i_init, ode_t0_val, time_mask_i, y_i, sub, debug = True, debug_print = debug_print):
+def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega_names, b_i_init, ode_t0_val, time_mask_i, y_i, sub, debug = False, debug_print = debug_print):
     """Estimates b_i for a *single* individual using Newton-Raphson (or similar)."""
     
     debug_print = partial(debug_print, debug = debug)
 
-    def conditional_log_likelihood(b_i, y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj, debug = True, debug_print = debug_print):
+    def conditional_log_likelihood(b_i, y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj, debug = False, debug_print = debug_print):
         debug_print = partial(debug_print, debug = debug)
 
         # Combine the population coefficients and b_i for this individual
@@ -457,17 +459,18 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
             b_i_bounds.append((lower_bound, upper_bound))
     else:
         for b_i in b_i_init.to_numpy().flatten():
-            lower_bound = b_i - 3*b_i
-            upper_bound = b_i + 3*b_i
+            lower_bound = b_i - np.abs(2*b_i) # 3 is a hyperparameter that should be visible to the user. 
+            upper_bound = b_i + np.abs(2*b_i)
             b_i_bounds.append((lower_bound, upper_bound))
-    print(f"INNER b_i_bounds: {b_i_bounds}")
+    debug_print(f"INNER b_i_bounds: {b_i_bounds}")
     # Use scipy.optimize.minimize for the inner optimization
     result_b_i = minimize(
         conditional_log_likelihood,
         b_i_init.values.flatten(),  # Initial guess for b_i (flattened)
         args=(y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj),
         method='L-BFGS-B', 
-        bounds=b_i_bounds
+        bounds=b_i_bounds, 
+        tol = 1e-6
         
     )
 
@@ -479,7 +482,7 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
             
 
 
-def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None,tqdm_bi = True,debug = True,debug_print =debug_print, **kwargs):
+def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None,tqdm_bi = False,debug = False,debug_print =debug_print, **kwargs):
     debug_print = partial(debug_print, debug = debug)
     debug_print('Objective Call Start')
     y = np.copy(model_obj.y)
@@ -969,9 +972,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             PopulationCoeffcient('k', 0.6), PopulationCoeffcient('vd', 2.0)],
         dep_vars: Dict[str, ObjectiveFunctionColumn] = {'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
                                                         'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]},
+        
         no_me_loss_function = mean_squared_error,
         no_me_loss_params = {},
         me_loss_function = FO_approx_ll_loss, 
+        me_model_error: PopulationCoeffcient = PopulationCoeffcient('sigma', optimization_init_val=.2, 
+                                                                          optimization_lower_bound=1e-6, 
+                                                                          optimization_upper_bound=20
+                                                                          ),
         optimizer_tol = None,
         verbose=False, 
         ode_solver_method = 'RK45',
@@ -1037,8 +1045,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 'subject_level_intercept':pop_coeff.subject_level_intercept, 
                 'subject_level_intercept_sd_init_val':pop_coeff.subject_level_intercept_sd_init_val,
                 'subject_level_intercept_init_vals_column_name':pop_coeff.subject_level_intercept_init_vals_column_name,
-                'subject_level_intercect_var_lower_bound':1e-6 if pop_coeff.subject_level_intercept else None,
-                'subject_level_intercect_var_upper_bound':None
+                'subject_level_intercect_sd_lower_bound':pop_coeff.subject_level_intercept_sd_lower_bound,
+                'subject_level_intercect_sd_upper_bound':pop_coeff.subject_level_intercept_sd_upper_bound,
             })
         #unpack the dep vars for the population coeffs
         for model_coeff in self.dep_vars:
@@ -1065,16 +1073,17 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.n_optimized_coeff = len(init_vals)
         return np.array(init_vals, dtype = np.float64)
     
-    def _unpack_upper_lower_bounds(self,):
+    def _unpack_upper_lower_bounds(self,model_error:PopulationCoeffcient):
         #pop coeff bounds
         bounds = [(obj.optimization_lower_bound, obj.optimization_upper_bound)
                   for obj in self.population_coeff]
         #then sigma
         if any([obj.subject_level_intercept for obj in self.population_coeff]):
-            bounds.append((1e-6, 25))
+            bounds.append((model_error.optimization_lower_bound, model_error.optimization_upper_bound))
         
         #then omega2s
-        bounds.extend([(1e-6, 25) for obj in self.population_coeff if obj.subject_level_intercept])
+        bounds.extend([(obj.subject_level_intercept_sd_lower_bound, obj.subject_level_intercept_sd_upper_bound) 
+                       for obj in self.population_coeff if obj.subject_level_intercept])
         
         #then dep var bounds
         for model_coeff in self.dep_vars:

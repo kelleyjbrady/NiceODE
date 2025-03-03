@@ -28,7 +28,9 @@ pk_model_function = diffeq_obj.diff_eq()
 
 from utils import sum_of_squares_loss, numba_one_compartment_model, PopulationCoeffcient, ODEInitVals, mean_squared_error_loss, huber_loss
 import cProfile
+from datetime import datetime
 
+now_str = datetime.now().strftime("_%d%m%Y-%H%M%S")
 with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     scale_df = jb.load(f)
 
@@ -38,7 +40,7 @@ me_mod_fo =  CompartmentalModel(
           ode_t0_cols=[ODEInitVals('DV')],
           population_coeff=[PopulationCoeffcient('cl', 25, subject_level_intercept=True,
                                                  optimization_upper_bound = np.log(1000),
-                                                 subject_level_intercept_init_val = 0.2),
+                                                 subject_level_intercept_sd_init_val = 0.2),
                             PopulationCoeffcient('vd', 80, optimization_upper_bound=np.log(1000)),
                          ],
           dep_vars= None, 
@@ -49,7 +51,7 @@ me_mod_fo =  CompartmentalModel(
                                    #ode_solver_method='BDF'
                                    )
 
-me_mod_fo.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_foce.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+me_mod_fo.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
 
 b_i_apprx_df = pd.DataFrame( dtype = pd.Float64Dtype())
 b_i_apprx_df['b_i_fo_cl'] = me_mod_fo.b_i_approx[('cl', 'omega2_cl')].to_numpy()
@@ -61,14 +63,14 @@ me_mod_foce =  CompartmentalModel(
           ode_t0_cols=[ODEInitVals('DV')],
           population_coeff=[PopulationCoeffcient('cl', 25, subject_level_intercept=True,
                                                  optimization_upper_bound = np.log(1000),
-                                                 subject_level_intercept_init_val = 0.2, 
+                                                 subject_level_intercept_sd_init_val = 0.2, 
                                                  subject_level_intercept_init_vals_column_name= 'b_i_fo_cl',
                                                  ),
                             PopulationCoeffcient('vd', 80, optimization_upper_bound=np.log(1000)),
                          ],
           dep_vars= None, 
                                    no_me_loss_function=sum_of_squares_loss, 
-                                   optimizer_tol=None, 
+                                   optimizer_tol=0.01, 
                                    pk_model_function=first_order_one_compartment_model2, 
                                    me_loss_function=FOCE_approx_ll_loss,
                                    #ode_solver_method='BDF'
@@ -76,9 +78,9 @@ me_mod_foce =  CompartmentalModel(
 
 
 # %%
-me_mod_foce.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_foce.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+me_mod_foce.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_foce_{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
 
 
 with open('me_mod_debug.jb', 'wb') as f:
-    jb.dump(me_mod, f)
+    jb.dump(me_mod_foce, f)
 
