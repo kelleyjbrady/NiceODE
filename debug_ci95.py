@@ -1,0 +1,136 @@
+import joblib as jb
+import numpy as np
+from scipy.stats import chi2
+from utils import CompartmentalModel, PopulationCoeffcient, huber_loss, ODEInitVals
+from scipy.optimize import minimize
+from diffeqs import( OneCompartmentFODiffEq,
+                    mm_one_compartment_model,
+                    first_order_one_compartment_model,
+                    first_order_one_compartment_model2,
+                    parallel_elim_one_compartment_model, 
+                    one_compartment_absorption
+                    )
+#THE ISSUE IS THAT THE LOSS FUNCTION **MUST** be negative log likelihood. It is huber lose below. 
+with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
+    df = jb.load(f)
+    
+
+no_me_mod_k =  CompartmentalModel(
+     ode_t0_cols=[ODEInitVals('DV')],
+     population_coeff=[PopulationCoeffcient('k', 0.6, ),
+                       #PopulationCoeffcient('vd', 20, ),
+                       ],
+     dep_vars= None, 
+                              no_me_loss_function=huber_loss, 
+                              optimizer_tol=None, 
+                              pk_model_function=first_order_one_compartment_model2, 
+                              #ode_solver_method='BDF'
+                              )
+no_me_mod =  CompartmentalModel(
+     ode_t0_cols=[ODEInitVals('DV')],
+     population_coeff=[PopulationCoeffcient('cl', 20, ),
+                       PopulationCoeffcient('vd', 50, ),
+                       ],
+     dep_vars= None, 
+                              no_me_loss_function=huber_loss, 
+                              optimizer_tol=None, 
+                              pk_model_function=first_order_one_compartment_model2, 
+                              #ode_solver_method='BDF'
+                              )
+no_me_mod = no_me_mod.fit2(df,checkpoint_filename=f'mod_abs_test_nome.jb', parallel=False, parallel_n_jobs=4)
+
+fit_result = no_me_mod.fit_result_
+param_index = 0
+ci_level = .95
+best_fit_params = fit_result.x.copy()
+_, _, _, beta_data = no_me_mod._assemble_pred_matrices(df)
+best_fit_neg_log_likelihood = fit_result.fun
+param_range = [np.log(0.01* np.exp(best_fit_params[param_index])), np.log(10 * np.exp(best_fit_params[param_index]))] # Initial range
+
+# critical value of the chi-squared distribution
+chi2_quantile = chi2.ppf(ci_level, 1)
+
+def objective_for_profiling(other_params, fixed_param_index, fixed_param_val):
+      
+    # Create a new parameter vector with the profiled parameter fixed
+    profiled_params = other_params.copy()
+    profiled_params = np.insert(other_params,
+                                fixed_param_index,
+                                fixed_param_val)
+    return no_me_mod._objective_function2(profiled_params, beta_data)
+
+def find_profile_bound(objective_func, param_index, best_fit_params, best_nll, chi2_quantile, start, end, lower=True):
+    """
+    Finds the lower or upper bound of the profile likelihood confidence interval using a search algorithm.
+    """
+    
+    tolerance = 1e-4  # Set a suitable tolerance
+    max_iterations = 25
+    other_params = np.delete(best_fit_params, param_index)
+    #this is probalby not necessary since the 'other_p' are constrained by 
+    #the fact that the 'fixed' parameter is near the best fit value. 
+    other_p_bounds = [(np.log(0.3*i), np.log(1.3*i)) for i in np.exp(other_params)]
+    def root_function(param_value):
+        result = minimize(
+            objective_func,
+            other_params,
+            args=(param_index, param_value),
+            bounds=other_p_bounds,
+            method='L-BFGS-B'
+        )
+        return 2 * (result.fun - best_nll) - chi2_quantile
+    
+    if lower:
+        fval = root_function(start)
+        #Search for the lower bound using the bisection method
+        if fval > 0:
+             return None  # No lower bound within the initial range
+        a, b = start, end
+    else:
+        #Search for the upper bound using the bisection method
+        fval = root_function(end)
+        if fval < 0:
+             return None
+        a, b = start, end
+    for _ in range(max_iterations):
+        mid = (a+b)/2
+        fval = root_function(mid)
+        if fval > 0:
+            if lower:
+                b = mid
+            else:
+                a = mid
+        else:
+            if lower:
+                a= mid
+            else:
+                b = mid
+        if abs(b - a) < tolerance:
+            return mid
+    
+    return mid
+
+lower_bound = find_profile_bound(objective_for_profiling,
+                                 param_index, best_fit_params,
+                                 best_fit_neg_log_likelihood,
+                                 chi2_quantile, param_range[0],
+                                 best_fit_params[param_index], lower=True)
+upper_bound = find_profile_bound(objective_for_profiling, param_index, best_fit_params,
+                                 best_fit_neg_log_likelihood, chi2_quantile, best_fit_params[param_index],
+                                 param_range[1], lower=False)
+
+# If bounds found, create finer profile
+profile_parameter_values = []
+profile_nll_values = []
+
+if lower_bound is not None and upper_bound is not None:
+    profile_parameter_values = np.linspace(lower_bound, upper_bound, 20)
+    for val in profile_parameter_values:
+        # Optimize other parameters with the current parameter fixed
+        result = minimize(
+            objective_for_profiling,
+            np.delete(best_fit_params, param_index),
+            args=(param_index, val),
+            method='L-BFGS-B'
+        )
+        profile_nll_values.append(result.fun)

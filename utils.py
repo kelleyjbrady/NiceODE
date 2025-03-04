@@ -189,6 +189,14 @@ def huber_loss(y_true, y_pred, delta=1.0):
     loss = huber(delta, resid)
     return np.mean(loss)
 
+def neg_log_likelihood_loss(y_true, y_pred, sigma):
+    residuals = y_true - y_pred
+    ss = np.sum(residuals**2)
+    n = len(y_true)
+    neg_log_likelihood = 0.5 * (n * np.log(2 * np.pi * sigma**2) + ss / sigma**2)
+    return neg_log_likelihood
+
+
 def get_function_args(func):
     signature = inspect.signature(func)
     params = signature.parameters
@@ -972,10 +980,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         dep_vars: Dict[str, ObjectiveFunctionColumn] = {'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
                                                         'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]},
         
-        no_me_loss_function = mean_squared_error,
+        no_me_loss_function = neg_log_likelihood_loss,
         no_me_loss_params = {},
+        no_me_loss_needs_sigma = True,
         me_loss_function = FO_approx_ll_loss, 
-        me_model_error: PopulationCoeffcient = PopulationCoeffcient('sigma', optimization_init_val=.2, 
+        model_error_sigma: PopulationCoeffcient = PopulationCoeffcient('sigma', optimization_init_val=.2, 
                                                                           optimization_lower_bound=1e-6, 
                                                                           optimization_upper_bound=20
                                                                           ),
@@ -1003,6 +1012,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 if arg_name not in assigned_args:
                     population_coeff.append(PopulationCoeffcient(arg_name))
         self.no_me_loss_function = no_me_loss_function
+        self.no_me_loss_needs_sigma = no_me_loss_needs_sigma
         self.me_loss_function = me_loss_function
         # not sure if the section below needs to be in two places
         for coef_obj in population_coeff:
@@ -1015,7 +1025,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.population_coeff = population_coeff
         self.dep_vars = dep_vars
         self.init_vals = self._unpack_init_vals()
-        self.bounds = self._unpack_upper_lower_bounds(me_model_error)
+        self.bounds = self._unpack_upper_lower_bounds(model_error_sigma)
         self.no_me_loss_params = no_me_loss_params
         self.optimzer_tol = optimizer_tol
     
@@ -1077,7 +1087,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         bounds = [(obj.optimization_lower_bound, obj.optimization_upper_bound)
                   for obj in self.population_coeff]
         #then sigma
-        if any([obj.subject_level_intercept for obj in self.population_coeff]):
+        sigma_case_1 = any([obj.subject_level_intercept for obj in self.population_coeff])
+        sigma_case_2 = self.no_me_loss_needs_sigma
+        if sigma_case_1 or sigma_case_2:
             bounds.append((model_error.optimization_lower_bound, model_error.optimization_upper_bound))
         
         #then omega2s
@@ -1625,7 +1637,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                            tol = self.optimzer_tol,
                                                            bounds=self.bounds
                                                            )
-        hess_fun = nd.Hessian()
+        #hess_fun = nd.Hessian()
         #after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
         if len(omegas.values) > 0:
             _ = self.predict2(data, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
