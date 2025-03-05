@@ -1,46 +1,34 @@
 import joblib as jb
 import numpy as np
 from scipy.stats import chi2
-from utils import CompartmentalModel, PopulationCoeffcient, huber_loss, ODEInitVals, neg_log_likelihood_loss
+from utils import CompartmentalModel, PopulationCoeffcient, ODEInitVals, neg_log_likelihood_loss
 from scipy.optimize import minimize
-from diffeqs import( OneCompartmentFODiffEq,
-                    mm_one_compartment_model,
-                    first_order_one_compartment_model,
-                    first_order_one_compartment_model2,
-                    parallel_elim_one_compartment_model, 
-                    one_compartment_absorption
+from diffeqs import( 
+                    first_order_one_compartment_model, #dy/dt = -k * C
+                    first_order_one_compartment_model2, #dy/dt = -cl/vd * C
+
                     )
-#THE ISSUE IS THAT THE LOSS FUNCTION **MUST** be negative log likelihood. It is huber lose below. 
+
 with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     df = jb.load(f)
     
 
-no_me_mod_k =  CompartmentalModel(
-     ode_t0_cols=[ODEInitVals('DV')],
-     population_coeff=[PopulationCoeffcient('k', 0.6, ),
-                       #PopulationCoeffcient('vd', 20, ),
-                       ],
-     dep_vars= None, 
-                              no_me_loss_function=huber_loss, 
-                              optimizer_tol=None, 
-                              pk_model_function=first_order_one_compartment_model2, 
-                              #ode_solver_method='BDF'
-                              )
 no_me_mod =  CompartmentalModel(
      ode_t0_cols=[ODEInitVals('DV')],
-     population_coeff=[PopulationCoeffcient('cl', 20, ),
-                       PopulationCoeffcient('vd', 50, ),
+     population_coeff=[PopulationCoeffcient('k', 0.3, ),
+                       #PopulationCoeffcient('vd', 20, ),
                        ],
-     dep_vars= None, 
      model_error_sigma=PopulationCoeffcient('sigma',
                                             optimization_init_val=4, 
                                             optimization_lower_bound=0.000001, 
                                             optimization_upper_bound=20),
+     dep_vars= None, 
                               no_me_loss_function=neg_log_likelihood_loss, 
                               optimizer_tol=None, 
-                              pk_model_function=first_order_one_compartment_model2, 
+                              pk_model_function=first_order_one_compartment_model, 
                               #ode_solver_method='BDF'
                               )
+
 no_me_mod = no_me_mod.fit2(df,checkpoint_filename=f'mod_abs_test_nome.jb', parallel=False, parallel_n_jobs=4)
 
 fit_result = no_me_mod.fit_result_
