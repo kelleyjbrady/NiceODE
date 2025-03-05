@@ -189,12 +189,12 @@ def huber_loss(y_true, y_pred, delta=1.0):
     loss = huber(delta, resid)
     return np.mean(loss)
 
-def neg_log_likelihood_loss(y_true, y_pred, sigma):
+def neg2_log_likelihood_loss(y_true, y_pred, sigma):
     residuals = y_true - y_pred
     ss = np.sum(residuals**2)
     n = len(y_true)
-    neg_log_likelihood = 0.5 * (n * np.log(2 * np.pi * sigma**2) + ss / sigma**2)
-    return neg_log_likelihood.to_numpy()[0]
+    neg2_log_likelihood = (n * np.log(2 * np.pi * sigma**2) + ss / sigma**2)
+    return neg2_log_likelihood.to_numpy()[0]
 
 
 def get_function_args(func):
@@ -312,9 +312,9 @@ def estimate_cov_chol(J, y_groups_idx, y, residuals, sigma2, omegas2, model_obj)
     
     L_block = block_diag(*L_all) #key change from before
     V_inv_residuals = cho_solve((L_block, True), residuals)
-    neg_ll_chol = -0.5 * (log_det_V + residuals.T @ V_inv_residuals + len(y) * np.log(2 * np.pi))
+    neg2_ll_chol = (log_det_V + residuals.T @ V_inv_residuals + len(y) * np.log(2 * np.pi))
     
-    return neg_ll_chol
+    return neg2_ll_chol
 
 def estimate_cov_naive(J, y_groups_idx, y, residuals, sigma2,omega2, n_individuals, n_random_effects, ):
     J_vec = create_vectorizable_J(J, y_groups_idx, n_random_effects)
@@ -330,13 +330,13 @@ def estimate_cov_naive(J, y_groups_idx, y, residuals, sigma2,omega2, n_individua
         need_debug = True
     inv_cov_matrix = np.linalg.inv(covariance_matrix)
     #this rarely is usuable due to inf or zero determinant when vectorized
-    direct_neg_ll = (-0.5 * (len(y) * np.log(2 * np.pi)
+    direct_neg2_ll = ((len(y) * np.log(2 * np.pi)
                                     + np.log(det_cov_matrix) 
                                 + residuals.T @ inv_cov_matrix @ residuals))
-    return direct_neg_ll
+    return direct_neg2_ll
 
 def estimate_cov_naive_subj(J, y_groups_idx, residuals, sigma2, omega2, model_obj):
-    per_sub_direct_neg_ll = 0.0
+    per_sub_direct_neg2_ll = 0.0
     debug_extreme_J = {}
     debug_near_zero_resid = {}
     debug_cov_diag_near_zero = {}
@@ -357,10 +357,10 @@ def estimate_cov_naive_subj(J, y_groups_idx, residuals, sigma2, omega2, model_ob
             debug_near_zero_resid[sub_idx] = residuals_sub
         det_cov_matrix_i = np.linalg.det(covariance_matrix_sub)
         inv_cov_matrix_i = np.linalg.inv(covariance_matrix_sub)
-        log_likelihood_i = (-0.5 * 
+        neg2_log_likelihood_i = (
                             (n_timepoints * np.log(2 * np.pi) + np.log(det_cov_matrix_i) + residuals_sub.T @ inv_cov_matrix_i @ residuals_sub))
-        per_sub_direct_neg_ll = per_sub_direct_neg_ll + log_likelihood_i
-    return per_sub_direct_neg_ll
+        per_sub_direct_neg2_ll = per_sub_direct_neg2_ll + neg2_log_likelihood_i
+    return per_sub_direct_neg2_ll
 
 def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
                  sigma2, omegas2, n_individuals,
@@ -571,7 +571,7 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
     direct_det_cov = False
     per_sub_direct_neg_ll = False
     cholsky_cov = True
-    neg_ll = estimate_neg_log_likelihood(J, 
+    neg2_ll = estimate_neg_log_likelihood(J, 
                                          y_groups_idx, y, residuals,
                                          sigma2, omegas2, n_individuals,
                                          n_random_effects, model_obj, 
@@ -580,9 +580,9 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
                                          naive_cov_subj=per_sub_direct_neg_ll,
                                          )
     debug_print('Objective Call Complete ============= OBEJECTIVE CALL COMPLETE =======================')
-    debug_print(f"Loss: {-neg_ll}\n")
+    debug_print(f"Loss: {neg2_ll}\n")
     debug_print(f"b_i_estimates: {b_i_estimates}\n")
-    return - neg_ll, b_i_estimates
+    return neg2_ll, b_i_estimates
     
     
     
@@ -632,7 +632,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma,
     direct_det_cov = False
     per_sub_direct_neg_ll = False
     cholsky_cov = True
-    neg_ll = estimate_neg_log_likelihood(J, 
+    neg2_ll = estimate_neg_log_likelihood(J, 
                                          y_groups_idx, y, residuals,
                                          sigma2, omegas2, n_individuals,
                                          n_random_effects, model_obj, 
@@ -651,7 +651,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma,
             b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omegas2), J_sub.T @ residuals_sub)
     
 
-    return - neg_ll, b_i_approx
+    return neg2_ll, b_i_approx
     
 #@njit 
 def create_vectorizable_J(J, groups_idx, n_random_effects):
@@ -1535,14 +1535,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return error
     
     def _objective_function2(self, params, beta_data, subject_level_intercept_init_vals = None,  parallel = None, parallel_n_jobs = None ,):
-        #If we do not need to unpack sigma
+        #If we do not need to unpack sigma (ie. when the loss is just SSE, MSE, Huber etc)
         if (self.n_subject_level_intercept_sds == 0) and (not self.no_me_loss_needs_sigma):                     
             pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns)
             thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
             error = self.no_me_loss_function(self.y, preds, **self.no_me_loss_params)
-        #If we DO need to unpack sigma even without omegas, the unpacking logic is the same
+        #If we DO need to unpack sigma even without omegas, the unpacking logic is the same (ie. log-likelihood)
         elif (self.n_subject_level_intercept_sds > 0) or self.no_me_loss_needs_sigma:
             n_pop_c = self.n_population_coeff
             pop_coeffs = pd.DataFrame(params[:n_pop_c].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns[:n_pop_c])
