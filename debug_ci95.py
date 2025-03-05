@@ -1,8 +1,8 @@
 import joblib as jb
 import numpy as np
 from scipy.stats import chi2
-from utils import CompartmentalModel, PopulationCoeffcient, ODEInitVals, neg_log_likelihood_loss
-from scipy.optimize import minimize
+from utils import CompartmentalModel, PopulationCoeffcient, ODEInitVals, neg2_log_likelihood_loss
+from scipy.optimize import minimize, brentq
 from diffeqs import( 
                     first_order_one_compartment_model, #dy/dt = -k * C
                     first_order_one_compartment_model2, #dy/dt = -cl/vd * C
@@ -23,7 +23,7 @@ no_me_mod =  CompartmentalModel(
                                             optimization_lower_bound=0.000001, 
                                             optimization_upper_bound=20),
      dep_vars= None, 
-                              no_me_loss_function=neg_log_likelihood_loss, 
+                              no_me_loss_function=neg2_log_likelihood_loss, 
                               optimizer_tol=None, 
                               pk_model_function=first_order_one_compartment_model, 
                               #ode_solver_method='BDF'
@@ -37,7 +37,7 @@ ci_level = .95
 best_fit_params = fit_result.x.copy()
 _, _, _, beta_data = no_me_mod._assemble_pred_matrices(df)
 best_fit_neg_log_likelihood = fit_result.fun
-param_range = [np.log(0.1* np.exp(best_fit_params[param_index])), np.log(10 * np.exp(best_fit_params[param_index]))] # Initial range
+param_range = [np.log(0.99* np.exp(best_fit_params[param_index])), np.log(1.01 * np.exp(best_fit_params[param_index]))] # Initial range
 
 # critical value of the chi-squared distribution
 chi2_quantile = chi2.ppf(ci_level, 1)
@@ -62,52 +62,61 @@ def find_profile_bound(objective_func, param_index, best_fit_params, best_nll, c
     other_params = np.delete(best_fit_params, param_index)
     #this is might not necessary since the 'other_p' are constrained by 
     #the fact that the 'fixed' parameter is near the best fit value. 
-    #other_p_bounds = [(np.log(0.05*i), np.log(20*i)) for i in np.exp(other_params)]
+    other_p_bounds = [(np.log(0.05*i), np.log(20*i)) for i in np.exp(other_params)]
     def root_function(param_value):
         result = minimize(
             objective_func,
             other_params,
             args=(param_index, param_value),
-            #bounds=other_p_bounds,
+            bounds=other_p_bounds,
             method='L-BFGS-B'
         )
-        return 2 * (result.fun - best_nll) - chi2_quantile
+        return (result.fun - best_nll) - chi2_quantile
     
     if lower:
-        fval = root_function(start)
-        #Search for the lower bound using the bisection method
-        if fval > 0:
-             return None  # No lower bound within the initial range
-        a, b = start, end
-    else:
+        a = start
+
+        while root_function(a) < 0:
+            a -= .01
+            if a < start - 10:
+                return None
+
+        a, b = a, end
+    elif not lower:
+        b = end
         #Search for the upper bound using the bisection method
-        fval = root_function(end)
-        if fval < 0:
-             return None
-        a, b = start, end
-    for _ in range(max_iterations):
-        mid = np.log((np.exp(a)+np.exp(b))/2)
-        fval = root_function(mid)
-        if fval > 0:
-            if lower:
-                b = mid
+        while root_function(b) < 0:
+            b += .01
+            if b > end + 10:
+                return None
+        a, b = start, b
+    use_brentq = True
+    if use_brentq:
+        bound = brentq(root_function, a, b)
+        return bound
+    else:
+        for _ in range(max_iterations):
+            mid = np.log((np.exp(a)+np.exp(b))/2)
+            fval = root_function(mid)
+            if fval > 0:
+                if lower:
+                    b = mid
+                else:
+                    a = mid
             else:
-                a = mid
-        else:
-            if lower:
-                a= mid
-            else:
-                b = mid
-        if abs(b - a) < tolerance:
-            return mid
-    
-    return mid
+                if lower:
+                    a= mid
+                else:
+                    b = mid
+            if abs(b - a) < tolerance:
+                return mid
 
 lower_bound = find_profile_bound(objective_for_profiling,
                                  param_index, best_fit_params,
                                  best_fit_neg_log_likelihood,
                                  chi2_quantile, param_range[0],
                                  best_fit_params[param_index], lower=True)
+
 upper_bound = find_profile_bound(objective_for_profiling, param_index, best_fit_params,
                                  best_fit_neg_log_likelihood, chi2_quantile, best_fit_params[param_index],
                                  param_range[1], lower=False)

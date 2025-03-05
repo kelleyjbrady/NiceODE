@@ -980,7 +980,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         dep_vars: Dict[str, ObjectiveFunctionColumn] = {'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
                                                         'vd': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')]},
         
-        no_me_loss_function = neg_log_likelihood_loss,
+        no_me_loss_function = neg2_log_likelihood_loss,
         no_me_loss_params = {},
         no_me_loss_needs_sigma = True,
         me_loss_function = FO_approx_ll_loss, 
