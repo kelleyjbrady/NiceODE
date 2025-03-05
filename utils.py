@@ -194,7 +194,7 @@ def neg_log_likelihood_loss(y_true, y_pred, sigma):
     ss = np.sum(residuals**2)
     n = len(y_true)
     neg_log_likelihood = 0.5 * (n * np.log(2 * np.pi * sigma**2) + ss / sigma**2)
-    return neg_log_likelihood
+    return neg_log_likelihood.to_numpy()[0]
 
 
 def get_function_args(func):
@@ -995,6 +995,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     ):
         dep_vars = {} if dep_vars is None else dep_vars
         population_coeff = [] if population_coeff is None else population_coeff
+        self.model_error_sigma = model_error_sigma #perhaps update this to do a check and set the attr to None if this param is not needed
         self.ode_solver_method = ode_solver_method
         self.ode_output_size = determine_ode_output_size(pk_model_function)
         self.ode_t0_cols = self._validate_ode_t0_vals_size(ode_t0_cols)
@@ -1025,7 +1026,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.population_coeff = population_coeff
         self.dep_vars = dep_vars
         self.init_vals = self._unpack_init_vals()
-        self.bounds = self._unpack_upper_lower_bounds(model_error_sigma)
+        self.bounds = self._unpack_upper_lower_bounds(self.model_error_sigma)
         self.no_me_loss_params = no_me_loss_params
         self.optimzer_tol = optimizer_tol
     
@@ -1318,12 +1319,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             if len(subject_level_intercept_init_vals.columns) > 0 else subject_level_intercept_init_vals.columns)
         
         #if there are subject level intercepts, then we need to have model error sigma to perform FO, FOCE etc.
-        if len(subject_level_intercept_sds.columns) > 0:
+        sigma_case_1 = len(subject_level_intercept_sds.columns) > 0
+        sigma_case_2 = self.no_me_loss_needs_sigma
+        if sigma_case_1 or sigma_case_2:
             coeff_name = 'sigma2'
             if coeff_name not in pop_coeffs.columns:
                 pop_coeffs[coeff_name] = [np.nan]
                 pop_coeffs[coeff_name] = pop_coeffs[coeff_name].astype(pd.Float64Dtype())
-            pop_coeffs[coeff_name] = [4]
+            pop_coeffs[coeff_name] = self.model_error_sigma.optimization_init_val
                 
         return pop_coeffs, (subject_level_intercept_sds, subject_level_intercept_init_vals)
     
@@ -1532,13 +1535,15 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return error
     
     def _objective_function2(self, params, beta_data, subject_level_intercept_init_vals = None,  parallel = None, parallel_n_jobs = None ,):
-        if self.n_subject_level_intercept_sds == 0:
+        #If we do not need to unpack sigma
+        if (self.n_subject_level_intercept_sds == 0) and (not self.no_me_loss_needs_sigma):                     
             pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns)
             thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
             error = self.no_me_loss_function(self.y, preds, **self.no_me_loss_params)
-        elif self.n_subject_level_intercept_sds > 0:
+        #If we DO need to unpack sigma even without omegas, the unpacking logic is the same
+        elif (self.n_subject_level_intercept_sds > 0) or self.no_me_loss_needs_sigma:
             n_pop_c = self.n_population_coeff
             pop_coeffs = pd.DataFrame(params[:n_pop_c].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns[:n_pop_c])
             start_idx = n_pop_c
@@ -1549,7 +1554,13 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.subject_level_intercept_sds.columns)
             start_idx = end_idx
             thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
-            error, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, FO_b_i_apprx = subject_level_intercept_init_vals)
+            
+            if (self.no_me_loss_needs_sigma) and (self.n_subject_level_intercept_sds == 0):
+                model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
+                preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
+                error = self.no_me_loss_function(self.y, preds, sigma, **self.no_me_loss_params)
+            else:   
+                error, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, FO_b_i_apprx = subject_level_intercept_init_vals)
 
         return error
     

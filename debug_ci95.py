@@ -1,7 +1,7 @@
 import joblib as jb
 import numpy as np
 from scipy.stats import chi2
-from utils import CompartmentalModel, PopulationCoeffcient, huber_loss, ODEInitVals
+from utils import CompartmentalModel, PopulationCoeffcient, huber_loss, ODEInitVals, neg_log_likelihood_loss
 from scipy.optimize import minimize
 from diffeqs import( OneCompartmentFODiffEq,
                     mm_one_compartment_model,
@@ -32,7 +32,11 @@ no_me_mod =  CompartmentalModel(
                        PopulationCoeffcient('vd', 50, ),
                        ],
      dep_vars= None, 
-                              no_me_loss_function=huber_loss, 
+     model_error_sigma=PopulationCoeffcient('sigma',
+                                            optimization_init_val=4, 
+                                            optimization_lower_bound=0.000001, 
+                                            optimization_upper_bound=20),
+                              no_me_loss_function=neg_log_likelihood_loss, 
                               optimizer_tol=None, 
                               pk_model_function=first_order_one_compartment_model2, 
                               #ode_solver_method='BDF'
@@ -45,7 +49,7 @@ ci_level = .95
 best_fit_params = fit_result.x.copy()
 _, _, _, beta_data = no_me_mod._assemble_pred_matrices(df)
 best_fit_neg_log_likelihood = fit_result.fun
-param_range = [np.log(0.01* np.exp(best_fit_params[param_index])), np.log(10 * np.exp(best_fit_params[param_index]))] # Initial range
+param_range = [np.log(0.1* np.exp(best_fit_params[param_index])), np.log(10 * np.exp(best_fit_params[param_index]))] # Initial range
 
 # critical value of the chi-squared distribution
 chi2_quantile = chi2.ppf(ci_level, 1)
@@ -57,7 +61,8 @@ def objective_for_profiling(other_params, fixed_param_index, fixed_param_val):
     profiled_params = np.insert(other_params,
                                 fixed_param_index,
                                 fixed_param_val)
-    return no_me_mod._objective_function2(profiled_params, beta_data)
+    loss = no_me_mod._objective_function2(profiled_params, beta_data)
+    return loss
 
 def find_profile_bound(objective_func, param_index, best_fit_params, best_nll, chi2_quantile, start, end, lower=True):
     """
@@ -67,15 +72,15 @@ def find_profile_bound(objective_func, param_index, best_fit_params, best_nll, c
     tolerance = 1e-4  # Set a suitable tolerance
     max_iterations = 25
     other_params = np.delete(best_fit_params, param_index)
-    #this is probalby not necessary since the 'other_p' are constrained by 
+    #this is might not necessary since the 'other_p' are constrained by 
     #the fact that the 'fixed' parameter is near the best fit value. 
-    other_p_bounds = [(np.log(0.3*i), np.log(1.3*i)) for i in np.exp(other_params)]
+    #other_p_bounds = [(np.log(0.05*i), np.log(20*i)) for i in np.exp(other_params)]
     def root_function(param_value):
         result = minimize(
             objective_func,
             other_params,
             args=(param_index, param_value),
-            bounds=other_p_bounds,
+            #bounds=other_p_bounds,
             method='L-BFGS-B'
         )
         return 2 * (result.fun - best_nll) - chi2_quantile
@@ -93,7 +98,7 @@ def find_profile_bound(objective_func, param_index, best_fit_params, best_nll, c
              return None
         a, b = start, end
     for _ in range(max_iterations):
-        mid = (a+b)/2
+        mid = np.log((np.exp(a)+np.exp(b))/2)
         fval = root_function(mid)
         if fval > 0:
             if lower:
