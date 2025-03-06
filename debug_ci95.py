@@ -49,18 +49,31 @@ no_me_mod =  CompartmentalModel(
                               )
 
 no_me_mod = no_me_mod.fit2(df,checkpoint_filename=f'mod_abs_test_nome.jb', parallel=False, parallel_n_jobs=4)
+        
 
-fit_result = no_me_mod.fit_result_
-param_index = 0
-ci_level = .95
-best_fit_params = fit_result.x.copy()
-_, _, _, beta_data = no_me_mod._assemble_pred_matrices(df)
-best_fit_neg_log_likelihood = fit_result.fun
-param_range = [np.log(0.99* np.exp(best_fit_params[param_index])), np.log(1.01 * np.exp(best_fit_params[param_index]))] # Initial range
+def construct_profile_ci(model_obj, param_index, ci_level = 0.95, result_dict = None ):
+    if result_dict is None:
+        result_dict = {}
+    fit_result = model_obj.fit_result_
+    best_fit_params = fit_result.x.copy()
+    _, _, _, theta_data = model_obj._assemble_pred_matrices(df)
+    best_fit_neg2_log_likelihood = fit_result.fun
+    param_range = [np.log(0.99* np.exp(best_fit_params[param_index])), np.log(1.01 * np.exp(best_fit_params[param_index]))]
+    chi2_quantile = chi2.ppf(ci_level, 1)
+    
+    lower_bound = find_profile_bound(objective_for_profiling,
+                                 param_index, best_fit_params,
+                                 best_fit_neg2_log_likelihood,
+                                 chi2_quantile, param_range[0],
+                                 best_fit_params[param_index], lower=True)
 
-# critical value of the chi-squared distribution
-chi2_quantile = chi2.ppf(ci_level, 1)
-
+    upper_bound = find_profile_bound(objective_for_profiling, param_index, best_fit_params,
+                                    best_fit_neg2_log_likelihood, chi2_quantile, best_fit_params[param_index],
+                                    param_range[1], lower=False)
+    result_dict[param_index] = {'lower':lower_bound, 'upper':upper_bound}
+    return result_dict
+    
+    
 def objective_for_profiling(other_params, fixed_param_index, fixed_param_val):
       
     # Create a new parameter vector with the profiled parameter fixed
@@ -93,6 +106,7 @@ def find_profile_bound(objective_func, param_index, best_fit_params, best_nll, c
         )
         return (result.fun - best_nll) - chi2_quantile
     
+    
     if lower:
         a = start
         decrement = .005*end
@@ -100,7 +114,7 @@ def find_profile_bound(objective_func, param_index, best_fit_params, best_nll, c
         while root_function(a) < 0:
             a -= decrement
             if a < start - 10:
-                return None
+                bound = None
 
         a, b = a, end
     elif not lower:
@@ -110,38 +124,14 @@ def find_profile_bound(objective_func, param_index, best_fit_params, best_nll, c
         while root_function(b) < 0:
             b += increment
             if b > end + 10:
-                return None
+                bound = None
         a, b = start, b
     use_brentq = True
     if use_brentq:
         bound = brentq(root_function, a, b)
-        return bound
-    else:
-        for _ in range(max_iterations):
-            mid = np.log((np.exp(a)+np.exp(b))/2)
-            fval = root_function(mid)
-            if fval > 0:
-                if lower:
-                    b = mid
-                else:
-                    a = mid
-            else:
-                if lower:
-                    a= mid
-                else:
-                    b = mid
-            if abs(b - a) < tolerance:
-                return mid
+    return bound
 
-lower_bound = find_profile_bound(objective_for_profiling,
-                                 param_index, best_fit_params,
-                                 best_fit_neg_log_likelihood,
-                                 chi2_quantile, param_range[0],
-                                 best_fit_params[param_index], lower=True)
 
-upper_bound = find_profile_bound(objective_for_profiling, param_index, best_fit_params,
-                                 best_fit_neg_log_likelihood, chi2_quantile, best_fit_params[param_index],
-                                 param_range[1], lower=False)
 
 # If bounds found, create finer profile
 profile_parameter_values = []
