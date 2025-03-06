@@ -1336,6 +1336,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     
     def _assemble_pred_matrices(self, data):
         data = data.reset_index(drop = True).copy()
+        self.data = data.copy()
         subject_id_c = self.groupby_col
         conc_at_time_c = self.conc_at_time_col
         verbose = self.verbose
@@ -1629,10 +1630,13 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data)
         subject_level_intercept_init_vals = self.subject_level_intercept_init_vals
         init_params = [pop_coeffs.values,] #pop coeffs already includes sigma if needed, this is confusing
+        param_names = list(pop_coeffs.columns)
         if len(omegas.values) > 0:
             init_params.append(omegas.values)
+            param_names.append(omegas.columns)
         if len(thetas.values) > 0:
             init_params.append(thetas.values)
+            param_names.append(thetas.columns)
         init_params = np.concatenate(init_params, axis = 1, dtype=np.float64).flatten()
         
         objective_function = partial(self._objective_function2,
@@ -1649,6 +1653,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                            bounds=self.bounds
                                                            )
         #hess_fun = nd.Hessian()
+        self.fit_result_summary_ = pd.Series(self.fit_result_.x, index = param_names, dtype = pd.Float64Dtype())
         #after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
         if len(omegas.values) > 0:
             _ = self.predict2(data, parallel = parallel, parallel_n_jobs = parallel_n_jobs)

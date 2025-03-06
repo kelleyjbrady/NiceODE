@@ -16,6 +16,7 @@ from pytensor.compile.ops import as_op
 from pytensor.tensor.type import TensorType
 import pytensor.tensor as pt
 from scipy.integrate import solve_ivp
+import pandas as pd
 
 # One-compartment model using diffrax
 def one_compartment_diffrax(t, y, args):
@@ -259,7 +260,10 @@ def generate_subject_ivp_op():
     return pytensor_forward_model_matrix
 
 
-def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_method:str = 'scipy'): 
+def make_pymc_model(pm_subj_df, pm_df,
+                    model_params, model_param_dep_vars,
+                    model_error = None,
+                    ode_method:str = 'scipy'): 
     
     pm_df['tmp'] = 1
     time_mask_df = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'tmp').fillna(0)
@@ -333,7 +337,8 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
             #    pop_coeff_init = np.random.rand()
                 
             #ensure that neither init value is zero, I think that can make the graphviz fail
-            population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = row['init_val'], sigma = 1)
+            pop_coeff_sigma = row['init_val'] * .2 if pd.isna(row['sigma']) else row['sigma']
+            population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = row['init_val'], sigma = pop_coeff_sigma)
             if coeff_has_subject_intercept:
                 coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 3)
                 coeff_intercept_sigma[coeff_name] = pm.HalfNormal(f"{coeff_name}_intercept_sigma", sigma = 10)
@@ -472,7 +477,7 @@ def make_pymc_model(pm_subj_df, pm_df, model_params, model_param_dep_vars, ode_m
                     
         #time_mask_data_reshaped = time_mask_data.reshape(n_subjects, max_time_points, 1)
         #tmp_ode_sol = pm.Deterministic("tmp_sol", ode_sol)
-
+        model_error = 1 if model_error is None else model_error
         sigma_obs = pm.HalfNormal("sigma_obs", sigma=1)
         #print("Shape of ode_sol (in PyMC model):", ode_sol.shape)
         # or
