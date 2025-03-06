@@ -51,7 +51,10 @@ no_me_mod =  CompartmentalModel(
 no_me_mod = no_me_mod.fit2(df,checkpoint_filename=f'mod_abs_test_nome.jb', parallel=False, parallel_n_jobs=4)
         
 
-def construct_profile_ci(model_obj, param_index,init_bounds_factor = 1.01, profile_bounds = None, profile_bounds_factor = 2.0, ci_level = 0.95, result_dict = None ):
+
+
+
+def construct_profile_ci(model_obj,df, param_index,init_bounds_factor = 1.01, profile_bounds = None, profile_bounds_factor = 2.0, ci_level = 0.95, result_dict = None ):
     if result_dict is None:
         result_dict = {}
     
@@ -146,7 +149,10 @@ def find_profile_bound(objective_func, param_index,
         bound = brentq(root_function, a, b)
     return bound
 
-
+res_dict = {}
+for param_idx, param_val in enumerate(no_me_mod.fit_result_.x):
+    print(f"Profiling parameter:{param_idx}")
+    res_dict = construct_profile_ci(model_obj = no_me_mod, df = df, param_index=param_idx)
 
 # If bounds found, create finer profile
 profile_parameter_values = []
