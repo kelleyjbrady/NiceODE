@@ -51,51 +51,66 @@ no_me_mod =  CompartmentalModel(
 no_me_mod = no_me_mod.fit2(df,checkpoint_filename=f'mod_abs_test_nome.jb', parallel=False, parallel_n_jobs=4)
         
 
-def construct_profile_ci(model_obj, param_index, ci_level = 0.95, result_dict = None ):
+def construct_profile_ci(model_obj, param_index,init_bounds_factor = 1.01, profile_bounds = None, profile_bounds_factor = 2.0, ci_level = 0.95, result_dict = None ):
     if result_dict is None:
         result_dict = {}
+    
     fit_result = model_obj.fit_result_
     best_fit_params = fit_result.x.copy()
     _, _, _, theta_data = model_obj._assemble_pred_matrices(df)
     best_fit_neg2_log_likelihood = fit_result.fun
-    param_range = [np.log(0.99* np.exp(best_fit_params[param_index])), np.log(1.01 * np.exp(best_fit_params[param_index]))]
+    param_range = [
+        np.log((1/init_bounds_factor)* np.exp(best_fit_params[param_index]))
+        ,np.log(init_bounds_factor * np.exp(best_fit_params[param_index]))
+                   ]
     chi2_quantile = chi2.ppf(ci_level, 1)
     
-    lower_bound = find_profile_bound(objective_for_profiling,
-                                 param_index, best_fit_params,
-                                 best_fit_neg2_log_likelihood,
-                                 chi2_quantile, param_range[0],
-                                 best_fit_params[param_index], lower=True)
+    def objective_for_profiling(other_params, fixed_param_index, fixed_param_val):
+        # Create a new parameter vector with the profiled parameter fixed
+        profiled_params = other_params.copy()
+        profiled_params = np.insert(other_params,
+                                    fixed_param_index,
+                                    fixed_param_val)
+        loss = no_me_mod._objective_function2(profiled_params, theta_data)
+        return loss
+    
+    
+    lower_bound = find_profile_bound(objective_func=objective_for_profiling,
+                                 param_index = param_index, best_fit_params = best_fit_params,
+                                 best_nll = best_fit_neg2_log_likelihood,
+                                 chi2_quantile=chi2_quantile, start = param_range[0],
+                                 end = best_fit_params[param_index],
+                                 profile_bounds=profile_bounds, 
+                                 profile_bounds_factor=profile_bounds_factor,
+                                 lower=True)
 
-    upper_bound = find_profile_bound(objective_for_profiling, param_index, best_fit_params,
-                                    best_fit_neg2_log_likelihood, chi2_quantile, best_fit_params[param_index],
-                                    param_range[1], lower=False)
+    upper_bound = find_profile_bound(objective_func = objective_for_profiling, param_index = param_index,
+                                     best_fit_params=best_fit_params,
+                                    best_nll = best_fit_neg2_log_likelihood, chi2_quantile=chi2_quantile,
+                                    start = best_fit_params[param_index],
+                                    end = param_range[1],profile_bounds=profile_bounds, 
+                                 profile_bounds_factor=profile_bounds_factor, lower=False)
     result_dict[param_index] = {'lower':lower_bound, 'upper':upper_bound}
     return result_dict
     
     
-def objective_for_profiling(other_params, fixed_param_index, fixed_param_val):
-      
-    # Create a new parameter vector with the profiled parameter fixed
-    profiled_params = other_params.copy()
-    profiled_params = np.insert(other_params,
-                                fixed_param_index,
-                                fixed_param_val)
-    loss = no_me_mod._objective_function2(profiled_params, beta_data)
-    return loss
 
-def find_profile_bound(objective_func, param_index, best_fit_params, best_nll, chi2_quantile, start, end, lower=True):
+
+def find_profile_bound(objective_func, param_index,
+                       best_fit_params, best_nll, chi2_quantile,
+                       start, end, profile_bounds = None, profile_bounds_factor = 2.0, lower=True):
     """
     Finds the lower or upper bound of the profile likelihood confidence interval using a search algorithm.
     """
     
-    tolerance = 1e-4  # Set a suitable tolerance
-    max_iterations = 25
     other_params = np.delete(best_fit_params, param_index)
     #These are VERY IMPORTANT
     #would be even better to use the 'CI' derived from NCA for at least Vd
-    bounds_factor = 2.0
-    other_p_bounds = [(np.max([np.log((1/bounds_factor)*i), 1e-3]), np.log(bounds_factor*i)) for i in np.exp(other_params)]
+
+    if profile_bounds is not None:
+        other_p_bounds = profile_bounds
+    else:
+        other_p_bounds = [(np.max([np.log((1/profile_bounds_factor)*i), 1e-3]), np.log(profile_bounds_factor*i)) for i in np.exp(other_params)]
     def root_function(param_value):
         result = minimize(
             objective_func,
