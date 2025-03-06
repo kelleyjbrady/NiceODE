@@ -13,7 +13,7 @@ with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     df = jb.load(f)
     
 
-no_me_mod =  CompartmentalModel(
+no_me_mod_k=  CompartmentalModel(
      ode_t0_cols=[ODEInitVals('DV')],
      population_coeff=[PopulationCoeffcient('k', 0.3, ),
                        #PopulationCoeffcient('vd', 20, ),
@@ -26,6 +26,25 @@ no_me_mod =  CompartmentalModel(
                               no_me_loss_function=neg2_log_likelihood_loss, 
                               optimizer_tol=None, 
                               pk_model_function=first_order_one_compartment_model, 
+                              #ode_solver_method='BDF'
+                              )
+
+no_me_mod =  CompartmentalModel(
+     ode_t0_cols=[ODEInitVals('DV')],
+     population_coeff=[PopulationCoeffcient('cl', 25, ),
+                       PopulationCoeffcient('vd', 80
+                                            , optimization_lower_bound = np.log(70)
+                                            , optimization_upper_bound = np.log(90)
+                                            ),
+                       ],
+     dep_vars= None, 
+     model_error_sigma=PopulationCoeffcient('sigma',
+                                            optimization_init_val=4, 
+                                            optimization_lower_bound=0.000001, 
+                                            optimization_upper_bound=20),
+                              no_me_loss_function=neg2_log_likelihood_loss, 
+                              optimizer_tol=None, 
+                              pk_model_function=first_order_one_compartment_model2, 
                               #ode_solver_method='BDF'
                               )
 
@@ -60,9 +79,10 @@ def find_profile_bound(objective_func, param_index, best_fit_params, best_nll, c
     tolerance = 1e-4  # Set a suitable tolerance
     max_iterations = 25
     other_params = np.delete(best_fit_params, param_index)
-    #this is might not necessary since the 'other_p' are constrained by 
-    #the fact that the 'fixed' parameter is near the best fit value. 
-    other_p_bounds = [(np.log(0.05*i), np.log(20*i)) for i in np.exp(other_params)]
+    #These are VERY IMPORTANT
+    #would be even better to use the 'CI' derived from NCA for at least Vd
+    bounds_factor = 2.0
+    other_p_bounds = [(np.max([np.log((1/bounds_factor)*i), 1e-3]), np.log(bounds_factor*i)) for i in np.exp(other_params)]
     def root_function(param_value):
         result = minimize(
             objective_func,
@@ -75,18 +95,20 @@ def find_profile_bound(objective_func, param_index, best_fit_params, best_nll, c
     
     if lower:
         a = start
-
+        decrement = .005*end
+        #decrement = .01
         while root_function(a) < 0:
-            a -= .01
+            a -= decrement
             if a < start - 10:
                 return None
 
         a, b = a, end
     elif not lower:
         b = end
+        increment = .005*start
         #Search for the upper bound using the bisection method
         while root_function(b) < 0:
-            b += .01
+            b += increment
             if b > end + 10:
                 return None
         a, b = start, b
@@ -135,4 +157,4 @@ if lower_bound is not None and upper_bound is not None:
             args=(param_index, val),
             method='L-BFGS-B'
         )
-        profile_nll_values.append(result.fun)
+        profile_nll_values.append({'neg2_ll':result.fun, 'x':result.x})
