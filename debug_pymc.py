@@ -11,6 +11,7 @@ from diffeqs import(
                     )
 import numpy as np
 from pymc_utils import make_pymc_model
+import pymc as pm
 
 with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     df = jb.load(f)
@@ -18,10 +19,10 @@ with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     
 no_me_mod =  CompartmentalModel(
      ode_t0_cols=[ODEInitVals('DV')],
-     population_coeff=[PopulationCoeffcient('cl', 25, ),
-                       PopulationCoeffcient('vd', 80
-                                            , optimization_lower_bound = np.log(70)
-                                            , optimization_upper_bound = np.log(90)
+     population_coeff=[PopulationCoeffcient('cl', 15, ),
+                       PopulationCoeffcient('vd', 45
+                                            , optimization_lower_bound = np.log(35)
+                                            , optimization_upper_bound = np.log(55)
                                             ),
                        ],
      dep_vars= None, 
@@ -51,7 +52,19 @@ model_params['sigma'] = model_params['init_val'] * .05
 model_error = best_fit_df.loc[best_fit_df['model_coeff'] == 'sigma2'
                               , 'best_fit_param_val'].to_numpy()[0]
 
-
+sigma_log_approx = model_error / np.mean(no_me_mod.data['DV'])
 model = make_pymc_model(no_me_mod.subject_data,
                         no_me_mod.data, model_params,  
-                        model_param_dep_vars, model_error = model_error,)
+                        model_param_dep_vars, model_error = sigma_log_approx,)
+make_graph_viz = True
+if make_graph_viz:
+    pm.model_to_graphviz(model)
+    
+    
+vars_list = list(model.values_to_rvs.keys())[:-1]
+
+sampler = "DEMetropolisZ"
+tune = 3000
+draws = 10000
+with model:
+    trace_DEMZ = pm.sample(step=[pm.DEMetropolisZ(vars_list)], cores = 1, tune = tune, draws = draws, chains = 4)

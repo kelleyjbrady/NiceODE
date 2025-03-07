@@ -33,10 +33,10 @@ no_me_mod_k=  CompartmentalModel(
 
 no_me_mod =  CompartmentalModel(
      ode_t0_cols=[ODEInitVals('DV')],
-     population_coeff=[PopulationCoeffcient('cl', 25, ),
-                       PopulationCoeffcient('vd', 80
-                                            , optimization_lower_bound = np.log(70)
-                                            , optimization_upper_bound = np.log(90)
+     population_coeff=[PopulationCoeffcient('cl', 15, ),
+                       PopulationCoeffcient('vd', 45
+                                            , optimization_lower_bound = np.log(35)
+                                            , optimization_upper_bound = np.log(55)
                                             ),
                        ],
      dep_vars= None, 

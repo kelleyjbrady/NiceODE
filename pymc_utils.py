@@ -296,8 +296,10 @@ def make_pymc_model(pm_subj_df, pm_df,
         #for sub in coords['subject']:
         #    one_subject_tps = np.array(pm_subj_df.loc[pm_subj_df['SUBJID'] == 1.0, 'subj_tp'].values[0])
         #    sub_tps[sub] = pm.Data(f"subject{sub}_timepoints", one_subject_tps)
-        subject_max_tp_data = pm.Data('subject_tp_max', pm_subj_df['subj_tp_max'].values, dims = 'subject')
-        subject_min_tp_data = pm.Data('subject_tp_min', pm_subj_df['subj_tp_min'].values, dims = 'subject')
+        use_old_code = False
+        if use_old_code:
+            subject_max_tp_data = pm.Data('subject_tp_max', pm_subj_df['subj_tp_max'].values, dims = 'subject')
+            subject_min_tp_data = pm.Data('subject_tp_min', pm_subj_df['subj_tp_min'].values, dims = 'subject')
         
         subject_init_conc_eval = subject_init_conc.eval()
         tp_data_eval = tp_data.eval()
@@ -356,9 +358,10 @@ def make_pymc_model(pm_subj_df, pm_df,
                 )
 
                 print(f"Shape of coeff_intercept_i[{coeff_name}]: {coeff_intercept_i[coeff_name].shape.eval()}")
+                model_coeff = (population_coeff[coeff_name] + coeff_intercept_i[coeff_name])
             else:
-                coeff_intercept_i[coeff_name] = pt.full((len(coords['subject']),), 0.0)
-            model_coeff = (population_coeff[coeff_name] + coeff_intercept_i[coeff_name])
+                model_coeff = population_coeff[coeff_name]
+            
             if coeff_name not in betas:
                 betas[coeff_name] = {}
                 subject_data[coeff_name] = {} 
@@ -368,16 +371,25 @@ def make_pymc_model(pm_subj_df, pm_df,
                 print(f"Shape of pm_subj_df[{beta_name}]: {subject_data[coeff_name][beta_name].shape.eval()}")
                 #print(f"Shape of pm_subj_df[{beta_name}][{sub_idx}]: {pm_subj_df[beta_name][sub_idx].shape}")
                 model_coeff = (model_coeff + (betas[coeff_name][beta_name] * subject_data[coeff_name][beta_name]))
-            pm_model_params.append(
-                pm.Deterministic(f"{coeff_name}_i",
-                                 pm.math.exp(model_coeff),
-                                 dims = 'subject' )
-            )
-        
-        
+            
+            if coeff_has_subject_intercept:
+                pm_model_params.append(
+                    pm.Deterministic(f"{coeff_name}_i",
+                                    pm.math.exp(model_coeff),
+                                    dims = 'subject' )
+                )
+            else:
+                pm_model_params.append(
+                    pm.Deterministic(f"{coeff_name}_i",
+                                    pt.repeat(pm.math.exp(model_coeff), len(coords['subject']) ),
+                                    dims = 'subject'
+                                     )
+                )
         print(f"Shape of intial conc: {subject_init_conc_eval.shape}")
-        print(f"Shape of subject min tp: {subject_min_tp_data.shape.eval()}")
-        print(f"Shape of subject max tp: {subject_max_tp_data.shape.eval()}")
+        if use_old_code:
+            print(f"Shape of subject min tp: {subject_min_tp_data.shape.eval()}")
+            print(f"Shape of subject max tp: {subject_max_tp_data.shape.eval()}")
+        #this should be called something other than theta, this is the inputs to the PK model ODE
         theta_matrix = pt.concatenate([param.reshape((1, -1)) for param in pm_model_params], axis=0).T
         theta_matrix_eval = theta_matrix.eval()
         print("Shape of theta_matrix:", theta_matrix_eval.shape)
@@ -478,11 +490,11 @@ def make_pymc_model(pm_subj_df, pm_df,
         #time_mask_data_reshaped = time_mask_data.reshape(n_subjects, max_time_points, 1)
         #tmp_ode_sol = pm.Deterministic("tmp_sol", ode_sol)
         model_error = 1 if model_error is None else model_error
-        sigma_obs = pm.HalfNormal("sigma_obs", sigma=1)
+        sigma_obs = pm.HalfNormal("sigma_obs", sigma=model_error)
         #print("Shape of ode_sol (in PyMC model):", ode_sol.shape)
         # or
         #print("Shape of ode_sol (in PyMC model):", pt.shape(ode_sol).eval())
-        pm.LogNormal("obs", mu=sol, sigma=sigma_obs, observed=data_obs)
+        pm.LogNormal("obs", mu=pt.log(sol), sigma=sigma_obs, observed=data_obs)
         
 
     return model
