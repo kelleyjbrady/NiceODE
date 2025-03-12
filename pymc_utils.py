@@ -187,7 +187,7 @@ class DiffraxODE(pt.Op):
         )
 
         # Extract the solution at the specified time points and put in output
-        outputs[0][0] = sol.ys.squeeze()
+        outputs[0][0] = sol.ys.astype('float64').squeeze()
 
 def one_compartment_model(t, y, *theta ):
     """
@@ -342,9 +342,9 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         
         data_obs = pm.Data('dv', pm_df['DV'].values, dims = 'obs_id')
         #print(data_obs.shape.eval())
-        time_mask_data = pm.Data('time_mask', time_mask, dims = ('subject', 'time'))
-        tp_data = pm.Data('timepoints', all_sub_tp, dims = ('subject', 'time'))
-        tp_data_vector = pm.Data('timepoints_vector', timepoints.flatten(), dims = 'time')
+        time_mask_data = pm.Data('time_mask', time_mask, dims = ('subject', 'global_time'))
+        tp_data = pm.Data('timepoints', all_sub_tp, dims = ('subject', 'global_time'))
+        tp_data_vector = pm.Data('timepoints_vector', timepoints.flatten(), dims = 'global_time')
         subject_init_conc = pm.Data('c0', pm_subj_df['DV'].values, dims = 'subject')
         #global_t0 = tp_data[0,0]
         #global_t1 = tp_data[0,-1]
@@ -482,9 +482,9 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                     ode_sol = diffrax_op(subject_y0, subject_timepoints, subject_model_params)
                     print(ode_sol.shape)
                     sol.append(ode_sol)
-                sol = pt.concatenate(sol, axis=0)
+                sol = pt.concatenate(sol, axis=0).flatten()
                 filtered_ode_sol = sol[time_mask_data.flatten()]
-                sol = pm.Deterministic("sol", filtered_ode_sol)
+                sol = pm.Deterministic("sol", filtered_ode_sol, dims = 'obs_id')
                     
         elif ode_method == 'jax_odeint':
             ode_sol = jax_odeint_op(subject_init_conc.astype('float64'),
