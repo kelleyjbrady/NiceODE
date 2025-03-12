@@ -187,7 +187,7 @@ class DiffraxODE(pt.Op):
         )
 
         # Extract the solution at the specified time points and put in output
-        outputs[0][0] = sol.ys.astype('float64').squeeze()
+        outputs[0][0] = np.asarray(sol.ys.squeeze(), dtype = "float64")
 
 def one_compartment_model(t, y, *theta ):
     """

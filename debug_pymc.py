@@ -72,3 +72,4 @@ total_draws = 10000
 draws = np.round(total_draws/chains, 0).astype(int)
 with model:
     trace_DEMZ = pm.sample(step=[pm.DEMetropolisZ(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains)
+    #trace_NUTS = pm.sample( cores = 1, tune = tune, draws = draws, chains = chains)
