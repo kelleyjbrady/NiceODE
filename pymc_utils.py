@@ -20,9 +20,9 @@ import pandas as pd
 
 # One-compartment model using diffrax
 def one_compartment_diffrax(t, y, args):
-    k, Vd = args
+    cl, Vd = args
     C = y
-    dCdt = -(k / Vd) * C
+    dCdt = -(cl / Vd) * C
     return dCdt
 
 class DiffraxJaxOp(Op):
@@ -148,6 +148,46 @@ class DiffraxVJPOp(Op):
         gz = jnp.asarray(gz)
         result = self.jax_op(y0, args, time_mask, gz)
         outputs[0][0] = np.asarray(result, dtype="float64")
+        
+        
+class DiffraxODE(pt.Op):
+    itypes = [pt.dvector, pt.dvector, pt.dvector]  # y0, t, theta
+    otypes = [pt.dmatrix]  # solutions
+
+    def __init__(self, func, solver=diffrax.Tsit5()):
+        """
+        Initializes the DiffraxODE Op.
+
+        Parameters:
+        - func: The ODE function (like one_compartment_diffrax).
+        - t0: The initial time (scalar).
+        - solver: The Diffrax solver to use (default: Tsit5).
+        """
+        self.func = func
+        #self.t0 = t0  # Store t0 as an attribute
+        self.solver = solver
+        self.term = diffrax.ODETerm(self.func)
+
+    def perform(self, node, inputs, outputs):
+        (y0, times, theta) = inputs  # Unpack inputs
+
+        # Ensure y0 is a column vector (important for Diffrax)
+        y0 = np.array(y0).reshape(-1,1)
+
+        # Solve the ODE using diffeqsolve
+        sol = diffrax.diffeqsolve(
+            self.term,
+            self.solver,
+            t0=times[0],
+            t1=times[-1],  # Use the last time point as t1
+            dt0=0.1,  # Let Diffrax choose the initial step size
+            y0=y0,
+            args=theta,
+            saveat=diffrax.SaveAt(ts=times),  # Save at specified times
+        )
+
+        # Extract the solution at the specified time points and put in output
+        outputs[0][0] = sol.ys.squeeze()
 
 def one_compartment_model(t, y, *theta ):
     """
@@ -200,7 +240,18 @@ class JaxOdeintOp(Op):
             return solution
 
         # Vectorize across subjects using jax.vmap
-        subject_solutions = jax.vmap(solve_for_subject)(y0, theta, all_t)
+        use_vmap = False
+        if use_vmap:
+            subject_solutions = jax.vmap(solve_for_subject)(y0, theta, all_t)
+        else:
+            subject_solutions = []
+            for idx in range(len(y0)):
+                subject_solutions.append(solve_for_subject(
+                    y0[idx],
+                    theta[idx, :],
+                    all_t[idx, :])
+                )
+
         #print("Shape of subject_solutions (inside JaxOdeintOp):", subject_solutions.shape)
         #print("Shape of subject_solutions (inside JaxOdeintOp):", subject_solutions.shape)
 
@@ -260,7 +311,7 @@ def generate_subject_ivp_op():
     return pytensor_forward_model_matrix
 
 
-def make_pymc_model(pm_subj_df, pm_df,
+def make_pymc_model(model_obj, pm_subj_df, pm_df,
                     model_params, model_param_dep_vars,
                     model_error = None,
                     ode_method:str = 'scipy'): 
@@ -271,14 +322,20 @@ def make_pymc_model(pm_subj_df, pm_df,
     all_sub_tp_alt = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'TIME')    
     all_sub_tp = np.tile(all_sub_tp_alt.columns, (len(time_mask_df),1))
     timepoints = np.array(all_sub_tp_alt.columns)
-    #t1 = timepoints[-1]
-    #t0 = 0 
+    
+    t1 = model_obj.global_tf
+    t0 = model_obj.global_t0 
     dt0 = 0.1
     coords = {'subject':list(pm_subj_df['SUBJID'].values), 
-          'obs_id': list(pm_df.index.values)
+          'obs_id': list(pm_df.index.values), 
+          'global_time':timepoints
           }
     
     jax_odeint_op = JaxOdeintOp(one_compartment_model)
+    
+    
+    
+    
     old_subj_loop = True
     pt_printing = True
     with pm.Model(coords=coords) as model:
@@ -300,24 +357,26 @@ def make_pymc_model(pm_subj_df, pm_df,
         if use_old_code:
             subject_max_tp_data = pm.Data('subject_tp_max', pm_subj_df['subj_tp_max'].values, dims = 'subject')
             subject_min_tp_data = pm.Data('subject_tp_min', pm_subj_df['subj_tp_min'].values, dims = 'subject')
-        
+        else:
+            subject_max_tp_data = pm.Data('subject_tp_max', np.repeat(t1, len(coords['subject'])), dims = 'subject')
+            subject_min_tp_data = pm.Data('subject_tp_min', np.repeat(t0, len(coords['subject'])), dims = 'subject')
         subject_init_conc_eval = subject_init_conc.eval()
         tp_data_eval = tp_data.eval()
         time_mask_data_eval = time_mask_data.eval()
 
         subject_data = {}
-        betas = {}
+        thetas = {}
         seen_coeff = []
         for idx, row in model_param_dep_vars.iterrows():
             coeff_name = row['model_coeff']
             
-            beta_name = row['model_coeff_dep_var']
+            theta_name = row['model_coeff_dep_var']
             if coeff_name not in seen_coeff:
-                betas[coeff_name] = {}
+                thetas[coeff_name] = {}
                 subject_data[coeff_name] = {}
-            betas[coeff_name].update({beta_name:pm.Normal(f"beta_{coeff_name}_{beta_name}", mu = 0, sigma = 10)})
+            thetas[coeff_name].update({theta_name:pm.Normal(f"beta_{coeff_name}_{theta_name}", mu = 0, sigma = 10)})
             subject_data[coeff_name].update(
-                {beta_name:pm.Data(f"data_{coeff_name}_{beta_name}", pm_subj_df[beta_name].values,
+                {theta_name:pm.Data(f"data_{coeff_name}_{theta_name}", pm_subj_df[theta_name].values,
                                         dims = 'subject'
                                         )
                 }
@@ -362,15 +421,15 @@ def make_pymc_model(pm_subj_df, pm_df,
             else:
                 model_coeff = population_coeff[coeff_name]
             
-            if coeff_name not in betas:
-                betas[coeff_name] = {}
+            if coeff_name not in thetas:
+                thetas[coeff_name] = {}
                 subject_data[coeff_name] = {} 
-            for beta_name in betas[coeff_name]:
+            for theta_name in thetas[coeff_name]:
                 print(f"Shape of model_coeff: {model_coeff.shape.eval()}")
-                print(f"Shape of betas[{coeff_name}][{beta_name}]: {betas[coeff_name][beta_name].shape.eval()}")
-                print(f"Shape of pm_subj_df[{beta_name}]: {subject_data[coeff_name][beta_name].shape.eval()}")
-                #print(f"Shape of pm_subj_df[{beta_name}][{sub_idx}]: {pm_subj_df[beta_name][sub_idx].shape}")
-                model_coeff = (model_coeff + (betas[coeff_name][beta_name] * subject_data[coeff_name][beta_name]))
+                print(f"Shape of thetas[{coeff_name}][{theta_name}]: {thetas[coeff_name][theta_name].shape.eval()}")
+                print(f"Shape of pm_subj_df[{theta_name}]: {subject_data[coeff_name][theta_name].shape.eval()}")
+                #print(f"Shape of pm_subj_df[{theta_name}][{sub_idx}]: {pm_subj_df[theta_name][sub_idx].shape}")
+                model_coeff = (model_coeff + (thetas[coeff_name][theta_name] * subject_data[coeff_name][theta_name]))
             
             if coeff_has_subject_intercept:
                 pm_model_params.append(
@@ -397,15 +456,40 @@ def make_pymc_model(pm_subj_df, pm_df,
         print("Shape of tp_data[0,:]:",  tp_data_eval[0,:].shape)
         #use_diffrax = True
         if ode_method == 'diffrax':
-            diffrax_op = DiffraxJaxOp(one_compartment_diffrax, t0, t1, dt0, timepoints, time_mask_data.eval())
-            vjp_op = DiffraxVJPOp(diffrax_op.jax_op)
-            diffrax_op.vjp_op = vjp_op
-            ode_sol = diffrax_op(pm_subj_df["DV"].values.astype("float64"), theta_matrix.astype("float64"), time_mask_data)[0]
-            sol = pm.Deterministic("sol", ode_sol.flatten())
+            bad_solution = False
+            if bad_solution:
+                diffrax_op = DiffraxJaxOp(one_compartment_diffrax, t0, t1, dt0, timepoints, time_mask_data.eval())
+                vjp_op = DiffraxVJPOp(diffrax_op.jax_op)
+                diffrax_op.vjp_op = vjp_op
+                ode_sol = diffrax_op(pm_subj_df["DV"].values.astype("float64"), theta_matrix.astype("float64"), time_mask_data)[0]
+                sol = pm.Deterministic("sol", ode_sol.flatten())
+            else:
+                sol = []
+                for sub_idx, subject in enumerate(coords['subject']):
+                    subject_y0 = pt.as_tensor([subject_init_conc[sub_idx]])
+                    print(subject_y0[0].shape.eval())
+                    subject_model_params = theta_matrix[sub_idx, :]
+                    print(subject_model_params.shape.eval())
+                   
+                    subject_timepoints = tp_data_vector
+                    print(subject_timepoints.shape)
+                    subject_t0 = subject_timepoints[ 0]
+                    print(subject_t0.shape.eval())
+                    subject_t1 = subject_timepoints[-1]
+                    print(subject_t1.shape.eval())
+                    
+                    diffrax_op = DiffraxODE(one_compartment_diffrax, )
+                    ode_sol = diffrax_op(subject_y0, subject_timepoints, subject_model_params)
+                    print(ode_sol.shape)
+                    sol.append(ode_sol)
+                sol = pt.concatenate(sol, axis=0)
+                filtered_ode_sol = sol[time_mask_data.flatten()]
+                sol = pm.Deterministic("sol", filtered_ode_sol)
+                    
         elif ode_method == 'jax_odeint':
             ode_sol = jax_odeint_op(subject_init_conc.astype('float64'),
-                                    subject_min_tp_data.astype('float64'),
-                                    subject_max_tp_data.astype('float64'),
+                                    subject_min_tp_data,
+                                    subject_max_tp_data,
                                     theta_matrix.astype('float64'),
                                     tp_data.astype('float64'),
                                     )
@@ -445,7 +529,7 @@ def make_pymc_model(pm_subj_df, pm_df,
                     print(subject_y0[0].shape.eval())
                     subject_model_params = theta_matrix[sub_idx, :]
                     print(subject_model_params.shape.eval())
-                    #subject_timepoints = tp_data[sub_idx, :]
+                   
                     subject_timepoints = tp_data_vector
                     print(subject_timepoints.shape)
                     subject_t0 = subject_timepoints[ 0]
@@ -464,31 +548,18 @@ def make_pymc_model(pm_subj_df, pm_df,
                     )
                     ode_sol = ode_sol.flatten()
                     sol_alt.append(ode_sol)
-                    #sol_alt2.extend(ode_sol)
-                    #start_idx = sub_idx * n_timepoints
-                    #end_idx = (sub_idx + 1) * n_timepoints
+                   
                     print(ode_sol.shape.eval())
-                    #print(sol.shape)
-                    #print(np.array(ode_sol).shape)
-                    #sol[sub_idx, :] = np.array(ode_sol)
-                    #sol[start_idx:end_idx] = ode_sol
-                    #
-                    #sol[sub_idx, :].set(ode_sol.flatten())
-                    #sol.extend(ode_sol)
-                #sol = np.array(sol)
-                #sol = sol.flatten()
+                   
                 sol = pt.concatenate(sol_alt)
                 print(sol.shape.eval())
                 time_mask_data_f = time_mask_data.flatten()
                 
                 sol = sol[time_mask_data_f]
                 print(sol.shape.eval())
-                #sol = pt.as_tensor(sol)
-                #print(sol.shape)
+
                 sol = pm.Deterministic("sol", sol)
                     
-        #time_mask_data_reshaped = time_mask_data.reshape(n_subjects, max_time_points, 1)
-        #tmp_ode_sol = pm.Deterministic("tmp_sol", ode_sol)
         model_error = 1 if model_error is None else model_error
         sigma_obs = pm.HalfNormal("sigma_obs", sigma=model_error)
         #print("Shape of ode_sol (in PyMC model):", ode_sol.shape)

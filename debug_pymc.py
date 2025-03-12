@@ -48,14 +48,16 @@ model_param_dep_vars = init_summary.loc[init_summary['population_coeff'] == Fals
 best_fit_df = no_me_mod.fit_result_summary_.reset_index().rename(columns = {'index':'model_coeff', 0:'best_fit_param_val'})
 model_params = model_params.merge(best_fit_df, how = 'left', on = 'model_coeff')
 model_params['init_val'] = model_params['best_fit_param_val'].copy()
-model_params['sigma'] = model_params['init_val'] * .05
+model_params['sigma'] = np.log(np.exp(model_params['init_val']) * .2)
 model_error = best_fit_df.loc[best_fit_df['model_coeff'] == 'sigma2'
                               , 'best_fit_param_val'].to_numpy()[0]
 
 sigma_log_approx = model_error / np.mean(no_me_mod.data['DV'])
-model = make_pymc_model(no_me_mod.subject_data,
+model = make_pymc_model(no_me_mod, no_me_mod.subject_data,
                         no_me_mod.data, model_params,  
-                        model_param_dep_vars, model_error = sigma_log_approx,)
+                        model_param_dep_vars, model_error = sigma_log_approx,
+                        ode_method='diffrax'
+                        )
 make_graph_viz = True
 if make_graph_viz:
     pm.model_to_graphviz(model)
@@ -63,8 +65,10 @@ if make_graph_viz:
     
 vars_list = list(model.values_to_rvs.keys())[:-1]
 
-sampler = "DEMetropolisZ"
+#sampler = "DEMetropolisZ"
+chains = 4
 tune = 3000
-draws = 10000
+total_draws = 10000
+draws = np.round(total_draws/chains, 0).astype(int)
 with model:
-    trace_DEMZ = pm.sample(step=[pm.DEMetropolisZ(vars_list)], cores = 1, tune = tune, draws = draws, chains = 4)
+    trace_DEMZ = pm.sample(step=[pm.DEMetropolisZ(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains)
