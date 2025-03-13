@@ -18,6 +18,9 @@ import pytensor.tensor as pt
 import pytensor as ptb
 from scipy.integrate import solve_ivp
 import pandas as pd
+from typing import List
+
+
 
 
 def debug_print(print_obj, *args ):
@@ -536,7 +539,8 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                     subject_y0 = pt.as_tensor([subject_init_conc[sub_idx]])
                     debug_print(subject_y0[0].shape.eval())
                     subject_model_params = theta_matrix[sub_idx, :]
-                    subject_model_params_alt = pt.stack([param[sub_idx] for param in pm_model_params], axis=1)
+                    subject_model_params_list = [param[sub_idx] for param in pm_model_params]
+                    subject_model_params_alt = pt.stack(subject_model_params_list, axis=1)
                     debug_print(subject_model_params.shape.eval())
                    
                     subject_timepoints = tp_data_vector
@@ -547,7 +551,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                     debug_print(subject_t1.shape.eval())
                     
                     diffrax_op = DiffraxODE(one_compartment_diffrax, )
-                    ode_sol = diffrax_op(subject_y0, subject_timepoints, subject_model_params_alt)
+                    ode_sol = diffrax_op(subject_y0, subject_timepoints, subject_model_params)
                     debug_print(ode_sol.shape)
                     sol.append(ode_sol)
                 sol = pt.concatenate(sol, axis=0).flatten()
