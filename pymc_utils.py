@@ -188,6 +188,42 @@ class DiffraxODE(pt.Op):
 
         # Extract the solution at the specified time points and put in output
         outputs[0][0] = np.asarray(sol.ys.squeeze(), dtype = "float64")
+    def grad(self, inputs, output_gradients):
+        (y0, times, theta) = inputs
+        y0_col = y0.reshape((-1, 1))
+        (output_gradient,) = output_gradients
+        def solve_for_grad(y0, times, theta, output_gradient):
+            # Use diffeqsolve with BacksolveAdjoint
+            sol = diffrax.diffeqsolve(
+                self.term,
+                self.solver,
+                t0=self.t0,
+                t1=times[-1],
+                dt0=None,
+                y0=y0,
+                args=theta,
+                saveat=diffrax.SaveAt(ts=times),
+                adjoint=self.adjoint, # Use BacksolveAdjoint
+            )
+
+            # The magic:  sol.adjoint_params gives us the gradients!
+            # It's a PyTree representing d(loss)/d(params) -- we have to
+            # unpack it appropriately. Because our 'args' is a vector (theta),
+            # sol.adjoint_params will also be a vector of the same shape.
+
+            #We need to compute the grads w.r.t y0 and theta, NOT times
+            grad_y0 = jax.grad(lambda y0, theta: sol.evaluate(self.t0, y0=y0, args=theta), argnums=0)(y0, theta).reshape(-1,)
+            grad_theta = sol.adjoint_params[0]
+
+
+            return grad_y0, grad_theta
+        grad_y0, grad_theta = solve_for_grad(y0_col, times, theta, output_gradient)
+
+        return [
+            grad_y0,  # Gradient w.r.t. y0
+            pt.zeros_like(times),  # Gradient w.r.t. times (usually zero)
+            grad_theta,  # Gradient w.r.t. theta
+        ]
 
 def one_compartment_model(t, y, *theta ):
     """
