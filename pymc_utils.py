@@ -202,11 +202,23 @@ class DiffraxODE(pt.Op):
         outputs[0][0] = np.asarray(sol.ys.squeeze(), dtype = "float64")
     def grad(self, inputs, output_gradients):
         (y0, times, theta) = inputs
-        #y0_col = y0.reshape((-1, 1))
-        y0_col = y0
+        y0_col = y0.reshape((-1, 1))
+        #y0_col = y0
         (output_gradient,) = output_gradients
+        print(f"DEBUG (grad): type(y0) = {type(y0)}")
+        print(f"DEBUG (grad): type(times) = {type(times)}")
+        print(f"DEBUG (grad): type(theta) = {type(theta)}")
+        print(f"DEBUG (grad): type(output_gradient) = {type(output_gradient)}")
         def solve_for_grad(y0, times, theta, output_gradient):
+            print(f"DEBUG (solve_for_grad): type(y0) = {type(y0)}")
+            print(f"DEBUG (solve_for_grad): type(times) = {type(times)}")
+            print(f"DEBUG (solve_for_grad): type(theta) = {type(theta)}")
+            print(f"DEBUG (solve_for_grad): type(output_gradient) = {type(output_gradient)}")
+            
             # Use diffeqsolve with BacksolveAdjoint
+            #y0
+            theta = jnp.asarray(theta)
+            y0 = jnp.asarray(y0)
             sol = diffrax.diffeqsolve(
                 self.term,
                 self.solver,

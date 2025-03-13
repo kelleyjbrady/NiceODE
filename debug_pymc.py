@@ -13,6 +13,9 @@ import numpy as np
 from pymc_utils import make_pymc_model
 import pymc as pm
 
+import os
+os.environ["JAX_TRACEBACK_FILTERING"] = "off"
+
 with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     df = jb.load(f)
     
