@@ -15,6 +15,7 @@ from pytensor.graph.op import Apply, Op
 from pytensor.compile.ops import as_op
 from pytensor.tensor.type import TensorType
 import pytensor.tensor as pt
+import pytensor as ptb
 from scipy.integrate import solve_ivp
 import pandas as pd
 
@@ -30,6 +31,13 @@ def debug_print(print_obj, *args ):
 # One-compartment model using diffrax
 def one_compartment_diffrax(t, y, args):
     cl, Vd = args
+    C = y
+    dCdt = -(cl / Vd) * C
+    return dCdt
+
+def one_compartment_diffrax2(t, y, args):
+    (theta,) = args
+    cl, Vd = theta[0], theta[1]
     C = y
     dCdt = -(cl / Vd) * C
     return dCdt
@@ -202,53 +210,44 @@ class DiffraxODE(pt.Op):
         outputs[0][0] = np.asarray(sol.ys.squeeze(), dtype = "float64")
     def grad(self, inputs, output_gradients):
         (y0, times, theta) = inputs
-        y0_col = y0.reshape((-1, 1))
-        #y0_col = y0
         (output_gradient,) = output_gradients
-        print(f"DEBUG (grad): type(y0) = {type(y0)}")
-        print(f"DEBUG (grad): type(times) = {type(times)}")
-        print(f"DEBUG (grad): type(theta) = {type(theta)}")
-        print(f"DEBUG (grad): type(output_gradient) = {type(output_gradient)}")
-        def solve_for_grad(y0, times, theta, output_gradient):
-            print(f"DEBUG (solve_for_grad): type(y0) = {type(y0)}")
-            print(f"DEBUG (solve_for_grad): type(times) = {type(times)}")
-            print(f"DEBUG (solve_for_grad): type(theta) = {type(theta)}")
-            print(f"DEBUG (solve_for_grad): type(output_gradient) = {type(output_gradient)}")
-            
-            # Use diffeqsolve with BacksolveAdjoint
-            #y0
-            theta = jnp.asarray(theta)
-            y0 = jnp.asarray(y0)
-            sol = diffrax.diffeqsolve(
+        return [
+            ptb.gradient.grad_not_implemented(self, 0, y0),
+            ptb.gradient.grad_not_implemented(self, 1, times),
+            ptb.gradient.grad_not_implemented(self, 2, theta),
+        ]
+    def jvp(self, inputs, tangents):
+        (y0, times, theta) = inputs
+        (tangent_y0, tangent_times, tangent_theta) = tangents
+        (output_gradient,) = ([pt.ones_like(self(y0,times,theta))])
+        
+        def jvp_diffrax(y0_arr, times_arr, theta_arr):
+      
+          sol = diffrax.diffeqsolve(
                 self.term,
                 self.solver,
-                t0=times.get_value()[0],
-                t1=times.get_value()[-1],
+                t0=self.t0,
+                t1=times_arr[-1],
                 dt0=None,
-                y0=y0,
-                args=theta,
-                saveat=diffrax.SaveAt(ts=times.get_value()),
-                adjoint=self.adjoint, # Use BacksolveAdjoint
-            )
+                y0=y0_arr,
+                args=theta_arr,
+                saveat=diffrax.SaveAt(ts=times_arr),)
+          return sol.ys.squeeze()
 
-            # The magic:  sol.adjoint_params gives us the gradients!
-            # It's a PyTree representing d(loss)/d(params) -- we have to
-            # unpack it appropriately. Because our 'args' is a vector (theta),
-            # sol.adjoint_params will also be a vector of the same shape.
+        #Make sure our inputs are the correct type for jax
+        y0_arr = jnp.asarray(y0.get_value()).reshape(-1,1)
+        times_arr = jnp.asarray(times.get_value())
+        theta_arr = jnp.asarray(theta)
 
-            #We need to compute the grads w.r.t y0 and theta, NOT times
-            grad_y0 = jax.grad(lambda y0, theta: sol.evaluate(self.t0, y0=y0, args=theta), argnums=0)(y0, theta).reshape(-1,)
-            grad_theta = sol.adjoint_params[0]
+        #Calculate the jacobian of the diffrax solution. This is the VJP
+        fun_of_y0 = lambda y0_arr: jvp_diffrax(y0_arr, times_arr, theta_arr)
+        JVP_y0 = jax.jvp(fun_of_y0, (y0_arr,), (jnp.asarray(tangent_y0.get_value()).reshape(-1,1),))[1]
 
+        fun_of_theta = lambda theta_arr: jvp_diffrax(y0_arr, times_arr, theta_arr)
+        JVP_theta = jax.jvp(fun_of_theta, (theta_arr,), (jnp.asarray(tangent_theta),))[1]
 
-            return grad_y0, grad_theta
-        grad_y0, grad_theta = solve_for_grad(y0_col, times, theta, output_gradient)
-
-        return [
-            grad_y0,  # Gradient w.r.t. y0
-            pt.gradient.grad_not_implemented(self, 1, times),  # Gradient w.r.t. times (usually zero)
-            grad_theta,  # Gradient w.r.t. theta
-        ]
+        output = output_gradient[0,:] @ (JVP_y0 + JVP_theta) # Sum the JVPs
+        return [output]
 
 def one_compartment_model(t, y, *theta ):
     """
@@ -428,6 +427,8 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         subject_data = {}
         thetas = {}
         seen_coeff = []
+        #prepare priors for thetas if they exisit, create pm.Data to hold the 
+        #relevant data for use with the thetas
         for idx, row in model_param_dep_vars.iterrows():
             coeff_name = row['model_coeff']
             
@@ -435,7 +436,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
             if coeff_name not in seen_coeff:
                 thetas[coeff_name] = {}
                 subject_data[coeff_name] = {}
-            thetas[coeff_name].update({theta_name:pm.Normal(f"beta_{coeff_name}_{theta_name}", mu = 0, sigma = 10)})
+            thetas[coeff_name].update({theta_name:pm.Normal(f"theta_{coeff_name}_{theta_name}", mu = 0, sigma = 10)})
             subject_data[coeff_name].update(
                 {theta_name:pm.Data(f"data_{coeff_name}_{theta_name}", pm_subj_df[theta_name].values,
                                         dims = 'subject'
@@ -450,6 +451,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         coeff_intercept_i = {}
         z_coeff = {}
         pm_model_params = []
+        #prepare the PK model parameters and subject level effects if they exisit
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
             coeff_has_subject_intercept = row['subject_level_intercept']
@@ -458,9 +460,10 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
             #while pop_coeff_init == 0:
             #    pop_coeff_init = np.random.rand()
                 
-            #ensure that neither init value is zero, I think that can make the graphviz fail
+            #prior for population coeff
             pop_coeff_sigma = row['init_val'] * .2 if pd.isna(row['sigma']) else row['sigma']
             population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = row['init_val'], sigma = pop_coeff_sigma)
+            #if the ODE parameter (row['model_coeff']) has subject level effects include them in the ODE parameter
             if coeff_has_subject_intercept:
                 coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 3)
                 coeff_intercept_sigma[coeff_name] = pm.HalfNormal(f"{coeff_name}_intercept_sigma", sigma = 10)
@@ -479,9 +482,11 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
 
                 debug_print(f"Shape of coeff_intercept_i[{coeff_name}]: {coeff_intercept_i[coeff_name].shape.eval()}")
                 model_coeff = (population_coeff[coeff_name] + coeff_intercept_i[coeff_name])
+            #if the ODE parameter (row['model_coeff']) DOES NOT have subject level effects
+            #The ODE parameter remainsthe pop_coeff
             else:
                 model_coeff = population_coeff[coeff_name]
-            
+            #if the ODE parameter includes fixed effects, include those
             if coeff_name not in thetas:
                 thetas[coeff_name] = {}
                 subject_data[coeff_name] = {} 
@@ -489,15 +494,16 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 debug_print(f"Shape of model_coeff: {model_coeff.shape.eval()}")
                 debug_print(f"Shape of thetas[{coeff_name}][{theta_name}]: {thetas[coeff_name][theta_name].shape.eval()}")
                 debug_print(f"Shape of pm_subj_df[{theta_name}]: {subject_data[coeff_name][theta_name].shape.eval()}")
-                debug_print(f"Shape of pm_subj_df[{theta_name}][{sub_idx}]: {pm_subj_df[theta_name][sub_idx].shape}")
+                #debug_print(f"Shape of pm_subj_df[{theta_name}][{sub_idx}]: {pm_subj_df[theta_name][sub_idx].shape}")
                 model_coeff = (model_coeff + (thetas[coeff_name][theta_name] * subject_data[coeff_name][theta_name]))
-            
+            #If there are subject effects, the params will have dims = 'subject'
             if coeff_has_subject_intercept:
                 pm_model_params.append(
                     pm.Deterministic(f"{coeff_name}_i",
                                     pm.math.exp(model_coeff),
                                     dims = 'subject' )
                 )
+            #if not, we need to repeat the params n_subject's time
             else:
                 pm_model_params.append(
                     pm.Deterministic(f"{coeff_name}_i",
@@ -530,6 +536,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                     subject_y0 = pt.as_tensor([subject_init_conc[sub_idx]])
                     debug_print(subject_y0[0].shape.eval())
                     subject_model_params = theta_matrix[sub_idx, :]
+                    subject_model_params_alt = pt.stack([param[sub_idx] for param in pm_model_params], axis=1)
                     debug_print(subject_model_params.shape.eval())
                    
                     subject_timepoints = tp_data_vector
@@ -540,7 +547,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                     debug_print(subject_t1.shape.eval())
                     
                     diffrax_op = DiffraxODE(one_compartment_diffrax, )
-                    ode_sol = diffrax_op(subject_y0, subject_timepoints, subject_model_params)
+                    ode_sol = diffrax_op(subject_y0, subject_timepoints, subject_model_params_alt)
                     debug_print(ode_sol.shape)
                     sol.append(ode_sol)
                 sol = pt.concatenate(sol, axis=0).flatten()
