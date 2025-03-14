@@ -965,6 +965,8 @@ def generate_ivp_predictions(optimized_result, df, subject_id_c='SUBJID', dose_c
         predictions[subject] = sol
     return predictions
 
+
+
 class CompartmentalModel(RegressorMixin, BaseEstimator):
 
     def __init__(
@@ -1147,77 +1149,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.dep_vars = deepcopy(self.dep_vars)
         return deepcopy(betas)
 
-    def _pymc_model(self, data):
-        params = self.init_vals
-        self._unpack_validate_params(params)
-
-        
-        
-        with pm.Model() as model:
-            # Priors for population parameters
-            pm_pop_coeff = {}
-            for pop_coeff in self.population_coeff:
-                #k_pop = pm.Normal("k_pop", mu=0, sigma=1)  # Adjust priors as needed
-                #vd_pop = pm.Normal("vd_pop", mu=0, sigma=1)
-                pm_pop_coeff[pop_coeff.coeff_name] = pm.Normal(f"{pop_coeff.coeff_name}_pop", mu=0, sigma=1)
-
-
-            # Model betas (coefficients for dependent variables)
-            pm_betas = {}
-            for model_param in self.dep_vars:
-                pm_betas[model_param] = {}
-                for param_col_obj in self.dep_vars[model_param]:
-                    param_col = param_col_obj.column_name
-                    pm_betas[model_param][param_col] = pm.Normal(f"beta_{model_param}_{param_col}", mu=0, sigma=1)
-
-            # Calculate subject-specific parameters
-            subject_params = {}
-            for subject in data[self.groupby_col].unique():
-                subject_data = data[data[self.groupby_col] == subject].iloc[0]
-                subject_params[subject] = {}
-                for model_param in self.dep_vars:
-                    param_value = subject_params[subject][model_param] = deepcopy(pm_pop_coeff[model_param])
-                    for param_col_obj in self.dep_vars[model_param]:
-                        param_col = param_col_obj.column_name
-                        beta = pm_betas[model_param][param_col]
-                        covariate_value = subject_data[param_col]
-                        param_value += beta * covariate_value
-                
-                    subject_params[subject][model_param] = pm.math.exp(subject_params[subject][model_param]) + 1e-6
-                    #subject_params[subject]['vd'] = pm.math.exp(subject_params[subject]['vd']) + 1e-6
-            
-            # Define the likelihood
-            y_pred = []
-            for subject in data[self.groupby_col].unique():
-                subject_data = data[data[self.groupby_col] == subject]
-                initial_conc = subject_data[self.conc_at_time_col].values[0]
-
-                sol = solve_ivp(self.pk_model_function,
-                                [subject_data[self.time_col].min(), subject_data[self.time_col].max()],
-                                [initial_conc],
-                                t_eval=subject_data[self.time_col],
-                                args=(subject_params[subject]['k'], subject_params[subject]['vd'], 1))
-                
-                y_pred_subject = pm.Normal("y_pred_subject", mu=sol.y[0], sigma=0.1, observed=subject_data[self.conc_at_time_col])
-                y_pred.append(y_pred_subject)
-
-        return model
-
-
-
-    def fit_pymc(self, data, **kwargs):
-        model = self._pymc_model(data)
-        with model:
-            self.trace_ = pm.sample(**kwargs)  # Perform sampling
-            self.idata_ = az.from_pymc3(self.trace_) # Convert to InferenceData object for ArviZ analysis
-
-
-        # Extract posterior means for predictions (example)
-        self.posterior_means_ = {
-            param: self.trace_[param].mean(axis=0) for param in self.trace_.varnames
-        }
-
-        return self
 
     
     def _subject_iterator(self, data):
