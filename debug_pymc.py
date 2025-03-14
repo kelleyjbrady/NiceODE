@@ -59,7 +59,7 @@ sigma_log_approx = model_error / np.mean(no_me_mod.data['DV'])
 model = make_pymc_model(no_me_mod, no_me_mod.subject_data,
                         no_me_mod.data, model_params,  
                         model_param_dep_vars, model_error = sigma_log_approx,
-                        ode_method='diffrax'
+                        ode_method='scipy'
                         )
 make_graph_viz = True
 if make_graph_viz:

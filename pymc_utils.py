@@ -19,6 +19,8 @@ import pytensor as ptb
 from scipy.integrate import solve_ivp
 import pandas as pd
 from typing import List
+from joblib import Parallel, delayed
+from functools import partial
 
 
 
@@ -385,6 +387,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
     all_sub_tp_alt = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'TIME')    
     all_sub_tp = np.tile(all_sub_tp_alt.columns, (len(time_mask_df),1))
     timepoints = np.array(all_sub_tp_alt.columns)
+    n_ode_params = len(model_params)
     
     t1 = model_obj.global_tf
     t0 = model_obj.global_t0 
@@ -570,9 +573,10 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
             filtered_ode_sol = ode_sol[time_mask_data].flatten()
             sol = pm.Deterministic("sol", filtered_ode_sol)
         elif ode_method == 'scipy':
-            bad_solution = False
+            use_pytensor_wrapper = True
+            parallel = False
             #sol = []
-            if bad_solution:
+            if not use_pytensor_wrapper:
                 sol = []
                 for sub_idx, subject in enumerate(coords['subject']):
                     subject_y0 = np.array([subject_init_conc_eval[sub_idx]])
@@ -593,35 +597,59 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 debug_print(sol.shape.eval())
                 sol = pm.Deterministic("sol", sol)
             else:
-
-                sol_alt = []
-                
-                for sub_idx, subject in enumerate(coords['subject']):
-                    subject_y0 = [subject_init_conc[sub_idx]]
-                    debug_print(subject_y0[0].shape.eval())
-                    subject_model_params = theta_matrix[sub_idx, :]
-                    debug_print(subject_model_params.shape.eval())
-                   
-                    subject_timepoints = tp_data_vector
-                    debug_print(subject_timepoints.shape)
-                    subject_t0 = subject_timepoints[ 0]
-                    debug_print(subject_t0.shape.eval())
-                    subject_t1 = subject_timepoints[-1]
-                    debug_print(subject_t1.shape.eval())
-                    fwd_func = generate_subject_ivp_op(
+                if parallel:
+                    def generate_fwd_func_data():
+                        for sub_idx, subject in enumerate(coords['subject']):
+                            subject_y0 = [subject_init_conc[sub_idx]]
+                            debug_print(subject_y0[0].shape.eval())
+                            subject_model_params = theta_matrix[sub_idx, :]
+                            debug_print(subject_model_params.shape.eval())
                         
-                    )
-                    ode_sol = fwd_func(
-                        subject_y0[0],
-                        subject_t0,
-                        subject_t1,
-                        subject_model_params,
-                        subject_timepoints
-                    )
-                    ode_sol = ode_sol.flatten()
-                    sol_alt.append(ode_sol)
-                   
-                    debug_print(ode_sol.shape.eval())
+                            subject_timepoints = tp_data_vector
+                            debug_print(subject_timepoints.shape)
+                            subject_t0 = subject_timepoints[ 0]
+                            debug_print(subject_t0.shape.eval())
+                            subject_t1 = subject_timepoints[-1]
+                            debug_print(subject_t1.shape.eval())
+                            fwd_func = generate_subject_ivp_op()
+                            fwd_func = partial(fwd_func,
+                                subject_y0[0],
+                                subject_t0,
+                                subject_t1,
+                                subject_model_params,
+                                subject_timepoints
+                            )
+                            yield fwd_func
+                    sol = Parallel(n_jobs = 4)(delayed(i)() for i in generate_fwd_func_data())
+                else:
+                    sol_alt = []
+                    
+                    for sub_idx, subject in enumerate(coords['subject']):
+                        subject_y0 = [subject_init_conc[sub_idx]]
+                        debug_print(subject_y0[0].shape.eval())
+                        subject_model_params = theta_matrix[sub_idx, :]
+                        debug_print(subject_model_params.shape.eval())
+                    
+                        subject_timepoints = tp_data_vector
+                        debug_print(subject_timepoints.shape)
+                        subject_t0 = subject_timepoints[ 0]
+                        debug_print(subject_t0.shape.eval())
+                        subject_t1 = subject_timepoints[-1]
+                        debug_print(subject_t1.shape.eval())
+                        fwd_func = generate_subject_ivp_op(
+                            
+                        )
+                        ode_sol = fwd_func(
+                            subject_y0[0],
+                            subject_t0,
+                            subject_t1,
+                            subject_model_params,
+                            subject_timepoints
+                        )
+                        ode_sol = ode_sol.flatten()
+                        sol_alt.append(ode_sol)
+                    
+                        debug_print(ode_sol.shape.eval())
                    
                 sol = pt.concatenate(sol_alt)
                 debug_print(sol.shape.eval())
