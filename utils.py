@@ -1261,10 +1261,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 
         return pop_coeffs, (subject_level_intercept_sds, subject_level_intercept_init_vals)
     
-
-        
-        
-    
     def _assemble_pred_matrices(self, data):
         data = data.reset_index(drop = True).copy()
         self.data = data.copy()
@@ -1366,105 +1362,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if timepoints is None:
             sol = sol[time_mask.flatten()]
         return sol
-
             
-    
-    def _predict_inner(self, data_out):
-        subject_data = data_out['subject_data']
-        initial_conc = data_out['initial_conc']
-        subject_coeff = data_out['subject_coeff']
-        betas = data_out['betas']
-        time_c = data_out['time_c']
-        pk_model_function = data_out['pk_model_function']
-        #conc_at_time_c = data_out['conc_at_time_c']
-        allometric_effects = []
-        for model_param in betas:
-            for param_col in betas[model_param]:
-                param_beta_obj = betas[model_param][param_col]
-                param_beta = param_beta_obj.value
-                param_beta_method = param_beta_obj.model_method
-                param_value = subject_data[param_col].values[0]
-                if param_beta_method == 'linear':
-                    subject_coeff[model_param] = subject_coeff[model_param] + \
-                        (param_beta*param_value)
-                   # subject_coeff_history.append(subject_coeff)
-                elif param_beta_method == 'allometric':
-                    norm_val = param_beta_obj.allometric_norm_value
-                    param_value = 1e-6 if param_value == 0 else param_value
-                    norm_val = 1e-6 if norm_val == 0 else norm_val
-                    allometric_effects.append(
-                        # (param_value/70)**(param_beta)
-                        np.sign(param_value/norm_val) * \
-                        ((np.abs(param_value/norm_val))**param_beta)
-                    )
-            for allometic_effect in allometric_effects:
-                subject_coeff[model_param] = subject_coeff[model_param] * \
-                    allometic_effect
-                #subject_coeff_history.append(subject_coeff)
-        #subject_coeffs_history[subject] = subject_coeff_history
-        subject_coeff = {model_param: np.exp(
-            subject_coeff[model_param]) for model_param in subject_coeff}
-        subject_coeff = np.array([subject_coeff[i] for i in subject_coeff])+1e-6
-        #subject_coeff[subject_coeff < 1e-6] = 1e-6
-        subject_coeff = subject_coeff.tolist()
-
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", RuntimeWarning)
-                sol = solve_ivp(pk_model_function, np.array([subject_data[time_c].min(), subject_data[time_c].max()], dtype = np.float64),
-                            np.array([initial_conc], dtype = np.float64),
-                            t_eval=np.array(subject_data[time_c], dtype = np.float64), args=(*subject_coeff,))
-        except (ZeroDivisionError, RuntimeWarning) as e:
-            self.ivp_error_params_ = {
-            'f':deepcopy(pk_model_function),
-            'tspan': np.array([subject_data[time_c].min(), subject_data[time_c].max()]),
-            'init_conc':np.array([initial_conc]),
-            't_eval':np.array(subject_data[time_c]), 
-            'args': "args=(*subject_coeff,)",
-            'args0':subject_coeff
-            
-            }
-            raise ZeroDivisionError
-        return sol.y[0].astype(np.float64)
-    
-    def _predict_parallel(self, data, parallel_n_jobs = -1):
-        predictions = Parallel(n_jobs=parallel_n_jobs)(delayed(self._predict_inner)(data_out) for data_out in self._subject_iterator(data))
-        return np.concatenate(predictions)
-    
-    
-    
-    def _predict_alt(self, data):
-        predictions = []
-        for subject_data in self._subject_iterator(data):
-            subject_preds = self._predict_inner(subject_data)
-            predictions.extend(subject_preds)
-        return predictions
-            
-    
-    def predict(self, data, parallel = True, parallel_n_jobs = -1, return_df=False):
-        if parallel:
-            predictions = self._predict_parallel(data, parallel_n_jobs=parallel_n_jobs)
-        else:
-            predictions = self._predict_alt(data)
-        if return_df:
-            data['pred_y'] = predictions
-            predictions = data.copy()
-        return predictions
-    # def score(self, y_true, y_pred, sample_weight=None, multioutput='uniform_average', method = mean_squared_error, *kwargs):
-    #    return method(y_true, y_pred, sample_weight, multioutput, *kwargs)
-
-    def _objective_function(self, params, data, parallel = False, parallel_n_jobs = -1):
-        params = np.array(params, dtype = np.float64)
-        self._unpack_validate_params(params)
-        n_pop_coeff = len(self.population_coeff)
-        other_params = params[n_pop_coeff:]
-        _betas = self._populate_model_betas(other_params)
-        #preds = np.concatenate(self._predict_parallel(data = data)) if parallel else self._predict_alt(data=data)
-        preds = self.predict(data, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
-        #residuals = data[self.conc_at_time_col] - preds
-        #sse = np.sum(residuals**2)
-        error = self.no_me_loss_function(data[self.conc_at_time_col], preds, **self.no_me_loss_params)
-        return error
     
     def _objective_function2(self, params, beta_data, subject_level_intercept_init_vals = None,  parallel = None, parallel_n_jobs = None ,):
         #If we do not need to unpack sigma (ie. when the loss is just SSE, MSE, Huber etc)
@@ -1537,26 +1435,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             
         return preds
     
-    def prepare_indiv_params(self, data,):
-        pop_coeffs, omegas, betas, beta_data = self._assemble_pred_matrices(data)
-        if self.n_subject_level_intercept_sds > 0:
-            #remove sigma from pop_coeffs if it is there
-            keep_cols = list(pop_coeffs.columns[:-1])
-            pop_coeffs = pop_coeffs[keep_cols]
-        init_params = pop_coeffs.values
-        if len(betas.values) > 0:
-            init_params.append(betas.values)
-        init_params = np.concatenate(init_params, axis = 1, dtype=np.float64).flatten()
-        return init_params, beta_data
-    
-    def fit_indiv(self, data):
-        init_params, beta_data = self.prepare_indiv_params(data)
-        fits = []
-        for idx, row in beta_data.iterrows():
-            fits.append()
-            
-        
-    
     def fit2(self, data, parallel = False, parallel_n_jobs = -1 , n_iters_per_checkpoint = 5, warm_start = False, checkpoint_filename='check_test.jb', ):
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data)
         subject_level_intercept_init_vals = self.subject_level_intercept_init_vals
@@ -1588,61 +1466,4 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         #after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
         if len(omegas.values) > 0:
             _ = self.predict2(data, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
-        return deepcopy(self)
-    
-
-    #def fit_result():
-
-
-    def fit(self, data, parallel = False, parallel_n_jobs = -1 , warm_start = False, checkpoint_filename='check_test.jb'):
-        # bounds = [(None, None) for i in range(len(self.dep_vars) + len(self.population_coeff))]
-        
-        objective_function = partial(self._objective_function, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
-        self.fit_result_ = optimize_with_checkpoint_joblib(objective_function,
-                                                           self.init_vals,
-                                                           n_checkpoint=5,
-                                                           checkpoint_filename=checkpoint_filename,
-                                                           args=(data,),
-                                                           warm_start=warm_start,
-                                                           tol = self.optimzer_tol,
-                                                           bounds=self.bounds
-                                                           )
-        res_df = []
-        written_indep_var_rows = 0
-        for idx, model_coeff_obj in enumerate(self.population_coeff):
-            fit_res_0 = self.fit_result_['x'][idx]
-            fit_res_1 = model_coeff_obj.optimization_history[-1]
-            # assert fit_res_0 == fit_res_1
-            res_df.append(
-                {
-                    'population_coeff': True,
-                    'model_coeff': model_coeff_obj.coeff_name,
-                    'model_coeff_indep_var': None,
-                    'log_coeff': fit_res_0,
-                    'log_coeff_history_final': fit_res_1,
-                    'coeff_estimates_equal': fit_res_0 == fit_res_1,
-                    'coeff': np.exp(fit_res_0)
-                }
-            )
-            written_indep_var_rows = written_indep_var_rows + 1
-
-        for idx, model_coeff_name in enumerate(self.dep_vars):
-            coeff_indep_vars = self.dep_vars[model_coeff_name]
-            for indep_var_obj in coeff_indep_vars:
-                fit_res_0 = self.fit_result_['x'][written_indep_var_rows]
-                fit_res_1 = indep_var_obj.optimization_history[-1]
-                # assert fit_res_0 == fit_res_1
-                res_df.append({
-                    'population_coeff': False,
-                    'model_coeff': model_coeff_name,
-                    'model_coeff_indep_var': indep_var_obj.column_name,
-                    'log_coeff': fit_res_0,
-                    'log_coeff_history_final': fit_res_1,
-                    'coeff_estimates_equal': fit_res_0 == fit_res_1,
-                    'coeff': np.exp(fit_res_0)
-                }
-                )
-                written_indep_var_rows = written_indep_var_rows + 1
-        self.fit_result_summary_ = pd.DataFrame(res_df)
-
         return deepcopy(self)
