@@ -21,6 +21,7 @@ import pandas as pd
 from typing import List
 from joblib import Parallel, delayed
 from functools import partial
+from pytensor import scan
 
 
 
@@ -574,7 +575,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
             sol = pm.Deterministic("sol", filtered_ode_sol)
         elif ode_method == 'scipy':
             use_pytensor_wrapper = True
-            parallel = False
+            use_pytensor_scan = True
             #sol = []
             if not use_pytensor_wrapper:
                 sol = []
@@ -597,33 +598,73 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 debug_print(sol.shape.eval())
                 sol = pm.Deterministic("sol", sol)
             else:
-                if parallel:
-                    def generate_fwd_func_data():
-                        for sub_idx, subject in enumerate(coords['subject']):
-                            subject_y0 = [subject_init_conc[sub_idx]]
-                            debug_print(subject_y0[0].shape.eval())
-                            subject_model_params = theta_matrix[sub_idx, :]
-                            debug_print(subject_model_params.shape.eval())
+                if use_pytensor_scan:
+                    def solve_ode_for_all_subjects(coords, subject_init_conc, theta_matrix, tp_data_vector, generate_subject_ivp_op, debug_print):
+                        """
+                        Computes solutions to an ODE for each subject in a dataset using pytensor.scan.
+
+                        Args:
+                            coords: Dictionary containing coordinate information, including 'subject'.
+                            subject_init_conc: Initial concentrations for each subject.
+                            theta_matrix: Matrix of model parameters for each subject.
+                            tp_data_vector: Vector of timepoints.
+                            generate_subject_ivp_op: Function to generate the ODE solver operation.
+                            debug_print:  A function for debugging (likely a wrapper around print that works within the PyTensor graph)
+
+                        Returns:
+                            A PyTensor tensor containing the concatenated ODE solutions for all subjects.
+                        """
+                        # Generate the ODE solver *outside* the scan loop.  This is crucial for performance
+                        # as it avoids re-creating the operation on each iteration.
                         
+                        fwd_func = generate_subject_ivp_op()
+                        
+                        def solve_for_one_subject(sub_idx, subject_init_conc, theta_matrix, tp_data_vector,):
+                            """
+                            Inner function for solving the ODE for a single subject.  This is the
+                            function that will be iterated over by scan.
+                            """
+                            subject_y0 = subject_init_conc[sub_idx]
+                            subject_model_params = theta_matrix[sub_idx, :]
                             subject_timepoints = tp_data_vector
-                            debug_print(subject_timepoints.shape)
-                            subject_t0 = subject_timepoints[ 0]
-                            debug_print(subject_t0.shape.eval())
+                            subject_t0 = subject_timepoints[0]
                             subject_t1 = subject_timepoints[-1]
-                            debug_print(subject_t1.shape.eval())
-                            fwd_func = generate_subject_ivp_op()
-                            fwd_func = partial(fwd_func,
-                                subject_y0[0],
+
+                            ode_sol = fwd_func(
+                                subject_y0,
                                 subject_t0,
                                 subject_t1,
                                 subject_model_params,
                                 subject_timepoints
                             )
-                            yield fwd_func
-                    sol = Parallel(n_jobs = 4)(delayed(i)() for i in generate_fwd_func_data())
+                            return ode_sol.flatten()  # Ensure the output is 1D                       
+
+                        # Use pytensor.scan to parallelize the loop
+                        results, updates = scan(
+                            fn=solve_for_one_subject,
+                            outputs_info=None,  #  ode_sol does not depend on previous iterations
+                            sequences=pt.arange(len(coords['subject'])), # Iterate over subject indices
+                            non_sequences=[subject_init_conc, theta_matrix, tp_data_vector,]  # Arguments that are the same for all iterations
+                        )
+                        
+                        # 'results' is a list/tensor containing the output of 'solve_for_one_subject'
+                        # for each subject. Concatenate them.
+                        sol = pt.flatten(results)
+
+                        return sol
+                    sol = solve_ode_for_all_subjects(
+                        coords,
+                        subject_init_conc,
+                        theta_matrix,
+                        tp_data_vector,
+                        generate_subject_ivp_op,
+                        debug_print
+                    )
+
                 else:
                     sol_alt = []
-                    
+                    fwd_func = generate_subject_ivp_op(   
+                        )
                     for sub_idx, subject in enumerate(coords['subject']):
                         subject_y0 = [subject_init_conc[sub_idx]]
                         debug_print(subject_y0[0].shape.eval())
@@ -636,9 +677,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                         debug_print(subject_t0.shape.eval())
                         subject_t1 = subject_timepoints[-1]
                         debug_print(subject_t1.shape.eval())
-                        fwd_func = generate_subject_ivp_op(
-                            
-                        )
+                        
                         ode_sol = fwd_func(
                             subject_y0[0],
                             subject_t0,
@@ -651,7 +690,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                     
                         debug_print(ode_sol.shape.eval())
                    
-                sol = pt.concatenate(sol_alt)
+                    sol = pt.concatenate(sol_alt)
                 debug_print(sol.shape.eval())
                 time_mask_data_f = time_mask_data.flatten()
                 
@@ -662,7 +701,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                     
         model_error = 1 if model_error is None else model_error
         sigma_obs = pm.HalfNormal("sigma_obs", sigma=model_error)
-        debug_print("Shape of ode_sol (in PyMC model):", ode_sol.shape)
+        #debug_print("Shape of ode_sol (in PyMC model):", ode_sol.shape)
         # or
         #Something is
         #debug_print("Shape of ode_sol (in PyMC model):", pt.shape(ode_sol).eval())
