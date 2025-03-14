@@ -46,8 +46,15 @@ me_mod_fo =  CompartmentalModel(
                          ],
           dep_vars= None, 
                                    no_me_loss_function=sum_of_squares_loss, 
+                                   no_me_loss_needs_sigma=False,
                                    optimizer_tol=None, 
                                    pk_model_function=first_order_one_compartment_model2, 
+                                   model_error_sigma=PopulationCoeffcient('sigma'
+                                                                          ,log_transform_init_val=False
+                                                                          , optimization_init_val=.5
+                                                                          ,optimization_lower_bound=0.000001
+                                                                          ,optimization_upper_bound=5
+                                                                          ),
                                    #ode_solver_method='BDF'
                                    )
 
@@ -80,7 +87,9 @@ me_mod_foce =  CompartmentalModel(
                                    #optimizer_tol=.00001, 
                                    pk_model_function=first_order_one_compartment_model2, 
                                    me_loss_function=FOCE_approx_ll_loss, 
-                                   me_model_error=PopulationCoeffcient('sigma', .18, optimization_lower_bound=.001, 
+                                   model_error_sigma=PopulationCoeffcient('sigma', .18
+                                                                       ,log_transform_init_val=False
+                                                                       , optimization_lower_bound=.001, 
                                                                        optimization_upper_bound=4
                                                                        )
                                    #ode_solver_method='BDF'

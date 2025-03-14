@@ -30,7 +30,7 @@ import warnings
 from tqdm import tqdm
 import numdifftools as nd
 
-def debug_print(print_obj, debug = True):
+def debug_print(print_obj, debug = False):
     if debug:
         if isinstance(print_obj, str):
             print(print_obj)
@@ -489,8 +489,8 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
             
 
 
-def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None,tqdm_bi = True,debug = True,debug_print =debug_print, **kwargs):
-    debug_print = partial(debug_print, debug = debug)
+def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None,tqdm_bi = False,debug = None,debug_print =debug_print, **kwargs):
+
     debug_print('Objective Call Start')
     y = np.copy(model_obj.y)
     y_groups_idx = np.copy(model_obj.y_groups)
