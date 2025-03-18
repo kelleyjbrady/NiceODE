@@ -132,6 +132,7 @@ class PopulationCoeffcient:
     optimization_lower_bound: np.float64 = None
     optimization_upper_bound: np.float64 = None
     subject_level_intercept:bool = False
+    subject_level_intercept_sd_name:str = None
     subject_level_intercept_sd_init_val:np.float64 = None #this is on the log scale, but the opt inti val is not, confusing
     subject_level_intercept_sd_lower_bound:np.float64 = None
     subject_level_intercept_sd_upper_bound:np.float64 = None
@@ -149,6 +150,9 @@ class PopulationCoeffcient:
         
         c1 = self.subject_level_intercept_sd_init_val is None
         c2 = self.subject_level_intercept
+        c3 = self.subject_level_intercept_sd_name is None
+        if c2 and c3:
+            self.subject_level_intercept_sd_name = f'omega2_{self.coeff_name}'
         if c1 and c2:
             self.subject_level_intercept_sd_init_val = np.random.rand() + 1e-6
         
@@ -1044,21 +1048,44 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         init_vals = [
             obj.optimization_init_val for obj in self.population_coeff]
         init_vals_pd = []
+        subject_intercept_detected = False
         for pop_coeff in self.population_coeff:
+            if pop_coeff.subject_level_intercept:
+                subject_intercept_detected = True
             init_vals_pd.append({
                 'model_coeff': pop_coeff.coeff_name,
                 'model_coeff_dep_var':None,
-                'population_coeff':True, 
+                'population_coeff':True,
+                'model_error':False,
                 'init_val':pop_coeff.optimization_init_val,
                 'model_coeff_lower_bound':pop_coeff.optimization_lower_bound,
                 'model_coeff_upper_bound':pop_coeff.optimization_upper_bound,
                 'allometric':False,
                 'allometric_norm_value':None,
-                'subject_level_intercept':pop_coeff.subject_level_intercept, 
+                'subject_level_intercept':pop_coeff.subject_level_intercept,
+                'subject_level_intercept_name': pop_coeff.subject_level_intercept_sd_name,
                 'subject_level_intercept_sd_init_val':pop_coeff.subject_level_intercept_sd_init_val,
                 'subject_level_intercept_init_vals_column_name':pop_coeff.subject_level_intercept_init_vals_column_name,
                 'subject_level_intercect_sd_lower_bound':pop_coeff.subject_level_intercept_sd_lower_bound,
                 'subject_level_intercect_sd_upper_bound':pop_coeff.subject_level_intercept_sd_upper_bound,
+            })
+        if subject_intercept_detected or self.no_me_loss_needs_sigma:
+            init_vals_pd.append({
+                'model_coeff': self.model_error_sigma.coeff_name,
+                'model_coeff_dep_var':None,
+                'population_coeff':False, 
+                'model_error':True,
+                'init_val':self.model_error_sigma.optimization_init_val,
+                'model_coeff_lower_bound':self.model_error_sigma.optimization_lower_bound,
+                'model_coeff_upper_bound':self.model_error_sigma.optimization_upper_bound,
+                'allometric':False,
+                'allometric_norm_value':None,
+                'subject_level_intercept':self.model_error_sigma.subject_level_intercept,
+                'subject_level_intercept_name': self.model_error_sigma.subject_level_intercept_sd_name,
+                'subject_level_intercept_sd_init_val':self.model_error_sigma.subject_level_intercept_sd_init_val,
+                'subject_level_intercept_init_vals_column_name':self.model_error_sigma.subject_level_intercept_init_vals_column_name,
+                'subject_level_intercect_sd_lower_bound':self.model_error_sigma.subject_level_intercept_sd_lower_bound,
+                'subject_level_intercect_sd_upper_bound':self.model_error_sigma.subject_level_intercept_sd_upper_bound,
             })
         #unpack the dep vars for the population coeffs
         for model_coeff in self.dep_vars:
@@ -1070,12 +1097,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     'model_coeff': model_coeff,
                     'model_coeff_dep_var': coeff_dep_var.column_name,
                     'population_coeff':False, 
+                    'model_error':False,
                     'init_val':coeff_dep_var.optimization_init_val,
                     'model_coeff_lower_bound':coeff_dep_var.optimization_lower_bound,
                     'model_coeff_upper_bound':coeff_dep_var.optimization_upper_bound,
                     'allometric': True if coeff_dep_var.model_method == 'allometric' else False,
                     'allometric_norm_value':coeff_dep_var.allometric_norm_value, 
                     'subject_level_intercept':False, 
+                    'subject_level_intercept_name': None,
                     'subject_level_intercept_sd_init_val':False,
                     'subject_level_intercept_init_vals_column_name':None,
                     'subject_level_intercect_var_lower_bound':None,
@@ -1253,7 +1282,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         sigma_case_1 = len(subject_level_intercept_sds.columns) > 0
         sigma_case_2 = self.no_me_loss_needs_sigma
         if sigma_case_1 or sigma_case_2:
-            coeff_name = 'sigma2'
+            coeff_name = self.model_error_sigma.coeff_name
             if coeff_name not in pop_coeffs.columns:
                 pop_coeffs[coeff_name] = [np.nan]
                 pop_coeffs[coeff_name] = pop_coeffs[coeff_name].astype(pd.Float64Dtype())
@@ -1283,7 +1312,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         init_vals['init_val'] = init_vals['init_val'].fillna(0.0)
         model_params = init_vals.loc[init_vals['population_coeff'], :]
         self.n_population_coeff = len(model_params)
-        model_param_dep_vars = init_vals.loc[init_vals['population_coeff'] == False, :]
+        model_param_dep_vars = init_vals.loc[(init_vals['population_coeff'] == False)
+                                             & (init_vals['model_error'] == False)
+                                             , :]
         self._homongenize_timepoints(data, subject_id_c, time_col)
         thetas, theta_data = self._unpack_prepare_thetas(model_param_dep_vars, subject_data)
         pop_coeffs, subject_level_intercept_info = self._unpack_prepare_pop_coeffs(model_params)
