@@ -12,39 +12,47 @@ from diffeqs import(
 import numpy as np
 from pymc_utils import make_pymc_model
 import pymc as pm
+from datetime import datetime
 
 import os
 os.environ["JAX_TRACEBACK_FILTERING"] = "off"
 
+now_str = datetime.now().strftime("%d%m%Y-%H%M%S")
 with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     df = jb.load(f)
-    
-    
-no_me_mod =  CompartmentalModel(
-     ode_t0_cols=[ODEInitVals('DV')],
-     population_coeff=[PopulationCoeffcient('cl', 15,
-                                            subject_level_intercept=True, 
-                                            subject_level_intercept_sd_init_val = 0.2, 
-                                            subject_level_intercept_sd_lower_bound=1e-6
-                                            ),
-                       PopulationCoeffcient('vd', 45
-                                            , optimization_lower_bound = np.log(35)
-                                            , optimization_upper_bound = np.log(55)
-                                            ),
-                       ],
-     dep_vars= None, 
-     model_error_sigma=PopulationCoeffcient('sigma',
-                                            log_transform_init_val=False,
-                                            optimization_init_val=.5, 
-                                            optimization_lower_bound=0.000001, 
-                                            optimization_upper_bound=20),
-                              no_me_loss_function=neg2_log_likelihood_loss, 
-                              optimizer_tol=None, 
-                              pk_model_function=first_order_one_compartment_model2, 
-                              #ode_solver_method='BDF'
-                              )
+fit_model = True   
 
-no_me_mod = no_me_mod.fit2(df,checkpoint_filename=f'mod_abs_test_nome.jb', parallel=False, parallel_n_jobs=4)
+if fit_model:    
+    no_me_mod =  CompartmentalModel(
+        ode_t0_cols=[ODEInitVals('DV')],
+        population_coeff=[PopulationCoeffcient('cl', 15,
+                                                subject_level_intercept=True, 
+                                                subject_level_intercept_sd_init_val = 0.2, 
+                                                subject_level_intercept_sd_lower_bound=1e-6
+                                                ),
+                        PopulationCoeffcient('vd', 45
+                                                , optimization_lower_bound = np.log(35)
+                                                , optimization_upper_bound = np.log(55)
+                                                ),
+                        ],
+        dep_vars= None, 
+        model_error_sigma=PopulationCoeffcient('sigma',
+                                                log_transform_init_val=False,
+                                                optimization_init_val=.5, 
+                                                optimization_lower_bound=0.000001, 
+                                                optimization_upper_bound=20),
+                                no_me_loss_function=neg2_log_likelihood_loss, 
+                                optimizer_tol=None, 
+                                pk_model_function=first_order_one_compartment_model2, 
+                                #ode_solver_method='BDF'
+                                )
+
+    no_me_mod = no_me_mod.fit2(df,checkpoint_filename=f'logs/debug_pymc_me_check_{now_str}.jb', parallel=False, parallel_n_jobs=4)
+    with open(f'logs/no_me_mod_test_{now_str}.jb', 'wb') as f:
+        jb.dump(no_me_mod, f)
+else:
+    with open(f'logs/no_me_mod_test_{now_str}.jb', 'rb') as f:
+        no_me_mod = jb.load(f)
 
 coords = {'subject':list(no_me_mod.subject_data['SUBJID'].values), 
           'obs_id': list(no_me_mod.data.index.values)
