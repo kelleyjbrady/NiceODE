@@ -1,3 +1,4 @@
+#%%
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -20,9 +21,15 @@ os.environ["JAX_TRACEBACK_FILTERING"] = "off"
 now_str = datetime.now().strftime("%d%m%Y-%H%M%S")
 with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     df = jb.load(f)
-fit_model = True   
+base_p = "/workspaces/miniconda/PK-Analysis"
+logs_path = os.path.join(base_p, 'logs')
+if not os.path.exists(logs_path):
+    os.makedirs(logs_path)
 
-if fit_model:    
+
+fit_model = True
+if fit_model:
+    dump_path = os.path.join(logs_path, f'no_me_mod_test_debug_obj_{now_str}.jb')
     no_me_mod =  CompartmentalModel(
         ode_t0_cols=[ODEInitVals('DV')],
         population_coeff=[PopulationCoeffcient('cl', 15,
@@ -46,14 +53,17 @@ if fit_model:
                                 pk_model_function=first_order_one_compartment_model2, 
                                 #ode_solver_method='BDF'
                                 )
-
-    no_me_mod = no_me_mod.fit2(df,checkpoint_filename=f'logs/debug_pymc_me_check_{now_str}.jb', parallel=False, parallel_n_jobs=4)
-    with open(f'logs/no_me_mod_test_{now_str}.jb', 'wb') as f:
+    write_path = os.path.join(logs_path, f'no_me_mod_test_opt_log_{now_str}.jb')
+    no_me_mod = no_me_mod.fit2(df,checkpoint_filename=write_path, parallel=False, parallel_n_jobs=4)
+    
+    with open(dump_path, 'wb') as f:
         jb.dump(no_me_mod, f)
 else:
-    with open(f'logs/no_me_mod_test_{now_str}.jb', 'rb') as f:
+    debug_obj_v = '18032025-142607' 
+    dump_path = os.path.join(logs_path, f'no_me_mod_test_debug_obj_{debug_obj_v}.jb')
+    with open(dump_path, 'rb') as f:
         no_me_mod = jb.load(f)
-
+#%%
 coords = {'subject':list(no_me_mod.subject_data['SUBJID'].values), 
           'obs_id': list(no_me_mod.data.index.values)
           }
@@ -62,6 +72,7 @@ model_params = init_summary.loc[init_summary['population_coeff'], :]
 model_param_dep_vars = init_summary.loc[init_summary['population_coeff'] == False, :]
 
 best_fit_df = no_me_mod.fit_result_summary_.reset_index().rename(columns = {'index':'model_coeff', 0:'best_fit_param_val'})
+#%%
 model_params = model_params.merge(best_fit_df, how = 'left', on = 'model_coeff')
 model_params['init_val'] = model_params['best_fit_param_val'].copy()
 

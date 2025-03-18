@@ -1439,13 +1439,22 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data)
         subject_level_intercept_init_vals = self.subject_level_intercept_init_vals
         init_params = [pop_coeffs.values,] #pop coeffs already includes sigma if needed, this is confusing
-        param_names = list(pop_coeffs.columns)
+        param_names = [{'model_coeff':c,
+                        'model_coeff_dep_var':None,
+                        'me_sd_name':None
+                        } for c in pop_coeffs.columns]
         if len(omegas.values) > 0:
             init_params.append(omegas.values)
-            param_names.append(omegas.columns)
+            param_names.extend([{'model_coeff':c_tuple[0],
+                                 'model_coeff_dep_var':None,
+                                 'me_sd_name':c_tuple[1]
+                                 } for c_tuple in omegas.columns.to_list()])
         if len(thetas.values) > 0:
             init_params.append(thetas.values)
-            param_names.append(thetas.columns)
+            param_names.extend([{'model_coeff':c_tuple[0],
+                                 'model_coeff_dep_var':c_tuple[1],
+                                 'me_sd_name':None
+                                 } for c_tuple in thetas.columns.to_list()])
         init_params = np.concatenate(init_params, axis = 1, dtype=np.float64).flatten()
         
         objective_function = partial(self._objective_function2,
@@ -1462,7 +1471,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                            bounds=self.bounds
                                                            )
         #hess_fun = nd.Hessian()
-        self.fit_result_summary_ = pd.Series(self.fit_result_.x, index = param_names, dtype = pd.Float64Dtype())
+        fit_result_summary = pd.DataFrame(param_names, )
+        fit_result_summary['best_fit_param_val'] = pd.NA
+        fit_result_summary['best_fit_param_val'] = fit_result_summary['best_fit_param_val'].astype(pd.Float64Dtype())
+        fit_result_summary['best_fit_param_val'] = self.fit_result_.x
+        self.fit_result_summary_ = fit_result_summary.copy()
         #after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
         if len(omegas.values) > 0:
             _ = self.predict2(data, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
