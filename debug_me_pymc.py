@@ -23,7 +23,9 @@ with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
 no_me_mod =  CompartmentalModel(
      ode_t0_cols=[ODEInitVals('DV')],
      population_coeff=[PopulationCoeffcient('cl', 15,
-                                            
+                                            subject_level_intercept=True, 
+                                            subject_level_intercept_sd_init_val = 0.2, 
+                                            subject_level_intercept_sd_lower_bound=1e-6
                                             ),
                        PopulationCoeffcient('vd', 45
                                             , optimization_lower_bound = np.log(35)
@@ -33,7 +35,7 @@ no_me_mod =  CompartmentalModel(
      dep_vars= None, 
      model_error_sigma=PopulationCoeffcient('sigma',
                                             log_transform_init_val=False,
-                                            optimization_init_val=4, 
+                                            optimization_init_val=.5, 
                                             optimization_lower_bound=0.000001, 
                                             optimization_upper_bound=20),
                               no_me_loss_function=neg2_log_likelihood_loss, 
