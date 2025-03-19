@@ -130,7 +130,7 @@ total_draws = 10000
 draws = np.round(total_draws/chains, 0).astype(int)
 with model:
     #trace_DEMZ = pm.sample(step=[pm.DEMetropolisZ(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains,)
-    trace_NUTS = pm.sample(step=[pm.NUTS(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains, nuts_sampler='blackjax')
+    trace_NUTS = pm.sample(step=[pm.NUTS(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains, )
     #trace_bj_nuts = pm.sampling.jax.sample_blackjax_nuts(tune = tune,
     #                                                     draws = draws, chains=chains,
     #                                                     chain_method='vectorized')

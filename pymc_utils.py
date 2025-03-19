@@ -489,12 +489,12 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 
             #prior for population coeff
             pop_coeff_sigma = row['init_val'] * .2 if pd.isna(row['sigma']) else row['sigma']
-            population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = row['init_val'], sigma = pop_coeff_sigma)
+            population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = row['init_val'], sigma = pop_coeff_sigma, initval=row['init_val'])
             #if the ODE parameter (row['model_coeff']) has subject level effects include them in the ODE parameter
             if coeff_has_subject_intercept:
                 coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 3)
                 coeff_intercept_sigma[coeff_name] = pm.HalfNormal(f"{coeff_name}_intercept_sigma",
-                                                                  sigma = row['subject_level_intercept_sd_init_val'] )
+                                                                  sigma = row['subject_level_intercept_sd_init_val'], initval= row['subject_level_intercept_sd_init_val'])
                         # Non-centered subject-level deviations (standard normal prior)
                 z_coeff[coeff_name] = pm.Normal(
                     f"z_{coeff_name}", mu=0, sigma=1, dims="subject"
