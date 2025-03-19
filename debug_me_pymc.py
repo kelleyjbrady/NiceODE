@@ -27,7 +27,7 @@ if not os.path.exists(logs_path):
     os.makedirs(logs_path)
 
 
-fit_model = True
+fit_model = False
 if fit_model:
     dump_path = os.path.join(logs_path, f'no_me_mod_test_debug_obj_{now_str}.jb')
     no_me_mod =  CompartmentalModel(
@@ -59,7 +59,7 @@ if fit_model:
     with open(dump_path, 'wb') as f:
         jb.dump(no_me_mod, f)
 else:
-    debug_obj_v = '18032025-142607' 
+    debug_obj_v = '19032025-201026' 
     dump_path = os.path.join(logs_path, f'no_me_mod_test_debug_obj_{debug_obj_v}.jb')
     with open(dump_path, 'rb') as f:
         no_me_mod = jb.load(f)
@@ -114,7 +114,7 @@ sigma_log_approx = model_error / np.mean(no_me_mod.data['DV'])
 model = make_pymc_model(no_me_mod, no_me_mod.subject_data,
                         no_me_mod.data, model_params,  
                         model_param_dep_vars, model_error = sigma_log_approx,
-                        ode_method='pymc')
+                        ode_method='icomo')
 #%%                       
 make_graph_viz = True
 if make_graph_viz:
@@ -124,10 +124,14 @@ if make_graph_viz:
 vars_list = list(model.values_to_rvs.keys())[:-1]
 
 #sampler = "DEMetropolisZ"
-chains = 4
+chains = 1
 tune = 10000
 total_draws = 10000
 draws = np.round(total_draws/chains, 0).astype(int)
 with model:
-    trace_DEMZ = pm.sample(step=[pm.DEMetropolisZ(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains,)
-    #trace_NUTS = pm.sample(step=[pm.NUTS(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains)
+    #trace_DEMZ = pm.sample(step=[pm.DEMetropolisZ(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains,)
+    trace_NUTS = pm.sample(step=[pm.NUTS(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains, nuts_sampler='blackjax')
+    #trace_bj_nuts = pm.sampling.jax.sample_blackjax_nuts(tune = tune,
+    #                                                     draws = draws, chains=chains,
+    #                                                     chain_method='vectorized')
+# %%
