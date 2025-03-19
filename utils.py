@@ -1469,22 +1469,49 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     def fit2(self, data, parallel = False, parallel_n_jobs = -1 , n_iters_per_checkpoint = 5, warm_start = False, checkpoint_filename='check_test.jb', ):
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data)
         subject_level_intercept_init_vals = self.subject_level_intercept_init_vals
+        sigma_check_1 = len(omegas.values) > 0
+        sigma_check_2 = self.no_me_loss_needs_sigma
+        if sigma_check_1 or sigma_check_2:
+            sigma = pop_coeffs.iloc[:, [-1]]
+            pop_coeffs = pop_coeffs.iloc[:, :-1]
         init_params = [pop_coeffs.values,] #pop coeffs already includes sigma if needed, this is confusing
         param_names = [{'model_coeff':c,
+                        'population_coeff':True, 
+                        'model_error':False,
+                        'subject_level_intercept':False, 
+                        'coeff_dep_var':False, 
                         'model_coeff_dep_var':None,
-                        'me_sd_name':None
+                        'subject_level_intercept_name':None
                         } for c in pop_coeffs.columns]
+        if sigma_check_1 or sigma_check_2:
+            init_params.append(sigma.values.reshape(1,-1))
+            param_names.extend([{'model_coeff':c,
+                                 'population_coeff':False, 
+                                'model_error':True,
+                                'subject_level_intercept':False, 
+                                'coeff_dep_var':False, 
+                                 'model_coeff_dep_var':None,
+                                 'subject_level_intercept_name':None
+                                 } for c in sigma.columns])
         if len(omegas.values) > 0:
             init_params.append(omegas.values)
             param_names.extend([{'model_coeff':c_tuple[0],
+                                 'population_coeff':False, 
+                                'model_error':False,
+                                'subject_level_intercept':True, 
+                                'coeff_dep_var':False, 
                                  'model_coeff_dep_var':None,
-                                 'me_sd_name':c_tuple[1]
+                                 'subject_level_intercept_name':c_tuple[1]
                                  } for c_tuple in omegas.columns.to_list()])
         if len(thetas.values) > 0:
             init_params.append(thetas.values)
             param_names.extend([{'model_coeff':c_tuple[0],
+                                 'population_coeff':False, 
+                                'model_error':False,
+                                'subject_level_intercept':False, 
+                                'coeff_dep_var':True, 
                                  'model_coeff_dep_var':c_tuple[1],
-                                 'me_sd_name':None
+                                 'subject_level_intercept_name':None
                                  } for c_tuple in thetas.columns.to_list()])
         init_params = np.concatenate(init_params, axis = 1, dtype=np.float64).flatten()
         

@@ -69,37 +69,65 @@ coords = {'subject':list(no_me_mod.subject_data['SUBJID'].values),
           }
 init_summary = no_me_mod.init_vals_pd.copy()
 model_params = init_summary.loc[init_summary['population_coeff'], :]
-model_param_dep_vars = init_summary.loc[init_summary['population_coeff'] == False, :]
-
-best_fit_df = no_me_mod.fit_result_summary_.reset_index().rename(columns = {'index':'model_coeff', 0:'best_fit_param_val'})
+model_param_dep_vars = init_summary.loc[(init_summary['population_coeff'] == False)
+                                             & (init_summary['model_error'] == False), :]
+model_error = init_summary.loc[init_summary['model_error'], :]
 #%%
-model_params = model_params.merge(best_fit_df, how = 'left', on = 'model_coeff')
-model_params['init_val'] = model_params['best_fit_param_val'].copy()
+best_fit_df = no_me_mod.fit_result_summary_.reset_index().copy()
+#%%
+pop_coeff_f1 = best_fit_df['population_coeff']
 
+best_model_params = best_fit_df.loc[pop_coeff_f1, 
+                                    ['model_coeff', 'best_fit_param_val']]
+model_params = model_params.merge(best_model_params, how = 'left', on = 'model_coeff')
+model_params['init_val'] = model_params['best_fit_param_val'].copy()
 #Assume 20% CV for a nice wide but informative prior 
 model_params['sigma'] = np.log(np.exp(model_params['init_val']) * .2)
+#%%
+b_i_approx = no_me_mod.b_i_approx
+b_i_approx.columns = [i[0] for i in b_i_approx.columns.to_flat_index()]
+np.exp(np.mean(np.exp(b_i_approx), axis = 1))
+best_me_params = best_fit_df.loc[best_fit_df['subject_level_intercept']]
+best_me_params = best_me_params.rename(columns = {'best_fit_param_val':'best_fit_param_val_me'})
+best_me_params = best_me_params[['model_coeff',
+                                 'subject_level_intercept_name',
+                                 'best_fit_param_val_me']]
+model_params = model_params.merge(best_me_params,
+                                  how = 'left',
+                                  on = ['model_coeff',
+                                        'subject_level_intercept_name'])
+model_params['subject_level_intercept_sd_init_val'] = model_params['best_fit_param_val_me'].copy()
+#Assume 20% CV for a nice wide but informative prior
+tmp_c = 'subject_level_intercept_sd_init_val'
+model_params['sigma_subject_level_intercept_sd_init_val'] = np.log(np.exp(model_params[tmp_c]) * .2
+                                                                   
+                                                                   )
+#%%
 
-model_error = best_fit_df.loc[best_fit_df['model_coeff'] == 'sigma2'
+
+model_error = best_fit_df.loc[best_fit_df['model_error']
                               , 'best_fit_param_val'].to_numpy()[0]
 
+#find a nice reference for this approxmiation
 sigma_log_approx = model_error / np.mean(no_me_mod.data['DV'])
+
 model = make_pymc_model(no_me_mod, no_me_mod.subject_data,
                         no_me_mod.data, model_params,  
                         model_param_dep_vars, model_error = sigma_log_approx,
-                        ode_method='scipy'
-                        )
+                        ode_method='scipy')
+#%%                       
 make_graph_viz = True
 if make_graph_viz:
     pm.model_to_graphviz(model)
     
-    
+#%%
 vars_list = list(model.values_to_rvs.keys())[:-1]
 
 #sampler = "DEMetropolisZ"
 chains = 4
-tune = 3000
+tune = 10000
 total_draws = 10000
 draws = np.round(total_draws/chains, 0).astype(int)
 with model:
-    trace_DEMZ = pm.sample(step=[pm.DEMetropolisZ(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains)
+    trace_DEMZ = pm.sample(step=[pm.DEMetropolisZ(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains,)
     #trace_NUTS = pm.sample(step=[pm.NUTS(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains)
