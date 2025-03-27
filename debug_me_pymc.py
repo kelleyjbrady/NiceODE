@@ -19,9 +19,10 @@ import os
 os.environ["JAX_TRACEBACK_FILTERING"] = "off"
 
 now_str = datetime.now().strftime("%d%m%Y-%H%M%S")
-with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
+
+with open(r'/workspaces/pycontainer/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     df = jb.load(f)
-base_p = "/workspaces/miniconda/PK-Analysis"
+base_p = "/workspaces/pycontainer/PK-Analysis"
 logs_path = os.path.join(base_p, 'logs')
 if not os.path.exists(logs_path):
     os.makedirs(logs_path)
@@ -59,7 +60,7 @@ if fit_model:
     with open(dump_path, 'wb') as f:
         jb.dump(no_me_mod, f)
 else:
-    debug_obj_v = '19032025-201026' 
+    debug_obj_v = '27032025-192325' 
     dump_path = os.path.join(logs_path, f'no_me_mod_test_debug_obj_{debug_obj_v}.jb')
     with open(dump_path, 'rb') as f:
         no_me_mod = jb.load(f)
@@ -124,13 +125,13 @@ if make_graph_viz:
 vars_list = list(model.values_to_rvs.keys())[:-1]
 
 #sampler = "DEMetropolisZ"
-chains = 1
+chains = 4
 tune = 10000
 total_draws = 10000
 draws = np.round(total_draws/chains, 0).astype(int)
 with model:
     #trace_DEMZ = pm.sample(step=[pm.DEMetropolisZ(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains,)
-    trace_NUTS = pm.sample(step=[pm.NUTS(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains, )
+    trace_NUTS = pm.sample(step=[pm.NUTS(vars_list)], tune = tune, draws = draws, chains = chains, nuts_sampler = 'numpyro' )
     #trace_bj_nuts = pm.sampling.jax.sample_blackjax_nuts(tune = tune,
     #                                                     draws = draws, chains=chains,
     #                                                     chain_method='vectorized')
