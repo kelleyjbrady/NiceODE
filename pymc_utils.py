@@ -416,9 +416,9 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
     jax_odeint_op = JaxOdeintOp(one_compartment_model)
     ode_func = ytp_ode_from_typ(one_compartment_diffrax2)
     
-    pymc_ode_model = DifferentialEquation(
-    func=ode_func, times=timepoints, n_states=1, n_theta=n_ode_params, t0=t0
-)
+    #pymc_ode_model = DifferentialEquation(
+    #func=ode_func, times=timepoints, n_states=1, n_theta=n_ode_params, t0=t0
+#)
     
     
     

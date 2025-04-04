@@ -20,15 +20,15 @@ os.environ["JAX_TRACEBACK_FILTERING"] = "off"
 
 now_str = datetime.now().strftime("%d%m%Y-%H%M%S")
 
-with open(r'/workspaces/pycontainer/PK-Analysis/debug_scale_df.jb', 'rb') as f:
+with open(r'/workspaces/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     df = jb.load(f)
-base_p = "/workspaces/pycontainer/PK-Analysis"
+base_p = "/workspaces/PK-Analysis"
 logs_path = os.path.join(base_p, 'logs')
 if not os.path.exists(logs_path):
     os.makedirs(logs_path)
 
 
-fit_model = False
+fit_model = True
 if fit_model:
     dump_path = os.path.join(logs_path, f'no_me_mod_test_debug_obj_{now_str}.jb')
     no_me_mod =  CompartmentalModel(
