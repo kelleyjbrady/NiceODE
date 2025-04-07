@@ -1,4 +1,11 @@
 #%%
+import jax
+jax.config.update('jax_platform_name', 'cpu')
+print(f"JAX is running on: {jax.devices()}")
+import numpyro
+numpyro.set_host_device_count(4)
+
+#%%
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -22,7 +29,7 @@ now_str = datetime.now().strftime("%d%m%Y-%H%M%S")
 
 with open(r'/workspaces/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     df = jb.load(f)
-base_p = "/workspaces/PK-Analysis"
+base_p = "/workspaces/PK-Analysis/"
 logs_path = os.path.join(base_p, 'logs')
 if not os.path.exists(logs_path):
     os.makedirs(logs_path)
@@ -109,7 +116,7 @@ model_params['sigma_subject_level_intercept_sd_init_val'] = np.log(np.exp(model_
 model_error = best_fit_df.loc[best_fit_df['model_error']
                               , 'best_fit_param_val'].to_numpy()[0]
 
-#find a nice reference for this approxmiation
+#find a nice reference for this approxmiationFalse
 sigma_log_approx = model_error / np.mean(no_me_mod.data['DV'])
 
 model = make_pymc_model(no_me_mod, no_me_mod.subject_data,
@@ -136,3 +143,5 @@ with model:
     #                                                     draws = draws, chains=chains,
     #                                                     chain_method='vectorized')
 # %%
+with open(f'trace_nuts_{now_str}.jb', 'wb') as f:
+    jb.dump(trace_NUTS, f)
