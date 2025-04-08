@@ -29,6 +29,7 @@ from scipy.optimize import approx_fprime
 import warnings
 from tqdm import tqdm
 import numdifftools as nd
+from line_profiler import profile
 
 def debug_print(print_obj, debug = False):
     if debug:
@@ -366,6 +367,7 @@ def estimate_cov_naive_subj(J, y_groups_idx, residuals, sigma2, omega2, model_ob
         per_sub_direct_neg2_ll = per_sub_direct_neg2_ll + neg2_log_likelihood_i
     return per_sub_direct_neg2_ll
 
+@profile
 def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
                  sigma2, omegas2, n_individuals,
                  n_random_effects,model_obj ,
@@ -390,6 +392,7 @@ def estimate_neg_log_likelihood(J, y_groups_idx, y, residuals,
     
     return neg_ll
 
+@profile
 def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega_names, b_i_init, ode_t0_val, time_mask_i, y_i, sub, debug_print = debug_print):
     """Estimates b_i for a *single* individual using Newton-Raphson (or similar)."""
     
@@ -492,7 +495,7 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
 
             
 
-
+@profile
 def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj,FO_b_i_apprx = None,tqdm_bi = False,debug = None,debug_print =debug_print, **kwargs):
 
     debug_print('Objective Call Start')
@@ -591,7 +594,7 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
     
     
 
-
+@profile
 def FO_approx_ll_loss(pop_coeffs, sigma,
                       omegas, thetas, theta_data,
                       model_obj, solve_for_omegas = False, **kwargs):
@@ -972,7 +975,7 @@ def generate_ivp_predictions(optimized_result, df, subject_id_c='SUBJID', dose_c
 
 
 class CompartmentalModel(RegressorMixin, BaseEstimator):
-
+    @profile
     def __init__(
         self,
         groupby_col: str = 'SUBJID',
@@ -1215,7 +1218,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             data_out['subject_data'] = deepcopy(subject_data)
             data_out['initial_conc'] = deepcopy(initial_conc)
             yield deepcopy(data_out)
-    
+    @profile
     def _homongenize_timepoints(self,data, subject_id_c, time_col):
         data['tmp'] = 1
         time_mask_df = data.pivot( index = subject_id_c,
@@ -1251,7 +1254,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         theta_data.columns = (pd.MultiIndex.from_tuples(theta_data.columns)
                                 if len(theta_data.columns) > 0 else theta_data.columns)
         return thetas, theta_data
-    
+    @profile
     def _unpack_prepare_pop_coeffs(self,model_params:pd.DataFrame):
         pop_coeffs = pd.DataFrame()
         subject_level_intercept_sds = pd.DataFrame(dtype = pd.Float64Dtype())
@@ -1289,7 +1292,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             pop_coeffs[coeff_name] = self.model_error_sigma.optimization_init_val
                 
         return pop_coeffs, (subject_level_intercept_sds, subject_level_intercept_init_vals)
-    
+    @profile
     def _assemble_pred_matrices(self, data):
         data = data.reset_index(drop = True).copy()
         self.data = data.copy()
@@ -1328,7 +1331,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.init_thetas = deepcopy(thetas)
         #this is too many things to return in this manner
         return pop_coeffs.copy(), subject_level_intercept_sds.copy(), thetas.copy(), theta_data.copy()
-    
+    @profile
     def _generate_pk_model_coeff_vectorized(self, pop_coeffs, thetas, theta_data, expected_len_out = None):
         expected_len_out = len(self.subject_y0) if expected_len_out is None else expected_len_out
         model_coeffs = pd.DataFrame(dtype = pd.Float64Dtype())
@@ -1347,7 +1350,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             tmp_coeff = np.tile(model_coeffs.values, (expected_len_out, 1))
             model_coeffs = pd.DataFrame(tmp_coeff, columns = model_coeffs.columns, dtype = pd.Float64Dtype())
         return model_coeffs.copy()
-    
+    @profile
     def _solve_ivp_parallel(self, y0, args, tspan = None, teval = None, fun = None, method = None):
         return solve_ivp(fun,
                                 tspan,
@@ -1356,7 +1359,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                             method = method,
                             args=(*args,))
         
-    
+    @profile
     def _solve_ivp(self,model_coeffs,ode_t0_vals = None, time_mask = None, parallel = False,parallel_n_jobs = None, timepoints = None):
         ode_t0_vals = self.ode_t0_vals if ode_t0_vals is None else ode_t0_vals
         time_mask = self.time_mask if time_mask is None else time_mask
@@ -1394,7 +1397,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             sol = sol[time_mask.flatten()]
         return sol
             
-    
+    @profile
     def _objective_function2(self, params, beta_data, subject_level_intercept_init_vals = None,  parallel = None, parallel_n_jobs = None ,):
         #If we do not need to unpack sigma (ie. when the loss is just SSE, MSE, Huber etc)
         if (self.n_subject_level_intercept_sds == 0) and (not self.no_me_loss_needs_sigma):                     
@@ -1424,7 +1427,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 error, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, FO_b_i_apprx = subject_level_intercept_init_vals)
 
         return error
-    
+    @profile
     def predict2(self, data, parallel = None, parallel_n_jobs = None, timepoints = None ):
         if self.fit_result_ is None:
             raise ValueError("The Model must be fit before prediction")
@@ -1465,7 +1468,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             #CI95% construction
             
         return preds
-    
+    @profile
     def fit2(self, data, parallel = False, parallel_n_jobs = -1 , n_iters_per_checkpoint = 5, warm_start = False, checkpoint_filename='check_test.jb', ):
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data)
         subject_level_intercept_init_vals = self.subject_level_intercept_init_vals

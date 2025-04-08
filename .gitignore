@@ -1,6 +1,7 @@
 #####Checkpoints
 *.jb
 plots/*
+profile_*
 
 #### Visual Studio
 ## Ignore Visual Studio temporary files, build results, and
