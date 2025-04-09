@@ -1,3 +1,4 @@
+#%%
 import joblib as jb
 import numpy as np
 from scipy.stats import chi2
@@ -11,7 +12,7 @@ from diffeqs import(
 from model_assesment import construct_profile_ci
 
 
-with open(r'/workspaces/miniconda/PK-Analysis/debug_scale_df.jb', 'rb') as f:
+with open(r'/workspaces/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     df = jb.load(f)
     
 
@@ -57,12 +58,13 @@ no_me_mod = no_me_mod.fit2(df,checkpoint_filename=f'mod_abs_test_nome.jb', paral
 res_dict = {}
 for param_idx, param_val in enumerate(no_me_mod.fit_result_.x):
     print(f"Profiling parameter:{param_idx}")
-    res_dict = construct_profile_ci(model_obj = no_me_mod, df = df, param_index=param_idx)
+    res_dict[param_idx] = construct_profile_ci(model_obj = no_me_mod, df = df, param_index=param_idx)
 
 # If bounds found, create finer profile
 profile_parameter_values = []
 profile_nll_values = []
 
+#%%
 if lower_bound is not None and upper_bound is not None:
     profile_parameter_values = np.linspace(lower_bound, upper_bound, 20)
     for val in profile_parameter_values:

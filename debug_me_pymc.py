@@ -133,8 +133,8 @@ vars_list = list(model.values_to_rvs.keys())[:-1]
 
 #sampler = "DEMetropolisZ"
 chains = 4
-tune = 2000
-total_draws = 10000
+tune = 800
+total_draws = 2000
 draws = np.round(total_draws/chains, 0).astype(int)
 with model:
     #trace_DEMZ = pm.sample(step=[pm.DEMetropolisZ(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains,)
