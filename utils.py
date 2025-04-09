@@ -603,7 +603,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma,
     y = np.copy(model_obj.y)
     y_groups_idx = np.copy(model_obj.y_groups)
     omegas_names = list(omegas.columns)
-    omegas = omegas.values.flatten() #omegas as SD, we want Variance, thus **2 below
+    omegas = omegas.to_numpy(dtype = np.float64 ).flatten() #omegas as SD, we want Variance, thus **2 below
     omegas2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
     sigma = sigma.values[0]
     sigma2 = sigma**2
@@ -618,13 +618,17 @@ def FO_approx_ll_loss(pop_coeffs, sigma,
     residuals = y - preds
     
     #estimate jacobian
-    apprx_fprime_jac = True
-    central_diff_jac = False
+    #there is something going on with the way this is filtered to use fprime and 
+    #when there are multiple omegas
+    apprx_fprime_jac = False
+    central_diff_jac = True
     J = estimate_jacobian(pop_coeffs,
                           thetas, theta_data, omegas_names, y,
                           model_obj, use_fprime = apprx_fprime_jac,
                           use_cdiff = central_diff_jac)
     
+    if np.all(J == 0):
+        raise ValueError("All elements of the Jacobian are zero")
     #drop initial values from relevant arrays if `model_obj.ode_t0_vals_are_subject_y0`
     #perfect predictions can cause issues during optimization and also add no information to the loss
     #If there are any subjects with only one data point this will fail by dropping the entire subject
@@ -1380,6 +1384,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             if list_comp:
                 sol = [partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1]).y[0] 
                        for coeff_idx_row, ode_inits_idx_row in iter_obj]
+                
             else:
                 sol = []
                 for coeff_idx_row, ode_inits_idx_row in iter_obj:

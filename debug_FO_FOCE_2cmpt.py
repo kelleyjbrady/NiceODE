@@ -34,21 +34,39 @@ now_str = datetime.now().strftime("_%d%m%Y-%H%M%S")
 with open(r'/workspaces/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     scale_df = jb.load(f)
 
-
+scale_df['DV'] = (scale_df['DV'] * 100 * 1000) / 10000000 #convert to ng/L
+scale_df['AMT'] = (scale_df['AMT'] * 1000) / 10000000 #convert to ng
 # %%
 me_mod_fo =  CompartmentalModel(
-          ode_t0_cols=[ODEInitVals('DV')],
-          population_coeff=[PopulationCoeffcient('cl', 25, subject_level_intercept=True,
+          ode_t0_cols=[ ODEInitVals('DV'), ODEInitVals('AMT'),],
+          population_coeff=[
+                            PopulationCoeffcient('ka', .7, 
+                                                 subject_level_intercept=True,
+                                                 optimization_lower_bound = np.log(.07),
+                                                 optimization_upper_bound = np.log(70),
                                                  subject_level_intercept_sd_init_val = 0.2, 
-                                                 subject_level_intercept_sd_lower_bound=1e-6
+                                                 subject_level_intercept_sd_upper_bound = 2,
+                                                subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('vd', 80, ),
+                            PopulationCoeffcient('cl',
+                                                 15,
+                                                  optimization_lower_bound = np.log(5),
+                                                 optimization_upper_bound = np.log(25),
+                                                subject_level_intercept=True, 
+                                                subject_level_intercept_sd_init_val = 0.3, 
+                                                subject_level_intercept_sd_upper_bound = 2,
+                                                subject_level_intercept_sd_lower_bound=1e-6
+                                                 ),
+                            PopulationCoeffcient('vd', 35
+                                                , optimization_lower_bound = np.log(25)
+                                                , optimization_upper_bound = np.log(35)
+                                                ),
                          ],
           dep_vars= None, 
                                    no_me_loss_function=sum_of_squares_loss, 
                                    no_me_loss_needs_sigma=False,
                                    optimizer_tol=None, 
-                                   pk_model_function=first_order_one_compartment_model2, 
+                                   pk_model_function=one_compartment_absorption, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
                                                                           , optimization_init_val=.5
@@ -57,11 +75,13 @@ me_mod_fo =  CompartmentalModel(
                                                                           ),
                                    #ode_solver_method='BDF'
                                    )
-
-me_mod_fo = me_mod_fo.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+#%%
+me_mod_fo = me_mod_fo.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo_abs_{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+scale_df['me_fo_preds'] = me_mod_fo.predict2(scale_df)
+stack_cols = ['DV', 'me_fo_preds',]
+long_df = scale_df.melt(id_vars = ['SUBJID', 'TIME'], value_vars = stack_cols, value_name='Conc', var_name = 'pred_method')
 
 #%%
-
 b_i_apprx_df = pd.DataFrame( dtype = pd.Float64Dtype())
 b_i_apprx_df['b_i_fo_cl'] = me_mod_fo.b_i_approx[('cl', 'omega2_cl')].to_numpy()
 b_i_apprx_df['SUBJID'] = scale_df['SUBJID'].drop_duplicates().values
