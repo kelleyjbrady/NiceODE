@@ -43,9 +43,9 @@ me_mod_fo =  CompartmentalModel(
                             PopulationCoeffcient('ka', .7, 
                                                  subject_level_intercept=True,
                                                  optimization_lower_bound = np.log(.07),
-                                                 optimization_upper_bound = np.log(70),
+                                                 optimization_upper_bound = np.log(2),
                                                  subject_level_intercept_sd_init_val = 0.2, 
-                                                 subject_level_intercept_sd_upper_bound = 2,
+                                                 subject_level_intercept_sd_upper_bound = 20,
                                                 subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
                             PopulationCoeffcient('cl',
@@ -54,7 +54,7 @@ me_mod_fo =  CompartmentalModel(
                                                  optimization_upper_bound = np.log(25),
                                                 subject_level_intercept=True, 
                                                 subject_level_intercept_sd_init_val = 0.3, 
-                                                subject_level_intercept_sd_upper_bound = 2,
+                                                subject_level_intercept_sd_upper_bound = 20,
                                                 subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
                             PopulationCoeffcient('vd', 35
@@ -69,9 +69,9 @@ me_mod_fo =  CompartmentalModel(
                                    pk_model_function=one_compartment_absorption, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
-                                                                          , optimization_init_val=.5
+                                                                          , optimization_init_val=.005
                                                                           ,optimization_lower_bound=0.000001
-                                                                          ,optimization_upper_bound=5
+                                                                          ,optimization_upper_bound=.5
                                                                           ),
                                    #ode_solver_method='BDF'
                                    )

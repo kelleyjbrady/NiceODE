@@ -385,23 +385,26 @@ def calculate_section_aucs(time, conc, zero_start =None, terminal_k=None, ):
     return auc_res
 
 
-def prepare_section_aucs(df):
+def prepare_section_aucs(df,
+                         id_col = 'ID',
+                         conc_col = 'CONC', 
+                         time_col = 'TIME'):
     debugging_tmp = False
     auc_df = []
     aumc_df = []
-    for sub in df['ID'].unique():
+    for sub in df[id_col].unique():
         
             #orig_settings = np.seterr(all='raise')
         #prepare data needed for both AUC and AUMC
-        work_df = df.loc[df['ID'] == sub, :].copy()
-        conc = work_df['CONC'].values
-        time = work_df['TIME'].values
+        work_df = df.loc[df[id_col] == sub, :].copy()
+        conc = work_df[conc_col].values
+        time = work_df[time_col].values
         zero_start = work_df['zero_window_time_start_x'].unique()[0]
         terminal_k = work_df['window_k_est'].unique()[0]
         if sub == 'M10':
             debugging_tmp = True
             debug_vars = {}
-            debug_vars['conc'] = np.copy(conc)
+            debug_vars[conc_col] = np.copy(conc)
             debug_vars['time'] = np.copy(time)
             debug_vars['zero_start'] = np.copy(zero_start)
             debug_vars['terminal_k'] = np.copy(terminal_k)
@@ -413,42 +416,42 @@ def prepare_section_aucs(df):
         aucs['terminal_k'] = terminal_k
         #if debugging_tmp:
             #np.seterr(**orig_settings) 
-        aucs['ID'] = sub
+        aucs[id_col] = sub
         #calculate AUMC components
         conctime = time * conc
         aumcs = calculate_section_aucs(time, conctime, zero_start, terminal_k, )
-        #aumc_inf = extend_aumc_to_inf(work_df['TIME'].values, work_df['ConcTime'].values, zero_start, terminal_k)
+        #aumc_inf = extend_aumc_to_inf(work_df[time_col].values, work_df['ConcTime'].values, zero_start, terminal_k)
         aumc_inf = extend_aumc_to_inf(time, conc, zero_start, terminal_k)
         aumcs = pd.concat([aumcs, aumc_inf]).sort_values(by = 'time_start')
         aumcs['zero_window_time_start'] = zero_start
         aumcs['terminal_k'] = terminal_k
-        aumcs['ID'] = sub
+        aumcs[id_col] = sub
         auc_df.append(aucs)
         aumc_df.append(aumcs)
     auc_df = pd.concat(auc_df).reset_index(drop = True)
     aumc_df = pd.concat(aumc_df).reset_index(drop = True)
     return auc_df, aumc_df
 
-def calculate_auc_from_sections(df):
+def calculate_auc_from_sections(df, id_col = 'ID'):
     df = df.copy()
     f1 = df['time_start'] < df['zero_window_time_start']
     f2 = df['time_end'] < df['zero_window_time_start']
     f3 = (df['time_start'] < df['zero_window_time_start']) & (df['time_end'] == np.inf)
     tmp = df.loc[(f1 & f2) | f3, :].copy()
     linear_only_auc = (tmp
-                    .groupby('ID')[['section_auc']]
+                    .groupby(id_col)[['section_auc']]
                     .sum()
                     .reset_index()
                     .rename(columns = {'section_auc':'linear_auc'})
                     
                     )
     tmp_up = tmp.loc[tmp['section_slope_is_pos']]
-    linear_up = tmp_up.groupby('ID')['section_auc'].sum().reset_index()
+    linear_up = tmp_up.groupby(id_col)['section_auc'].sum().reset_index()
     tmp_down = tmp.loc[~tmp['section_slope_is_pos']]
-    log_down = tmp_down.groupby('ID')['section_auc_log_trap'].sum().reset_index()
-    tmp = linear_up.merge(log_down, how = 'left', on = 'ID')
+    log_down = tmp_down.groupby(id_col)['section_auc_log_trap'].sum().reset_index()
+    tmp = linear_up.merge(log_down, how = 'left', on = id_col)
     tmp['linup_logdown_auc'] = tmp['section_auc'] + tmp['section_auc_log_trap']
-    return tmp.merge(linear_only_auc, how = 'left', on = 'ID').copy()
+    return tmp.merge(linear_only_auc, how = 'left', on = id_col).copy()
 
 def plot_nca_sections(df, ks_df, id_col = 'ID', time_col = 'TIME', dv_col = 'CONC' ):
     df = df.copy()
