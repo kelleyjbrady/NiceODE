@@ -30,6 +30,8 @@ import warnings
 from tqdm import tqdm
 import numdifftools as nd
 from line_profiler import profile
+from typing import Literal, Tuple
+from scipy.optimize._minimize import MINIMIZE_METHODS_NEW_CB
 
 def debug_print(print_obj, debug = False):
     if debug:
@@ -855,7 +857,15 @@ def objective_function__mgkg_age(params, data, subject_id_c='SUBJID', dose_c='DO
     return sse
 
 
-def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename, *args, warm_start = False, tol = None, **kwargs):
+ALLOWED_MINIMIZE_METHODS: Tuple[str, ...] = tuple(MINIMIZE_METHODS_NEW_CB)
+def optimize_with_checkpoint_joblib(func,
+                                    x0, n_checkpoint, 
+                                    checkpoint_filename,
+                                    *args,
+                                    warm_start = False,
+                                    tol = None,
+                                    minimize_method:ALLOWED_MINIMIZE_METHODS = 'l-bfgs-b',
+                                    **kwargs):
     """
     Optimizes a function using scipy.optimize.minimize() with checkpointing every n iterations,
     using joblib for saving and loading checkpoints.
@@ -927,7 +937,7 @@ def optimize_with_checkpoint_joblib(func, x0, n_checkpoint, checkpoint_filename,
 
         kwargs['callback'] = combined_callback
 
-    result = minimize(func, x0, *args, tol = tol, options= {'disp':True}, **kwargs, )
+    result = minimize(func, x0, *args, method = minimize_method, tol = tol, options= {'disp':True}, **kwargs,  )
 
     # Remove checkpoint file at end.
     # try:
@@ -1004,6 +1014,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         optimizer_tol = None,
         verbose=False, 
         ode_solver_method = 'RK45',
+        minimize_method:Literal[*MINIMIZE_METHODS_NEW_CB] = 'l-bfgs-b'
 
     ):
         dep_vars = {} if dep_vars is None else dep_vars
@@ -1016,6 +1027,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.conc_at_time_col = conc_at_time_col
         self.time_col = time_col
         self.verbose = verbose
+        self.minimize_method = minimize_method
         self.pk_model_function = pk_model_function
         self.pk_args_diffeq = get_function_args(pk_model_function)[2:] #this relys on defining the dif eqs as I have done
         for arg_name in self.pk_args_diffeq:
@@ -1533,6 +1545,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                            checkpoint_filename=checkpoint_filename,
                                                            args=(theta_data,),
                                                            warm_start=warm_start,
+                                                           minimize_method=self.minimize_method,
                                                            tol = self.optimzer_tol,
                                                            bounds=self.bounds
                                                            )

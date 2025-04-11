@@ -4,6 +4,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from utils import plot_subject_levels
 import joblib as jb
+from utils import sum_of_squares_loss, numba_one_compartment_model, PopulationCoeffcient, ODEInitVals, mean_squared_error_loss, huber_loss
+import cProfile
+from datetime import datetime
 
 
 # %%
@@ -26,19 +29,17 @@ pk_model_function = diffeq_obj.diff_eq()
 
 # %%
 
-from utils import sum_of_squares_loss, numba_one_compartment_model, PopulationCoeffcient, ODEInitVals, mean_squared_error_loss, huber_loss
-import cProfile
-from datetime import datetime
+
 
 now_str = datetime.now().strftime("_%d%m%Y-%H%M%S")
 with open(r'/workspaces/PK-Analysis/absorbtion_debug_scale_df.jb', 'rb') as f:
     scale_df = jb.load(f)
-
-scale_df['DV'] = (scale_df['DV'] * 100 * 1000) / 10000000 #convert to ng/L
-scale_df['AMT'] = (scale_df['AMT'] * 1000) / 10000000 #convert to ng
+#%%
+scale_df['dose_ng'] = scale_df['AMT']*1000
+scale_df['DV_ng/L'] = scale_df['DV'] * 1000
 # %%
 me_mod_fo =  CompartmentalModel(
-          ode_t0_cols=[ ODEInitVals('DV'), ODEInitVals('AMT'),],
+          ode_t0_cols=[ ODEInitVals('DV_ng/L'), ODEInitVals('dose_ng'),],
           population_coeff=[
                             PopulationCoeffcient('ka', .7, 
                                                  subject_level_intercept=True,
