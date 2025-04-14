@@ -33,16 +33,28 @@ from datetime import datetime
 now_str = datetime.now().strftime("_%d%m%Y-%H%M%S")
 with open(r'/workspaces/PK-Analysis/debug_scale_df.jb', 'rb') as f:
     scale_df = jb.load(f)
+#%%
+apply_unit_conversion = True
+if apply_unit_conversion:
+    scale_df['dose_ng'] = (scale_df['AMT']*1000)
+    scale_df['DV_ng/L'] = (scale_df['DV'] * 1000) * 100
+    if scale_df['dose_ng'].max() > 0:
+        scale_df['DV_scale']= scale_df['DV_ng/L']/scale_df['dose_ng'].max()
+        scale_df['dose_scale'] = 1.0
+    else:
+        scale_df['DV_scale']= scale_df['DV_ng/L'].copy() / 20000000
+        scale_df['dose_scale'] = scale_df['dose_ng'].copy()
 
 
 # %%
 me_mod_fo =  CompartmentalModel(
           ode_t0_cols=[ODEInitVals('DV')],
-          population_coeff=[PopulationCoeffcient('cl', 25, subject_level_intercept=True,
+          conc_at_time_col = 'DV',
+          population_coeff=[PopulationCoeffcient('cl', 18, subject_level_intercept=True,
                                                  subject_level_intercept_sd_init_val = 0.2, 
                                                  subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('vd', 80, ),
+                            PopulationCoeffcient('vd', 30, ),
                          ],
           dep_vars= None, 
                                    no_me_loss_function=sum_of_squares_loss, 
@@ -58,8 +70,10 @@ me_mod_fo =  CompartmentalModel(
                                    #ode_solver_method='BDF'
                                    )
 
-me_mod_fo = me_mod_fo.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
 
+
+me_mod_fo = me_mod_fo.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+scale_df['me_fo_preds'] = me_mod_fo.predict2(scale_df)
 #%%
 
 b_i_apprx_df = pd.DataFrame( dtype = pd.Float64Dtype())
@@ -69,7 +83,8 @@ scale_df = (scale_df.merge(b_i_apprx_df, how = 'left', on = 'SUBJID')
             if 'b_i_fo_cl' not in scale_df.columns else scale_df.copy())
 
 me_mod_foce =  CompartmentalModel(
-          ode_t0_cols=[ODEInitVals('DV')],
+          ode_t0_cols=[ODEInitVals('DV_scale')],
+          conc_at_time_col = 'DV_scale',
           population_coeff=[PopulationCoeffcient('cl', 25, subject_level_intercept=True,
                                                  optimization_lower_bound = np.log(15), 
                                                  optimization_upper_bound = np.log(40),
@@ -101,7 +116,9 @@ me_mod_foce =  CompartmentalModel(
 
 # %%
 me_mod_foce.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_foce_{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
-
+scale_df['me_foce_preds'] = me_mod_foce.predict2(scale_df)
+stack_cols = ['DV', 'me_fo_preds', 'me_foce_preds']
+long_df = scale_df.melt(id_vars = ['SUBJID', 'TIME'], value_vars = stack_cols, value_name='Conc', var_name = 'pred_method')
 
 with open('me_mod_debug_foce.jb', 'wb') as f:
     jb.dump(me_mod_foce, f)
