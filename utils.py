@@ -280,6 +280,104 @@ def estimate_cdiff_jac(pop_coeffs,
         J_cd[:, omega_idx] = (plus_preds - minus_preds) / (2*epsilon) #the central difference
     return J_cd
 
+def estimate_cdiff_jac_adaptive(pop_coeffs,
+                                thetas,
+                                theta_data,
+                                n_random_effects,
+                                omegas_names,
+                                y, model_obj):
+    """
+    Estimates the Jacobian using central differences with an adaptive step size.
+
+    The step size h for perturbing parameter x_j is calculated as:
+    h_j = rel_step * |x_j| + abs_step
+    where rel_step is sqrt(machine_epsilon) and abs_step is a small floor value.
+
+    Args:
+        pop_coeffs (dict): Dictionary of population coefficients.
+        thetas (...): Thetas parameters.
+        theta_data (...): Theta data.
+        n_random_effects (int): Number of random effects (columns in Jacobian).
+        omegas_names (list): List of tuples, where the first element [0] is the key
+                             in pop_coeffs corresponding to the random effect.
+        y (np.ndarray): Output vector from the model for the base coefficients.
+                        Used here only to determine the size of the Jacobian.
+        model_obj (object): An object with methods _generate_pk_model_coeff_vectorized
+                            and _solve_ivp.
+
+    Returns:
+        np.ndarray: The estimated Jacobian matrix (len(y) x n_random_effects).
+    """
+    # Determine machine epsilon for the float type used in pop_coeffs
+    # Use a default float64 if pop_coeffs is empty or types are mixed/non-float
+    try:
+        # Attempt to get dtype from a value, assuming dictionary values are numeric
+        first_val = next(iter(pop_coeffs.values()))
+        coeff_dtype = np.array(first_val).dtype
+        if not np.issubdtype(coeff_dtype, np.floating):
+             coeff_dtype = np.float64 # Default if not float
+    except (StopIteration, TypeError):
+        coeff_dtype = np.float64 # Default if empty or error
+
+    machine_epsilon = np.finfo(coeff_dtype).eps
+    rel_step = np.sqrt(machine_epsilon)  # Relative step size factor
+    # abs_step can be rel_step or a smaller fixed value like 1e-10 or machine_epsilon
+    abs_step = rel_step # Absolute step size floor (handles zero coeffs)
+    # Or: abs_step = machine_epsilon
+
+    J_cd = np.zeros((len(y), n_random_effects), dtype=coeff_dtype) # Match dtype
+    perturbed_pop_coeffs = pop_coeffs.copy() # Work on a copy
+
+    for omega_idx, omega_i in enumerate(omegas_names):
+        c = omega_i[0] # Key for the coefficient to perturb
+
+        # Ensure the coefficient exists before perturbing
+        if c not in pop_coeffs:
+             # Option 1: Raise an error
+             # raise KeyError(f"Coefficient key '{c}' from omegas_names not found in pop_coeffs")
+             # Option 2: Skip this parameter (Jacobian column will be zero)
+             print(f"Warning: Coefficient key '{c}' not found in pop_coeffs. Skipping.")
+             continue # Jacobian column remains zero
+             # Option 3: Assume value is 0 (if appropriate for your model)
+             # original_coeff_val = 0.0
+
+        original_coeff_val = pop_coeffs[c]
+
+        # --- Calculate adaptive step size h_j for this coefficient ---
+        h_j = rel_step * np.abs(original_coeff_val) + abs_step
+        # ---
+
+        # --- Forward Perturbation ---
+        perturbed_pop_coeffs[c] = original_coeff_val + h_j
+        plus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(perturbed_pop_coeffs,
+                                                                        thetas, theta_data)
+        plus_preds = model_obj._solve_ivp(plus_model_coeffs, parallel=False)
+
+        # --- Backward Perturbation ---
+        perturbed_pop_coeffs[c] = original_coeff_val - h_j
+        minus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(perturbed_pop_coeffs,
+                                                                          thetas, theta_data)
+        minus_preds = model_obj._solve_ivp(minus_model_coeffs, parallel=False)
+
+        # --- Reset coefficient for the next iteration ---
+        perturbed_pop_coeffs[c] = original_coeff_val
+
+        # --- Central Difference Calculation ---
+        # Ensure h_j is not zero if original_coeff_val was extremely small non-zero
+        # and abs_step was also zero (unlikely with recommended abs_step).
+        # Adding machine_epsilon avoids potential division by zero in extreme cases.
+        denominator = 2.0 * h_j
+        if denominator == 0:
+             # Handle cases where h_j calculated to zero - shouldn't happen with abs_step > 0
+             # If it does, the gradient is likely zero or numerically unstable anyway.
+             # You might log a warning or set the column to zero explicitly.
+             print(f"Warning: Calculated step size h_j is zero for coefficient {c}. Jacobian column set to zero.")
+             J_cd[:, omega_idx] = 0.0
+        else:
+             J_cd[:, omega_idx] = (plus_preds - minus_preds) / denominator
+
+    return J_cd
+
 def estimate_jacobian(pop_coeffs:pd.DataFrame,
                       thetas:pd.DataFrame,
                       theta_data:List[pd.DataFrame],
@@ -1355,7 +1453,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             pop_coeff = pop_coeffs[c].values
             theta = thetas[c].values.flatten() if c in thetas.columns else np.zeros_like(pop_coeff)
             X = theta_data[c].values if c in theta_data.columns else np.zeros_like(pop_coeff)
-            out = np.exp((X @ theta) + pop_coeff) + 1e-6
+            out = np.exp((X @ theta) + pop_coeff) #+ 1e-6
             if len(out) != expected_len_out:
                 out = np.repeat(out, expected_len_out)
             if c not in model_coeffs.columns:
@@ -1392,7 +1490,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                    for coeff_idx_row, ode_inits_idx_row in iter_obj)
             sol = [sol_i.y[0] for sol_i in sol]
         else:
-            list_comp = True
+            list_comp = False
             if list_comp:
                 sol = [partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1]).y[0] 
                        for coeff_idx_row, ode_inits_idx_row in iter_obj]
