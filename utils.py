@@ -320,7 +320,7 @@ def estimate_cdiff_jac_adaptive(pop_coeffs,
         coeff_dtype = np.float64 # Default if empty or error
 
     machine_epsilon = np.finfo(coeff_dtype).eps
-    rel_step = np.sqrt(machine_epsilon)  # Relative step size factor
+    rel_step = machine_epsilon**(1/3)  # Relative step size factor
     # abs_step can be rel_step or a smaller fixed value like 1e-10 or machine_epsilon
     abs_step = rel_step # Absolute step size floor (handles zero coeffs)
     # Or: abs_step = machine_epsilon
@@ -345,6 +345,7 @@ def estimate_cdiff_jac_adaptive(pop_coeffs,
 
         # --- Calculate adaptive step size h_j for this coefficient ---
         h_j = rel_step * np.abs(original_coeff_val) + abs_step
+        h_j = h_j.values[0]
         # ---
 
         # --- Forward Perturbation ---
@@ -386,6 +387,8 @@ def estimate_jacobian(pop_coeffs:pd.DataFrame,
                       model_obj,
                       use_fprime:bool = True,
                       use_cdiff:bool = True, 
+                      use_adaptive = True,
+                      use_numdifftools = False
                       ):
     n_random_effects = len(omega_names)
     apprx_fprime_j_cols_filt = [pc in [i[0] for i in omega_names]
@@ -395,7 +398,14 @@ def estimate_jacobian(pop_coeffs:pd.DataFrame,
     if use_fprime: #this method currently only works when there is only one pop_coeffs 
         J_afp = estimate_fprime_jac(pop_coeffs,thetas, theta_data, apprx_fprime_j_cols_filt, y, model_obj)
     if use_cdiff:
+        #if use_adaptive:
+        J_cd_adap = estimate_cdiff_jac_adaptive(pop_coeffs,thetas, theta_data, n_random_effects, omega_names, y, model_obj)
+        #else:
         J_cd = estimate_cdiff_jac(pop_coeffs,thetas, theta_data, n_random_effects, omega_names, y, model_obj)
+        if np.any(np.abs((J_cd_adap - J_cd)) > 1e-6):
+            debug_this = True
+        else:
+            J_cd = J_cd_adap
     J = [i for i in [J_afp, J_cd] if i is not None][0]
     return J
 
@@ -722,10 +732,11 @@ def FO_approx_ll_loss(pop_coeffs, sigma,
     #when there are multiple omegas
     apprx_fprime_jac = False
     central_diff_jac = True
+    use_adaptive = True
     J = estimate_jacobian(pop_coeffs,
                           thetas, theta_data, omegas_names, y,
                           model_obj, use_fprime = apprx_fprime_jac,
-                          use_cdiff = central_diff_jac)
+                          use_cdiff = central_diff_jac, use_adaptive=use_adaptive)
     
     if np.all(J == 0):
         raise ValueError("All elements of the Jacobian are zero")
