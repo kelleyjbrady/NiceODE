@@ -66,3 +66,10 @@ def one_compartment_absorption(t, y, ka, cl, vd):
     dAdt = -ka * A
     return [dCdt, dAdt]
 
+def one_compartment_absorption2(t, y, ka, ke):
+    """One-compartment model with first-order absorption and elimination."""
+    C, A = y
+    dCdt = ka * A - ke * C
+    dAdt = -ka * A
+    return [dCdt, dAdt]
+
