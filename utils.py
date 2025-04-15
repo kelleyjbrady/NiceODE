@@ -378,6 +378,7 @@ def estimate_cdiff_jac_adaptive(pop_coeffs,
              J_cd[:, omega_idx] = (plus_preds - minus_preds) / denominator
 
     return J_cd
+#This function needs to be updated to allow the dependent variable to be on the log scale
 
 def estimate_jacobian(pop_coeffs:pd.DataFrame,
                       thetas:pd.DataFrame,
@@ -1103,6 +1104,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self,
         groupby_col: str = 'SUBJID',
         conc_at_time_col: str = 'DV',
+        log_transform_dep_var = False,
         dose_col:str = None,
         time_col='TIME',
         pk_model_function=one_compartment_model,
@@ -1130,6 +1132,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         population_coeff = [] if population_coeff is None else population_coeff
         self.model_error_sigma = model_error_sigma #perhaps update this to do a check and set the attr to None if this param is not needed
         self.ode_solver_method = ode_solver_method
+        self.log_transform_dep_var = log_transform_dep_var
         self.ode_output_size = determine_ode_output_size(pk_model_function)
         self.ode_t0_cols = self._validate_ode_t0_vals_size(ode_t0_cols)
         self.groupby_col = groupby_col
