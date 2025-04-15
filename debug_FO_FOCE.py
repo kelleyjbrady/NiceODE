@@ -97,7 +97,7 @@ me_mod_fo =  CompartmentalModel(
                                    pk_model_function=first_order_one_compartment_model2, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
-                                                                          , optimization_init_val=.5
+                                                                          , optimization_init_val=.2
                                                                           ,optimization_lower_bound=0.000001
                                                                           ,optimization_upper_bound=5
                                                                           ),
@@ -111,16 +111,16 @@ me_mod_fo =  CompartmentalModel(
 me_mod_fo = me_mod_fo.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
 res_df['me_fo_preds'] = me_mod_fo.predict2(scale_df)
 piv_cols.extend(['me_fo_preds', ])
-#%%
-me_mod_fo_ln_q =  CompartmentalModel(
-          ode_t0_cols=[ODEInitVals('DV_ln')],
-          conc_at_time_col = 'DV_ln',
+# %%
+me_mod_fo_q =  CompartmentalModel(
+          ode_t0_cols=[ODEInitVals('DV')],
+          conc_at_time_col = 'DV',
           population_coeff=[PopulationCoeffcient('cl', 18, subject_level_intercept=True,
                                                  subject_level_intercept_sd_init_val = 0.2, 
                                                  subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
                             PopulationCoeffcient('vd', 30, 
-                                                 optimization_upper_bound=np.log(60)
+                                                 
                                                  ),
                          ],
           dep_vars= None, 
@@ -130,7 +130,7 @@ me_mod_fo_ln_q =  CompartmentalModel(
                                    pk_model_function=first_order_one_compartment_model2, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
-                                                                          , optimization_init_val=.5
+                                                                          , optimization_init_val=.2
                                                                           ,optimization_lower_bound=0.000001
                                                                           ,optimization_upper_bound=5
                                                                           ),
@@ -141,20 +141,62 @@ me_mod_fo_ln_q =  CompartmentalModel(
 
 
 
-me_mod_fo_ln_q = me_mod_fo_ln_q.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
-res_df['me_fo_preds_ln_cobyqa'] = me_mod_fo_ln_q.predict2(scale_df)
-res_df['DV_ln'] = scale_df['DV_ln']
-piv_cols.extend(['me_fo_preds_ln_cobyqa', 'DV_ln'])
+me_mod_fo_q = me_mod_fo_q.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+res_df['me_fo_preds'] = me_mod_fo_q.predict2(scale_df)
+piv_cols.extend(['me_fo_preds', ])
+#%%
+test_df = scale_df.drop(columns = 'DV').copy()
+me_mod_fo_ln_q =  CompartmentalModel(
+          ode_t0_cols=[ODEInitVals('DV_ln')],
+          conc_at_time_col = 'DV_ln',
+          population_coeff=[PopulationCoeffcient('cl', 18, subject_level_intercept=True,
+                                                 optimization_lower_bound = np.log(5), 
+                                                 optimization_upper_bound = np.log(30),
+                                                 subject_level_intercept_sd_init_val = 0.2, 
+                                                 subject_level_intercept_sd_lower_bound=1e-6
+                                                 ),
+                            PopulationCoeffcient('vd', 20, 
+                                                 optimization_lower_bound = np.log(30), 
+                                                 optimization_upper_bound = np.log(55),
+                                                 ),
+                         ],
+          dep_vars= None, 
+                                   no_me_loss_function=sum_of_squares_loss, 
+                                   no_me_loss_needs_sigma=False,
+                                   #optimizer_tol=.001, 
+                                   pk_model_function=first_order_one_compartment_model2, 
+                                   model_error_sigma=PopulationCoeffcient('sigma'
+                                                                          ,log_transform_init_val=False
+                                                                          , optimization_init_val=.2
+                                                                          ,optimization_lower_bound=0.000001
+                                                                          ,optimization_upper_bound=5
+                                                                          ),
+                                   #ode_solver_method='BDF'
+                                  # optimizer_tol = .1
+                                  minimize_method = 'COBYQA'
+                                   )
+
+
+
+#me_mod_fo_ln_q = me_mod_fo_ln_q.fit2(test_df,checkpoint_filename=f'mod_abs_test_me_fo{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+#res_df['me_fo_preds_ln_cobyqa'] = me_mod_fo_ln_q.predict2(test_df)
+#res_df['DV_ln'] = test_df['DV_ln']
+#piv_cols.extend(['me_fo_preds_ln_cobyqa', 'DV_ln'])
 #%%
 me_mod_fo_ln =  CompartmentalModel(
           ode_t0_cols=[ODEInitVals('DV_ln')],
           conc_at_time_col = 'DV_ln',
           population_coeff=[PopulationCoeffcient('cl', 18, subject_level_intercept=True,
+                                                 optimization_lower_bound = np.log(5), 
+                                                 optimization_upper_bound = np.log(30),
                                                  subject_level_intercept_sd_init_val = 0.2, 
                                                  subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('vd', 30, 
-                                                 optimization_upper_bound=np.log(60),),
+                            PopulationCoeffcient('vd', 20, 
+                                                 #optimization_upper_bound=np.log(60),
+                                                 optimization_lower_bound = np.log(30), 
+                                                 optimization_upper_bound = np.log(55),
+                                                 ),
                          ],
           dep_vars= None, 
                                    no_me_loss_function=sum_of_squares_loss, 
@@ -174,9 +216,9 @@ me_mod_fo_ln =  CompartmentalModel(
 
 
 
-me_mod_fo_ln = me_mod_fo_ln.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
-res_df['me_fo_preds_ln'] = me_mod_fo_ln.predict2(scale_df)
-piv_cols.extend(['me_fo_preds_ln', ])
+#me_mod_fo_ln = me_mod_fo_ln.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+#res_df['me_fo_preds_ln'] = me_mod_fo_ln.predict2(scale_df)
+#piv_cols.extend(['me_fo_preds_ln', ])
 #%%
 me_mod_fo_scale =  CompartmentalModel(
           ode_t0_cols=[ODEInitVals('DV_scale')],
@@ -299,16 +341,16 @@ me_mod_foce_ln =  CompartmentalModel(
           ode_t0_cols=[ODEInitVals('DV_ln')],
           conc_at_time_col = 'DV_ln',
           population_coeff=[PopulationCoeffcient('cl', 15, subject_level_intercept=True,
-                                                 optimization_lower_bound = np.log(10), 
-                                                 optimization_upper_bound = np.log(60),
-                                                 subject_level_intercept_sd_init_val = 0.38, 
+                                                 optimization_lower_bound = np.log(5), 
+                                                 optimization_upper_bound = np.log(25),
+                                                 subject_level_intercept_sd_init_val = 0.2, 
                                                  subject_level_intercept_sd_lower_bound = .001, 
                                                  subject_level_intercept_sd_upper_bound = 2,
                                                  subject_level_intercept_init_vals_column_name='b_i_fo_cl',
                                                  ),
                             PopulationCoeffcient('vd', 40
                                                  , optimization_lower_bound = np.log(30)
-                                                 , optimization_upper_bound = np.log(60)
+                                                 , optimization_upper_bound = np.log(50)
                                                  
                                                  ),
                          ],
@@ -317,7 +359,7 @@ me_mod_foce_ln =  CompartmentalModel(
                                    #optimizer_tol=.00001, 
                                    pk_model_function=first_order_one_compartment_model2, 
                                    me_loss_function=FOCE_approx_ll_loss, 
-                                   model_error_sigma=PopulationCoeffcient('sigma', .18
+                                   model_error_sigma=PopulationCoeffcient('sigma', .4
                                                                        ,log_transform_init_val=False
                                                                        , optimization_lower_bound=.001, 
                                                                        optimization_upper_bound=1
@@ -328,9 +370,9 @@ me_mod_foce_ln =  CompartmentalModel(
 
 
 
-me_mod_foce_ln.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_foce_{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
-res_df['me_foce_preds_ln'] = me_mod_foce_ln.predict2(scale_df)
-piv_cols.append('me_foce_preds_ln')
+#me_mod_foce_ln.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_foce_{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+#res_df['me_foce_preds_ln'] = me_mod_foce_ln.predict2(scale_df)
+#piv_cols.append('me_foce_preds_ln')
 
 #with open('me_mod_debug_foce.jb', 'wb') as f:
 #    jb.dump(me_mod_foce, f)
@@ -370,9 +412,9 @@ me_mod_foce_ln_q =  CompartmentalModel(
 
 
 
-me_mod_foce_ln_q.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_foce_{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
-res_df['me_foce_preds_ln_q'] = me_mod_foce_ln_q.predict2(scale_df)
-piv_cols.append('me_foce_preds_ln_q')
+#me_mod_foce_ln_q.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_foce_{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+#res_df['me_foce_preds_ln_q'] = me_mod_foce_ln_q.predict2(scale_df)
+#piv_cols.append('me_foce_preds_ln_q')
 
 
 import plotly.express as px
