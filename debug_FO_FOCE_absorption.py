@@ -17,7 +17,9 @@ from diffeqs import( OneCompartmentFODiffEq,
                     first_order_one_compartment_model2,
                     parallel_elim_one_compartment_model, 
                     one_compartment_absorption, 
-                    one_compartment_absorption2
+                    one_compartment_absorption2, 
+                    OneCompartmentAbsorption, 
+                    OneCompartmentAbsorption2
                     )
 import numpy as np
 
@@ -38,10 +40,11 @@ with open(r'/workspaces/PK-Analysis/absorbtion_debug_scale_df.jb', 'rb') as f:
 #%%
 scale_df['dose_ng'] = scale_df['AMT']*1000
 scale_df['DV_ng/L'] = (scale_df['DV'] * 1000)
-scale_df['dose_scale'] = scale_df['dose_ng'] / 1e6
+scale_df['dose_scale'] = scale_df['dose_ng'] / 1e5
 scale_df['DV_scale'] = scale_df['DV_ng/L'] / 1e5
 #scale_df['DV_scale']= scale_df['DV_ng/L']/scale_df['dose_ng'].max()
 #scale_df['dose_scale'] = 1.0
+
 
 # %%
 me_mod_fo =  CompartmentalModel(
@@ -74,7 +77,7 @@ me_mod_fo =  CompartmentalModel(
                                    no_me_loss_function=sum_of_squares_loss, 
                                    no_me_loss_needs_sigma=False,
                                    optimizer_tol=None, 
-                                   pk_model_function=one_compartment_absorption, 
+                                   pk_model_class=OneCompartmentAbsorption(), 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
                                                                           , optimization_init_val=.5
@@ -109,12 +112,21 @@ me_mod_fo2 =  CompartmentalModel(
                                                 #subject_level_intercept_sd_upper_bound = 5,
                                                 #subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
+                            PopulationCoeffcient('vd',
+                                                 35,
+                                                  #optimization_lower_bound = np.log(.01),
+                                                 #optimization_upper_bound = np.log(5),
+                                                #subject_level_intercept=True, 
+                                                #subject_level_intercept_sd_init_val = 0.08, 
+                                                #subject_level_intercept_sd_upper_bound = 5,
+                                                #subject_level_intercept_sd_lower_bound=1e-6
+                                                 ),
                          ],
           dep_vars= None, 
                                    no_me_loss_function=sum_of_squares_loss, 
                                    no_me_loss_needs_sigma=False,
                                    optimizer_tol=None, 
-                                   pk_model_function=one_compartment_absorption2, 
+                                   pk_model_class=OneCompartmentAbsorption2(), 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
                                                                           , optimization_init_val=.005

@@ -130,3 +130,17 @@ def one_compartment_absorption2(t, y, ka, ke):
     dAdt = -ka * A
     return [dCdt, dAdt]
 
+class OneCompartmentAbsorption2(PKBaseODE):
+    def __init__(self, ):
+        pass
+        
+    def ode(self, t, y, ka, ke, vd):
+        central_mass, gut_mass = y
+        dCMdt = ka * gut_mass - ke * central_mass
+        dGdt = -ka * gut_mass
+        return [dCMdt, dGdt]
+    
+    def mass_to_depvar(self, pred_mass, ka, ke, vd):
+        depvar_unit_result = pred_mass/vd
+        return depvar_unit_result
+
