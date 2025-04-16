@@ -212,7 +212,8 @@ def get_function_args(func):
 
 def determine_ode_output_size(ode_func):
     try:
-        source = inspect.getsource(ode_func)
+        source = inspect.getsource(ode_func) #ode_func is a class method
+        source = source.lstrip() #thus we need to strip out the indentation in the method to make it look like a normal function
         tree = ast.parse(source)
 
         for node in ast.walk(tree):
@@ -1096,7 +1097,7 @@ def generate_ivp_predictions(optimized_result, df, subject_id_c='SUBJID', dose_c
         predictions[subject] = sol
     return predictions
 
-
+from diffeqs import PKBaseODE
 
 class CompartmentalModel(RegressorMixin, BaseEstimator):
     @profile
@@ -1107,7 +1108,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         log_transform_dep_var = False,
         dose_col:str = None,
         time_col='TIME',
-        pk_model_function=one_compartment_model,
+        pk_model_class:PKBaseODE=None,
         ode_t0_cols: List[ODEInitVals] = None,
         population_coeff: List[PopulationCoeffcient] = [
             PopulationCoeffcient('k', 0.6), PopulationCoeffcient('vd', 2.0)],
@@ -1128,20 +1129,21 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         minimize_method:Literal[*MINIMIZE_METHODS_NEW_CB] = 'l-bfgs-b'
 
     ):
+        self.pk_model_class = pk_model_class
+        self.pk_model_function = self.pk_model_class.ode
         dep_vars = {} if dep_vars is None else dep_vars
         population_coeff = [] if population_coeff is None else population_coeff
         self.model_error_sigma = model_error_sigma #perhaps update this to do a check and set the attr to None if this param is not needed
         self.ode_solver_method = ode_solver_method
         self.log_transform_dep_var = log_transform_dep_var
-        self.ode_output_size = determine_ode_output_size(pk_model_function)
+        self.ode_output_size = determine_ode_output_size(self.pk_model_function)
         self.ode_t0_cols = self._validate_ode_t0_vals_size(ode_t0_cols)
         self.groupby_col = groupby_col
         self.conc_at_time_col = conc_at_time_col
         self.time_col = time_col
         self.verbose = verbose
         self.minimize_method = minimize_method
-        self.pk_model_function = pk_model_function
-        self.pk_args_diffeq = get_function_args(pk_model_function)[2:] #this relys on defining the dif eqs as I have done
+        self.pk_args_diffeq = get_function_args(self.pk_model_function)[2:] #this relys on defining the dif eqs as I have done
         for arg_name in self.pk_args_diffeq:
             if len(population_coeff) == 0:
                 population_coeff.append(PopulationCoeffcient(arg_name))
@@ -1486,14 +1488,26 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                             t_eval=teval,
                             method = method,
                             args=(*args,))
+    
+    def _solve_ivp_parallel2(self, y0, args, tspan = None, teval = None, ode_class:PKBaseODE = None, method = None):
+        
+        mass_preds = solve_ivp(ode_class.ode,
+                                tspan,
+                            y0,
+                            t_eval=teval,
+                            method = method,
+                            args=(*args,))
+        depvar_unit_preds = ode_class.mass_to_depvar(mass_preds, *args)
+        return depvar_unit_preds
+        
         
     @profile
     def _solve_ivp(self,model_coeffs,ode_t0_vals = None, time_mask = None, parallel = False,parallel_n_jobs = None, timepoints = None):
         ode_t0_vals = self.ode_t0_vals if ode_t0_vals is None else ode_t0_vals
         time_mask = self.time_mask if time_mask is None else time_mask
         iter_obj =  zip(model_coeffs.iterrows(), ode_t0_vals.iterrows())
-        partial_solve_ivp = partial(self._solve_ivp_parallel,
-                                 fun = self.pk_model_function,
+        partial_solve_ivp = partial(self._solve_ivp_parallel2,
+                                 ode_class = self.pk_model_class,
                                  tspan = self.global_tspan,
                                  teval = self.global_tp if timepoints is None else timepoints,
                                  method = self.ode_solver_method,
@@ -1504,7 +1518,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                    for coeff_idx_row, ode_inits_idx_row in iter_obj)
             sol = [sol_i.y[0] for sol_i in sol]
         else:
-            list_comp = False
+            list_comp = True
             if list_comp:
                 sol = [partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1]).y[0] 
                        for coeff_idx_row, ode_inits_idx_row in iter_obj]
@@ -1512,14 +1526,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             else:
                 sol = []
                 for coeff_idx_row, ode_inits_idx_row in iter_obj:
-                    coeff_idx_row = coeff_idx_row[1]
-                    ode_inits = ode_inits_idx_row[1]
-                    ode_sol = solve_ivp(self.pk_model_function,
-                                    self.global_tspan,
-                                ode_inits,
-                                t_eval=self.global_tp if timepoints is None else timepoints,
-                                method = self.ode_solver_method,
-                                args=(*coeff_idx_row,))
+                    ode_sol = partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1])
                     sol.append(ode_sol.y[0])
         sol = np.concatenate(sol)
         if timepoints is None:
