@@ -1,4 +1,5 @@
 from numba import njit
+import abc
 
 
 class OneCompartmentFODiffEq(object):
@@ -58,6 +59,34 @@ def mm_one_compartment_model(t, y, Vmax, Km):
 def parallel_elim_one_compartment_model(t, C, K, Vmax, Km):
     dCdt = (-K * C) - ((Vmax * C) / (Km + C))
     return [dCdt]
+
+class PKBaseODE(abc.ABC):
+    def __init__(self):
+        pass
+    
+    @abc.abstractmethod
+    def ode(self,):
+        pass
+    
+    @abc.abstractmethod
+    def mass_to_depvar(self):
+        pass
+
+class OneCompartmentAbsorption(PKBaseODE):
+    def __init__(self, ):
+        pass
+        
+    def ode(self, t, y, ka, cl, vd):
+        central_mass, gut_mass = y
+        dCMdt = ka * gut_mass - (cl/vd) * central_mass
+        dGdt = -ka * gut_mass
+        return [dCMdt, dGdt]
+    
+    def mass_to_depvar(self, pred_mass, ka, cl, vd):
+        depvar_unit_result = pred_mass/vd
+        return depvar_unit_result
+        
+
 
 def one_compartment_absorption(t, y, ka, cl, vd):
     """One-compartment model with first-order absorption and elimination."""
