@@ -13,7 +13,8 @@ from diffeqs import( OneCompartmentFODiffEq,
                     first_order_one_compartment_model,
                     first_order_one_compartment_model2,
                     parallel_elim_one_compartment_model, 
-                    one_compartment_absorption
+                    one_compartment_absorption, 
+                    OneCompartmentConc
                     )
 import numpy as np
 
@@ -63,7 +64,7 @@ no_me_mod_fo =  CompartmentalModel(
                                    no_me_loss_function=sum_of_squares_loss, 
                                    no_me_loss_needs_sigma=False,
                                    #optimizer_tol=.001, 
-                                   pk_model_function=first_order_one_compartment_model2, 
+                                   pk_model_class=OneCompartmentConc(), 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
                                                                           , optimization_init_val=.5

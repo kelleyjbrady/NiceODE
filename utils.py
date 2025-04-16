@@ -212,7 +212,8 @@ def get_function_args(func):
 
 def determine_ode_output_size(ode_func):
     try:
-        source = inspect.getsource(ode_func)
+        source = inspect.getsource(ode_func) #ode_func is a class method
+        source = source.lstrip() #thus we need to strip out the indentation in the method to make it look like a normal function
         tree = ast.parse(source)
 
         for node in ast.walk(tree):

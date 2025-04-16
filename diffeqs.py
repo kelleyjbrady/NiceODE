@@ -75,7 +75,7 @@ class PKBaseODE(abc.ABC):
 class OneCompartmentConc(PKBaseODE):
     def __init__(self, ):
         pass
-    def ode(t, y, cl, vd):
+    def ode(self, t, y, cl, vd):
         """
         Defines the differential equation for a one-compartment pharmacokinetic model.
 
