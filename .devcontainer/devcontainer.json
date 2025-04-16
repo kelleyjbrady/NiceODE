@@ -5,7 +5,7 @@
     //  "dockerfile": "dockerfile", // Or adjust path as needed
     //  "context": ".." // Or adjust build context path
     //},
-    "image": "cuda-py:20250408100054", 
+    "image": "cuda-py:20250411121001", 
     // Add arguments to be passed to 'docker run'
     "runArgs": [
       "--gpus=all"
@@ -31,7 +31,12 @@
           "KevinRose.vsc-python-indent", 
           "ggoogle.geminicodeassist", 
           "tamasfe.even-better-toml", 
-          "njpwerner.autodocstring"
+          "njpwerner.autodocstring", 
+          "REditorSupport.r", 
+          "RDebugger.r-debugger", 
+          "julialang.language-julia",
+          "0h7z.vscode-julia-format", 
+          "quarto.quarto"
 
           // Add other extensions
         ],
