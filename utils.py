@@ -1491,14 +1491,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     
     def _solve_ivp_parallel2(self, y0, args, tspan = None, teval = None, ode_class:PKBaseODE = None, method = None):
         
-        mass_preds = solve_ivp(ode_class.ode,
+        pred_obj = solve_ivp(ode_class.ode,
                                 tspan,
                             y0,
                             t_eval=teval,
                             method = method,
                             args=(*args,))
-        depvar_unit_preds = ode_class.mass_to_depvar(mass_preds, *args)
-        return depvar_unit_preds
+        pred_obj.y[0] = ode_class.mass_to_depvar(pred_obj.y[0], *args)
+        return pred_obj
         
         
     @profile
