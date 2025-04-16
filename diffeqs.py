@@ -71,6 +71,34 @@ class PKBaseODE(abc.ABC):
     @abc.abstractmethod
     def mass_to_depvar(self):
         pass
+    
+class OneCompartmentConc(PKBaseODE):
+    def __init__(self, ):
+        pass
+    def ode(t, y, cl, vd):
+        """
+        Defines the differential equation for a one-compartment pharmacokinetic model.
+
+        This function calculates the rate of change of drug concentration in the central 
+        compartment over time.
+
+        Args:
+            t (float): Time point (not used in this specific model, but required by solve_ivp).
+            y (list): Current drug concentration in the central compartment.
+            k (float): Elimination rate constant.
+            Vd (float): Volume of distribution.
+            dose (float): Administered drug dose (not used in this model, as it assumes 
+                            intravenous bolus administration where the initial concentration 
+                            is directly given).
+
+        Returns:
+            float: The rate of change of drug concentration (dC/dt).
+        """
+        C = y[0]  # Extract concentration from the state vector
+        dCdt = -(cl/vd) * C  # Calculate the rate of change
+        return [dCdt]
+    def mass_to_depvar(self, pred_mass, cl, vd):
+        return pred_mass
 
 class OneCompartmentAbsorption(PKBaseODE):
     def __init__(self, ):
