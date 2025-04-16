@@ -1506,8 +1506,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         ode_t0_vals = self.ode_t0_vals if ode_t0_vals is None else ode_t0_vals
         time_mask = self.time_mask if time_mask is None else time_mask
         iter_obj =  zip(model_coeffs.iterrows(), ode_t0_vals.iterrows())
-        partial_solve_ivp = partial(self._solve_ivp_parallel,
-                                 fun = self.pk_model_function,
+        partial_solve_ivp = partial(self._solve_ivp_parallel2,
+                                 ode_class = self.pk_model_class,
                                  tspan = self.global_tspan,
                                  teval = self.global_tp if timepoints is None else timepoints,
                                  method = self.ode_solver_method,
@@ -1518,7 +1518,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                    for coeff_idx_row, ode_inits_idx_row in iter_obj)
             sol = [sol_i.y[0] for sol_i in sol]
         else:
-            list_comp = False
+            list_comp = True
             if list_comp:
                 sol = [partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1]).y[0] 
                        for coeff_idx_row, ode_inits_idx_row in iter_obj]
@@ -1526,14 +1526,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             else:
                 sol = []
                 for coeff_idx_row, ode_inits_idx_row in iter_obj:
-                    coeff_idx_row = coeff_idx_row[1]
-                    ode_inits = ode_inits_idx_row[1]
-                    ode_sol = solve_ivp(self.pk_model_function,
-                                    self.global_tspan,
-                                ode_inits,
-                                t_eval=self.global_tp if timepoints is None else timepoints,
-                                method = self.ode_solver_method,
-                                args=(*coeff_idx_row,))
+                    ode_sol = partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1])
                     sol.append(ode_sol.y[0])
         sol = np.concatenate(sol)
         if timepoints is None:
