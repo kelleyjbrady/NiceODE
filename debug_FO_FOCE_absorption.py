@@ -7,6 +7,7 @@ import joblib as jb
 from utils import sum_of_squares_loss, numba_one_compartment_model, PopulationCoeffcient, ODEInitVals, mean_squared_error_loss, huber_loss
 import cProfile
 from datetime import datetime
+import uuid
 
 
 # %%
@@ -34,7 +35,8 @@ pk_model_function = diffeq_obj.diff_eq()
 
 
 
-now_str = datetime.now().strftime("_%d%m%Y-%H%M%S")
+#now_str = datetime.now().strftime("_%d%m%Y-%H%M%S")
+batch_id = uuid.uuid4()
 with open(r'/workspaces/PK-Analysis/absorbtion_debug_scale_df.jb', 'rb') as f:
     scale_df = jb.load(f)
 #%%
@@ -44,7 +46,9 @@ scale_df['dose_scale'] = scale_df['dose_ng'] / 1e5
 scale_df['DV_scale'] = scale_df['DV_ng/L'] / 1e5
 #scale_df['DV_scale']= scale_df['DV_ng/L']/scale_df['dose_ng'].max()
 #scale_df['dose_scale'] = 1.0
-
+piv_cols = []
+res_df = pd.DataFrame()
+res_df['DV_scale'] = scale_df['DV_scale']
 
 # %%
 me_mod_fo =  CompartmentalModel(
@@ -60,7 +64,7 @@ me_mod_fo =  CompartmentalModel(
                                                 #subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
                             PopulationCoeffcient('cl',
-                                                 18,
+                                                 14,
                                                   optimization_lower_bound = np.log(5),
                                                  optimization_upper_bound = np.log(25),
                                                 subject_level_intercept=True, 
@@ -68,9 +72,9 @@ me_mod_fo =  CompartmentalModel(
                                                 subject_level_intercept_sd_upper_bound = 5,
                                                 subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('vd', 35
+                            PopulationCoeffcient('vd', 40
                                                 , optimization_lower_bound = np.log(30)
-                                                , optimization_upper_bound = np.log(40)
+                                                , optimization_upper_bound = np.log(50)
                                                 ),
                          ],
           dep_vars= None, 
@@ -87,8 +91,9 @@ me_mod_fo =  CompartmentalModel(
                                    #ode_solver_method='BDF'
                                    )
 #%%
-#me_mod_fo = me_mod_fo.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo_abs_{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
-#scale_df['me_fo_preds'] = me_mod_fo.predict2(scale_df)
+me_mod_fo = me_mod_fo.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo_abs_{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+res_df['me_fo_preds'] = me_mod_fo.predict2(scale_df)
+piv_cols.append('me_fo_preds')
 
 #%%
 me_mod_fo2 =  CompartmentalModel(
@@ -148,16 +153,14 @@ for sub in scale_df['SUBJID'].unique():
     fit_res_dfs.append(fit_df.copy())
 fit_res_df = pd.concat(fit_res_dfs)
 fit_readout = [np.exp(i['x']) for i in fits]
-
+res_df['indiv_fit_preds'] = fit_res_df['pred_y'].copy()
+piv_cols.append('indiv_fit_preds')
 
 #%%
 me_mod_fo2 = me_mod_fo2.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo_abs_{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
-scale_df['me_fo2_preds'] = me_mod_fo2.predict2(scale_df)
-stack_cols = ['DV_scale', 'me_fo2_preds']
-long_df = scale_df.melt(id_vars = ['SUBJID', 'TIME'], value_vars = stack_cols, value_name='Conc', var_name = 'pred_method')
-
-
-#%%
+res_df['me_fo2_preds'] = me_mod_fo2.predict2(scale_df)
+piv_cols.append('me_fo2_preds')
+long_df = scale_df.melt(id_vars = ['SUBJID', 'TIME'], value_vars = piv_cols, value_name='Conc', var_name = 'pred_method')
 
 #%%
 b_i_apprx_df = pd.DataFrame( dtype = pd.Float64Dtype())

@@ -143,4 +143,3 @@ class OneCompartmentAbsorption2(PKBaseODE):
     def mass_to_depvar(self, pred_mass, ka, ke, vd):
         depvar_unit_result = pred_mass/vd
         return depvar_unit_result
-

@@ -1035,18 +1035,19 @@ def optimize_with_checkpoint_joblib(func,
         #print('no log')
 
     # Ensure callback is not already in kwargs
-    if 'callback' not in kwargs:
-        kwargs['callback'] = partial(
-            callback_with_checkpoint, checkpoint_filename=checkpoint_filename)
-    else:
-        # If callback exists, combine it with the existing one
-        user_callback = kwargs['callback']
+    if n_checkpoint > 0:
+        if 'callback' not in kwargs:
+            kwargs['callback'] = partial(
+                callback_with_checkpoint, checkpoint_filename=checkpoint_filename)
+        else:
+            # If callback exists, combine it with the existing one
+            user_callback = kwargs['callback']
 
-        def combined_callback(xk):
-            callback_with_checkpoint(xk, checkpoint_filename)
-            user_callback(xk)
+            def combined_callback(xk):
+                callback_with_checkpoint(xk, checkpoint_filename)
+                user_callback(xk)
 
-        kwargs['callback'] = combined_callback
+            kwargs['callback'] = combined_callback
 
     result = minimize(func, x0, *args, method = minimize_method, tol = tol, options= {'disp':True}, **kwargs,  )
 
@@ -1098,11 +1099,12 @@ def generate_ivp_predictions(optimized_result, df, subject_id_c='SUBJID', dose_c
     return predictions
 
 from diffeqs import PKBaseODE
-
+import uuid
 class CompartmentalModel(RegressorMixin, BaseEstimator):
     @profile
     def __init__(
         self,
+        model_name:str = None, 
         groupby_col: str = 'SUBJID',
         conc_at_time_col: str = 'DV',
         log_transform_dep_var = False,
@@ -1126,9 +1128,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         optimizer_tol = None,
         verbose=False, 
         ode_solver_method = 'RK45',
-        minimize_method:Literal[*MINIMIZE_METHODS_NEW_CB] = 'l-bfgs-b'
+        minimize_method:Literal[*MINIMIZE_METHODS_NEW_CB] = 'l-bfgs-b',
+        batch_id:uuid.UUID = None, 
+        model_id:uuid.UUID = None,
 
     ):
+        self.batch_id = uuid.uuid4() if batch_id is None else batch_id
+        self.model_id = uuid.uuid4() if model_id is None else model_id
+        self.model_name = model_name
         self.pk_model_class = pk_model_class
         self.pk_model_function = self.pk_model_class.ode
         dep_vars = {} if dep_vars is None else dep_vars
@@ -1605,7 +1612,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             
         return preds
     @profile
-    def fit2(self, data, parallel = False, parallel_n_jobs = -1 , n_iters_per_checkpoint = 5, warm_start = False, checkpoint_filename='check_test.jb', ):
+    def fit2(self, data, parallel = False, parallel_n_jobs = -1 ,
+             n_iters_per_checkpoint = 5, warm_start = False,
+             fit_id:uuid.UUID = None, ):
+        fit_id = uuid.uuid4() if fit_id is None else fit_id
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data)
         subject_level_intercept_init_vals = self.subject_level_intercept_init_vals
         sigma_check_1 = len(omegas.values) > 0
@@ -1658,10 +1668,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                      subject_level_intercept_init_vals = subject_level_intercept_init_vals,
                                      parallel = parallel,
                                      parallel_n_jobs = parallel_n_jobs)
+        checkpoint_filename = f"b-{str(self.batch_id)}_m-{str(self.model_id)}_f-{str(fit_id)}.jb"
+        checkpoint_filepath = os.path.join('logs', checkpoint_filename)
         self.fit_result_ = optimize_with_checkpoint_joblib(objective_function,
                                                            init_params,
                                                            n_checkpoint=n_iters_per_checkpoint,
-                                                           checkpoint_filename=checkpoint_filename,
+                                                           checkpoint_filename=checkpoint_filepath,
                                                            args=(theta_data,),
                                                            warm_start=warm_start,
                                                            minimize_method=self.minimize_method,
@@ -1678,3 +1690,15 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if len(omegas.values) > 0:
             _ = self.predict2(data, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
         return deepcopy(self)
+
+def fit_indiv_models(compartmental_model:CompartmentalModel, df:pd.DataFrame):
+    df = df.copy()
+    fits = []
+    fit_res_dfs = []
+    for sub in df['SUBJID'].unique():
+        fit_df = df.loc[df['SUBJID'] == sub, :].copy()
+        fit = compartmental_model.fit2(fit_df,checkpoint_filename=f'mod_fo_abs_indv{sub}_{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+        fit_df['pred_y'] = fit.predict2(fit_df)
+        fits.append(fit.fit_result_)
+        fit_res_dfs.append(fit_df.copy())
+    fit_res_df = pd.concat(fit_res_dfs)
