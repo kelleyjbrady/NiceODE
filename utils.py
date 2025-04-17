@@ -970,9 +970,10 @@ def objective_function__mgkg_age(params, data, subject_id_c='SUBJID', dose_c='DO
 
 ALLOWED_MINIMIZE_METHODS: Tuple[str, ...] = tuple(MINIMIZE_METHODS_NEW_CB)
 def optimize_with_checkpoint_joblib(func,
-                                    x0, n_checkpoint, 
+                                    x0, 
                                     checkpoint_filename,
                                     *args,
+                                    n_checkpoint:int = 0, 
                                     warm_start = False,
                                     tol = None,
                                     minimize_method:ALLOWED_MINIMIZE_METHODS = 'l-bfgs-b',
@@ -1613,7 +1614,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return preds
     @profile
     def fit2(self, data, parallel = False, parallel_n_jobs = -1 ,
-             n_iters_per_checkpoint = 5, warm_start = False,
+             n_iters_per_checkpoint = 0, warm_start = False,
              fit_id:uuid.UUID = None, ):
         fit_id = uuid.uuid4() if fit_id is None else fit_id
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data)
@@ -1669,11 +1670,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                      parallel = parallel,
                                      parallel_n_jobs = parallel_n_jobs)
         checkpoint_filename = f"b-{str(self.batch_id)}_m-{str(self.model_id)}_f-{str(fit_id)}.jb"
-        checkpoint_filepath = os.path.join('logs', checkpoint_filename)
+        #checkpoint_filepath = os.path.join('logs', checkpoint_filename)
         self.fit_result_ = optimize_with_checkpoint_joblib(objective_function,
                                                            init_params,
                                                            n_checkpoint=n_iters_per_checkpoint,
-                                                           checkpoint_filename=checkpoint_filepath,
+                                                           checkpoint_filename=checkpoint_filename,
                                                            args=(theta_data,),
                                                            warm_start=warm_start,
                                                            minimize_method=self.minimize_method,
