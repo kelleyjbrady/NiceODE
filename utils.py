@@ -32,6 +32,8 @@ import numdifftools as nd
 from line_profiler import profile
 from typing import Literal, Tuple
 from scipy.optimize._minimize import MINIMIZE_METHODS_NEW_CB
+import joblib as jb
+from typing import Self
 
 def debug_print(print_obj, debug = False):
     if debug:
@@ -973,6 +975,7 @@ def optimize_with_checkpoint_joblib(func,
                                     x0, 
                                     checkpoint_filename,
                                     *args,
+                                    verbose_callback = False,
                                     n_checkpoint:int = 0, 
                                     warm_start = False,
                                     tol = None,
@@ -1550,7 +1553,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
             error = self.no_me_loss_function(self.y, preds, **self.no_me_loss_params)
-        #If we DO need to unpack sigma even without omegas, the unpacking logic is the same (ie. log-likelihood)
+        #If we DO need to unpack sigma, even without omegas, the unpacking logic is the same (ie. log-likelihood w/ or w/o mixed effects)
         elif (self.n_subject_level_intercept_sds > 0) or self.no_me_loss_needs_sigma:
             n_pop_c = self.n_population_coeff
             pop_coeffs = pd.DataFrame(params[:n_pop_c].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns[:n_pop_c])
@@ -1571,6 +1574,20 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 error, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, FO_b_i_apprx = subject_level_intercept_init_vals)
 
         return error
+    
+    def save_fitted_model(self, jb_file_name:str = None ):
+        if self.fit_result_ is None:
+            raise ValueError("The Model must be fit before saving a fitted model")
+        save_dir = "logs/"
+        if not os.path.exists('logs'):
+            os.mkdir('logs')
+        id_str = (jb_file_name if jb_file_name is not None 
+                  else self._generate_fitted_model_name())
+        save_path = os.path.join(save_dir, f"fitted_model_{id_str}.jb")
+        with open(save_path, 'wb') as f:
+            jb.dump(self, f)
+        
+    
     @profile
     def predict2(self, data, parallel = None, parallel_n_jobs = None, timepoints = None ):
         if self.fit_result_ is None:
@@ -1615,7 +1632,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     @profile
     def fit2(self, data, parallel = False, parallel_n_jobs = -1 ,
              n_iters_per_checkpoint = 0, warm_start = False,
-             fit_id:uuid.UUID = None, ):
+             fit_id:uuid.UUID = None, ) -> Self:  
         fit_id = uuid.uuid4() if fit_id is None else fit_id
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data)
         subject_level_intercept_init_vals = self.subject_level_intercept_init_vals
@@ -1669,7 +1686,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                      subject_level_intercept_init_vals = subject_level_intercept_init_vals,
                                      parallel = parallel,
                                      parallel_n_jobs = parallel_n_jobs)
-        checkpoint_filename = f"b-{str(self.batch_id)}_m-{str(self.model_id)}_f-{str(fit_id)}.jb"
+        self.fit_id = fit_id
+        id_str = self._generate_fitted_model_name(ignore_fit_status=True)
+        checkpoint_filename = f"{id_str}.jb"
         #checkpoint_filepath = os.path.join('logs', checkpoint_filename)
         self.fit_result_ = optimize_with_checkpoint_joblib(objective_function,
                                                            init_params,
@@ -1691,6 +1710,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if len(omegas.values) > 0:
             _ = self.predict2(data, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
         return deepcopy(self)
+    def _generate_fitted_model_name(self, ignore_fit_status = False):
+        if (self.fit_result_ is None) and not ignore_fit_status:
+            raise ValueError("The Model must be fit before generating a fitted model id")
+        else:
+            return f"b-{str(self.batch_id)}_m-{str(self.model_id)}_f-{str(self.fit_id)}"
+        
 
 def fit_indiv_models(compartmental_model:CompartmentalModel, df:pd.DataFrame):
     df = df.copy()
@@ -1703,3 +1728,4 @@ def fit_indiv_models(compartmental_model:CompartmentalModel, df:pd.DataFrame):
         fits.append(fit.fit_result_)
         fit_res_dfs.append(fit_df.copy())
     fit_res_df = pd.concat(fit_res_dfs)
+    
