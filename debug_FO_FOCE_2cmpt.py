@@ -32,14 +32,46 @@ import cProfile
 from datetime import datetime
 
 now_str = datetime.now().strftime("_%d%m%Y-%H%M%S")
-with open(r'/workspaces/PK-Analysis/debug_scale_df.jb', 'rb') as f:
+with open(r'/workspaces/PK-Analysis/absorbtion_debug_scale_df.jb', 'rb') as f:
     scale_df = jb.load(f)
+#%%
+scale_df['dose_ng'] = scale_df['AMT']*1000
+scale_df['DV_ng/L'] = (scale_df['DV'] * 1000)
+scale_df['dose_scale'] = scale_df['dose_ng'] / 1e5
+scale_df['DV_scale'] = scale_df['DV_ng/L'] / 1e5
+#scale_df['DV_scale']= scale_df['DV_ng/L']/scale_df['dose_ng'].max()
+#scale_df['dose_scale'] = 1.0
 
-scale_df['DV'] = (scale_df['DV'] * 100 * 1000) / 10000000 #convert to ng/L
-scale_df['AMT'] = (scale_df['AMT'] * 1000) / 10000000 #convert to ng
+zero_out_abs = True
+if zero_out_abs:
+    dfs = []
+    for c in scale_df['SUBJID'].unique():
+        work_df = scale_df.loc[scale_df['SUBJID'] == c, :].reset_index(drop = True)
+        tmax = work_df.loc[work_df['DV'] == work_df['DV'].max(), 'TIME'].to_numpy()[0]
+        gte_max_f = work_df['TIME'] >= tmax
+        t0_f = work_df['TIME'] == 0
+        work_df = work_df.loc[gte_max_f | t0_f, :]
+        #max_idx = work_df.loc[work_df['DV'] == work_df['DV'].max(), :].index[0]
+        #work_df = work_df.iloc[max_idx:, :]
+        #work_df['TIME'] = work_df['TIME'] - work_df['TIME'].min()
+        dfs.append(work_df.copy())
+    work_df = pd.concat(dfs)
+else:
+    work_df = scale_df.copy()
+    
+scale_df = work_df.copy()
+
+work_df.loc[work_df['TIME'] == 0, 'solve_ode_at_TIME'] = False
+work_df.loc[work_df['TIME'] > 0, 'solve_ode_at_TIME'] = True
+
+piv_cols = []
+res_df = pd.DataFrame()
+res_df[['SUBJID', 'TIME',  'DV_scale']] = scale_df[['SUBJID', 'TIME', 'DV_scale']].copy()
+piv_cols.append('DV_scale')
+
 # %%
 me_mod_fo =  CompartmentalModel(
-          ode_t0_cols=[ ODEInitVals('DV'), ODEInitVals('AMT'),],
+          ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('dose_scale'),],
           population_coeff=[
                             PopulationCoeffcient('ka', .7, 
                                                  subject_level_intercept=True,
