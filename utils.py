@@ -532,9 +532,9 @@ def _estimate_b_i(model_obj, pop_coeffs, thetas, beta_data, sigma2, Omega, omega
             b_i[check_neg_inf] = 0
         combined_coeffs = pop_coeffs.copy()
         # Ensure b_i is a Series with correct index for merging
-
-        b_i = b_i.reshape(1, -1)
-        b_i_df = pd.DataFrame(b_i, dtype = pd.Float64Dtype(), columns=omega_names)
+        
+        b_i = b_i.reshape(1, -1) if len(b_i) == 1 else b_i #not sure if this is necessary
+        b_i_df = pd.DataFrame(b_i.reshape(1, -1), dtype = pd.Float64Dtype(), columns=omega_names)
         b_i_df.columns = pd.MultiIndex.from_tuples(b_i_df.columns)
         
         
@@ -616,9 +616,9 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
     y = np.copy(model_obj.y)
     y_groups_idx = np.copy(model_obj.y_groups)
     omegas_names = list(omegas.columns)
-    omegas = omegas.values.flatten() #omegas as SD, we want Variance, thus **2 below
+    omegas = omegas.to_numpy(dtype = np.float64 ).flatten() #omegas as SD, we want Variance, thus **2 below
     omegas2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
-    sigma = sigma.values[0]
+    sigma = sigma.to_numpy(dtype = np.float64 )[0]
     sigma2 = sigma**2
     n_individuals = len(model_obj.unique_groups)
     n_random_effects = len(omegas_names)
@@ -719,7 +719,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma,
     omegas_names = list(omegas.columns)
     omegas = omegas.to_numpy(dtype = np.float64 ).flatten() #omegas as SD, we want Variance, thus **2 below
     omegas2 = np.diag(omegas**2) #FO assumes that there is no cov btwn the random effects, thus off diags are zero
-    sigma = sigma.values[0]
+    sigma = sigma.to_numpy(dtype = np.float64 )[0]
     sigma2 = sigma**2
     n_individuals = len(model_obj.unique_groups)
     n_random_effects = len(omegas_names)
@@ -1137,6 +1137,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         model_id:uuid.UUID = None,
 
     ):
+        
+        
         self.batch_id = uuid.uuid4() if batch_id is None else batch_id
         self.model_id = uuid.uuid4() if model_id is None else model_id
         self.model_name = model_name
@@ -1179,6 +1181,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.bounds = self._unpack_upper_lower_bounds(self.model_error_sigma)
         self.no_me_loss_params = no_me_loss_params
         self.optimzer_tol = optimizer_tol
+        
+        #helper attributes possibly defined later
+        self.fit_result_ = None
     
     def _validate_ode_t0_vals_size(self, ode_t0_vals):
         size_tmp = len(ode_t0_vals)
