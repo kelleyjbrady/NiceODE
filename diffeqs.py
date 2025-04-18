@@ -2,6 +2,75 @@ from numba import njit
 import abc
 
 
+nca_docstring = """
+    Relevant NCA Estimated Parameters:
+        Non-Compartmental Analysis (NCA) provides model-independent estimates of
+        drug exposure and disposition kinetics directly from concentration-time
+        data. These estimates are valuable for summarizing data and informing
+        initial parameter guesses or evaluating compartmental models. It is critical that 
+        the units of the various inputs to the NCA estimation are compatible. For example, 
+        when using NCA to estimate CL the y axis (concentration) of the conc:time profile 
+        must have the same mass units as the dose used in the calculation (CL = Dose_IV / AUC_inf_IV). 
+        Further, because it is fairly standard in PK literature to express volume/time as liters/hr 
+        the units of time should be converted to hours and the units of volume should be converted to
+        liters. You should always be cognizant and keep track of the units of your analysis 
+        to ensure you are not generating nonsense.
+        
+        Key relevant NCA parameters include:
+
+        - AUC_inf (Area Under the Concentration-Time Curve extrapolated to infinity):
+            Represents total drug exposure. Calculated using the trapezoidal rule
+            up to the last measurable concentration (AUC_last) plus an extrapolated
+            area based on the terminal phase: AUC_inf = AUC_last + C_last / lambda_z.
+            Units: concentration * time (e.g., mg*hr/L).
+
+        - lambda_z (Terminal Elimination Rate Constant):
+            Estimated from the slope of the terminal log-linear decline phase of the
+            concentration-time curve via linear regression.
+            Units: 1/time (e.g., 1/hr).
+
+        - t_half_z (Terminal Half-life):
+            The time required for the concentration to decrease by half during the
+            terminal phase. Calculated as t_half_z = ln(2) / lambda_z.
+            Units: time (e.g., hr).
+
+        - CL (Total Clearance):
+            The volume of plasma (or blood) cleared of drug per unit time. Represents
+            the overall efficiency of drug elimination.
+            * For Intravenous (IV) data: CL = Dose_IV / AUC_inf_IV.
+            * For Extravascular (EV) data: Only Apparent Clearance (CL/F) can be
+                estimated without knowing bioavailability (F): CL/F = Dose_EV / AUC_inf_EV.
+            Units: volume/time (e.g., L/hr).
+
+        - Vz (Volume of Distribution during Terminal Phase):
+            An apparent volume relating plasma concentration to the amount of drug
+            in the body during the terminal elimination phase.
+            * For IV data: Vz = CL / lambda_z.
+            * For EV data: Apparent Volume (Vz/F) is estimated: Vz/F = (CL/F) / lambda_z.
+            Units: volume (e.g., L).
+
+        - Vdss (Volume of Distribution at Steady State):
+            The theoretical volume the drug would occupy at steady state, reflecting
+            the extent of distribution at equilibrium. Usually calculated from IV data
+            using Mean Residence Time (MRT): Vdss = CL * MRT_IV = CL * (AUMC_inf_IV / AUC_inf_IV).
+            For multi-compartment drugs, often Vdss <= Vz.
+            Units: volume (e.g., L).
+
+        - MRT (Mean Residence Time):
+            The average time drug molecules spend in the body. Calculated from IV data as
+            MRT_IV = AUMC_inf_IV / AUC_inf_IV, where AUMC is the Area Under the First
+            Moment Curve (Concentration * time).
+            Units: time (e.g., hr).
+
+        - Cmax:
+            The maximum observed concentration in the measured data.
+            Units: concentration (e.g., mg/L).
+
+        - Tmax:
+            The time at which Cmax is observed. Primarily relevant for extravascular routes.
+            Units: time (e.g., hr).
+    """
+
 class OneCompartmentFODiffEq(object):
     def __init__(self):
         self.params = {'cl': {
@@ -151,7 +220,7 @@ class OneCompartmentConc(PKBaseODE):
         return pred_mass
 
 class OneCompartmentAbsorption(PKBaseODE):
-    """
+    f"""
     One-compartment model with first-order absorption (Gut -> Central).
     Parameterized by Ka, Apparent Clearance (CL/F), Apparent Volume (Vd/F).
 
@@ -283,6 +352,8 @@ class OneCompartmentAbsorption(PKBaseODE):
         - Increasing `ka`: Faster absorption, earlier Tmax, potentially higher Cmax.
         - Increasing `cl_f`: Lower AUC, lower Cmax, faster decline (shorter t1/2).
         - Increasing `vd_f`: Lower Cmax, slower decline (longer t1/2), no change to AUC.
+    
+    {nca_docstring}
     """
     def __init__(self, ):
         pass
@@ -317,7 +388,7 @@ def one_compartment_absorption2(t, y, ka, ke):
     return [dCdt, dAdt]
 
 class OneCompartmentAbsorption2(PKBaseODE):
-    """
+    f"""
     One-compartment model with first-order absorption (Gut -> Central).
     Parameterized by Ka, Elimination Rate Constant (Ke), Apparent Volume (Vd/F).
 
@@ -443,7 +514,7 @@ class OneCompartmentAbsorption2(PKBaseODE):
             eliminate a given mass but t1/2 depends only on Ke in this param. Increases apparent
             CL (CL/F = ke * Vd/F) leading to lower AUC.
         
-    
+    {nca_docstring}
     """
     def __init__(self, ):
         pass
@@ -460,7 +531,7 @@ class OneCompartmentAbsorption2(PKBaseODE):
         return depvar_unit_result
 
 class OneCompartmentBolus_CL(PKBaseODE):
-    """
+    f"""
     One-compartment IV Bolus model. Parameterized by Clearance (CL) and Volume (Vd).
 
     Simplest model for IV bolus injection, assuming instantaneous distribution
@@ -561,6 +632,8 @@ class OneCompartmentBolus_CL(PKBaseODE):
     Parameter Sensitivity (Qualitative):
         - Increasing `cl`: Faster decline (shorter t1/2), lower AUC.
         - Increasing `vd`: Slower decline (longer t1/2), lower C0/initial concentrations, no change to AUC.
+    
+    {nca_docstring}
     """
     def __init__(self, ):
         pass
@@ -579,7 +652,7 @@ class OneCompartmentBolus_CL(PKBaseODE):
         return depvar_unit_result
 
 class OneCompartmentBolus_Ke(PKBaseODE):
-    """
+    f"""
     One-compartment IV Bolus model. Parameterized by Elimination Rate Constant (Ke) and Volume (Vd).
 
     Alternative parameterization for IV bolus, assuming instantaneous distribution
@@ -684,6 +757,8 @@ class OneCompartmentBolus_Ke(PKBaseODE):
     Parameter Sensitivity (Qualitative):
         - Increasing `ke`: Faster decline (shorter t1/2), lower AUC (assuming fixed Vd).
         - Increasing `vd`: Lower C0/initial concentrations, no change to t1/2 (fixed Ke), lower AUC (as CL = Ke*Vd increases).
+    
+    {nca_docstring}
     """
     def __init__(self, ):
         pass
@@ -700,7 +775,7 @@ class OneCompartmentBolus_Ke(PKBaseODE):
         return depvar_unit_result
 
 class TwoCompartmentBolus(PKBaseODE):
-    """
+    f"""
     Two-compartment IV Bolus model (Central, Peripheral).
     Parameterized by Clearance (cl), Volume Central (v1),
     Inter-compartmental Clearance (q), Volume Peripheral (v2).
@@ -842,6 +917,8 @@ class TwoCompartmentBolus(PKBaseODE):
             Terminal phase (beta) may become faster or slower depending on relative rates. Lower initial peak.
         - Increasing `v2`: Slower distribution (smaller alpha), slower terminal phase (smaller beta, longer t1/2,beta), larger Vdss.
             Less impact on initial concentration.
+    
+    {nca_docstring}
     """
     def __init__(self, ):
         pass
@@ -861,7 +938,7 @@ class TwoCompartmentBolus(PKBaseODE):
         return depvar_unit_result
 
 class TwoCompartmentAbsorption(PKBaseODE):
-    """
+    f"""
     Two-compartment model with first-order absorption (Gut -> Central -> Peripheral).
     Parameterized by Absorption Rate Const (ka), Clearance (cl), Volume Central (v1),
     Inter-compartmental Clearance (q), Volume Peripheral (v2).
@@ -1008,6 +1085,8 @@ class TwoCompartmentAbsorption(PKBaseODE):
         - Increasing `v1_f`: Lower initial concentrations post-absorption, complex effects on profile shape.
         - Increasing `q_f`: Faster distribution phase, potentially lower peak concentration (Cmax).
         - Increasing `v2_f`: Slower distribution, slower terminal decline (longer t1/2,beta), larger Vdss/F.
+    
+    {nca_docstring}
     """
     def __init__(self, ):
         pass
@@ -1050,7 +1129,7 @@ class TwoCompartmentAbsorption(PKBaseODE):
         return depvar_unit_result
 
 class OneCompartmentInfusion(PKBaseODE):
-    """
+    f"""
     One-compartment model with zero-order infusion.
     Parameterized by Infusion Rate (R0), Clearance (cl), Volume (vd).
 
@@ -1159,6 +1238,8 @@ class OneCompartmentInfusion(PKBaseODE):
         - Increasing `cl`: Lower concentrations during infusion, lower Css, faster decline post-infusion (shorter t1/2).
         - Increasing `vd`: Slower approach to Css, lower concentrations for a given mass, slower
             decline post-infusion (longer t1/2), no change to Css.
+    
+    {nca_docstring}
     """
     def __init__(self, ):
         pass
@@ -1178,7 +1259,7 @@ class OneCompartmentInfusion(PKBaseODE):
         return depvar_unit_result
 
 class OneCompartmentBolusMM(PKBaseODE):
-    """
+    f"""
     One-compartment IV Bolus model with Michaelis-Menten (saturable) elimination.
     Parameterized by Max Elimination Rate (vmax), Michaelis Constant (km),
     and Volume of Distribution (vd).
@@ -1301,6 +1382,8 @@ class OneCompartmentBolusMM(PKBaseODE):
             Increases concentrations needed to reach Vmax/2. Increases CL(C) at C >> Km.
         - Increasing `vd`: Lower concentrations overall (C=Mass/Vd), which indirectly slows elimination rate (Vmax*C/(Km+C)).
             Prolongs elimination time.
+    
+    {nca_docstring}
     """
     def __init__(self, ):
         pass
