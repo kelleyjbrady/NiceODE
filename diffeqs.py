@@ -153,70 +153,84 @@ class OneCompartmentConc(PKBaseODE):
 class OneCompartmentAbsorption(PKBaseODE):
     """
     One-compartment model with first-order absorption (Gut -> Central).
-    Parameterized by Ka, CL, Vd.
+    Parameterized by Ka, Apparent Clearance (CL/F), Apparent Volume (Vd/F).
 
-    Represents oral or extravascular administration where drug enters the
-    central compartment via a first-order absorption process from a
-    hypothetical 'gut' or depot compartment. Elimination is first-order
-    from the central compartment.
+    Represents oral or other extravascular administration with first-order
+    absorption and first-order elimination from a single compartment. That is, 
+    oral or extravascular administration where drug enters the central compartment
+    via a first-order absorption process from a hypothetical 'gut' or depot compartment.
+    This is a common baseline model for extravascular PK data.
+
+    Key Model Assumptions:
+        - First-order absorption process (rate proportional to amount at absorption site).
+        - Single, well-stirred central compartment.
+        - First-order elimination process (rate proportional to amount in central compartment).
+        - Instantaneous distribution within the compartment.
+        - Constant parameters over time and concentration range.
 
     States (y):
         y[0]: Mass in Central Compartment (amount)
         y[1]: Mass in Gut/Absorption Compartment (amount)
+        Order: [Central, Gut]
 
     Parameters (*params for ode/mass_to_depvar):
         ka (float): First-order absorption rate constant (1/time).
-        cl (float): Clearance from the central compartment (volume/time).
-        vd (float): Volume of distribution of the central compartment (volume).
+        cl_f (float): Apparent clearance (CL/F) from the central compartment (volume/time).
+                      CL is the true clearance, F is bioavailability.
+        vd_f (float): Apparent volume of distribution (Vd/F) of the central compartment (volume).
+                      Vd is the true volume.
+
+    Units and Output:
+        - Ensure consistency in units (e.g., hours, Liters, mg).
+        - Typical units: ka(1/hr), cl_f(L/hr), vd_f(L).
+        - The ODE solver returns mass in compartments [Central, Gut] over time.
+        - `mass_to_depvar` converts Central mass (y[0]) to concentration using Vd/F.
+          Concentration = Mass / (Vd/F).
+
+    Handling Dosing in Simulations:
+        - Dosing is handled *externally* to the ODE function by the solver setup.
+        - For a dose `Dose` at t=0: Set initial conditions `y0 = [0, Dose]`.
+        - For multiple doses: At each dose time, add `Dose` to the current mass in
+          the Gut compartment (y[1]) and restart/continue the simulation.
+
+    Common Derived Parameters:
+        - Elimination rate constant: ke = cl_f / vd_f (= CL/Vd, independent of F).
+        - Half-life (terminal): t1/2 = ln(2) / ke = ln(2) * (vd_f / cl_f).
+        - Area Under Curve (AUC): AUC_inf = Dose / cl_f = (F * Dose) / CL.
 
     Initial Conditions (y0 for ODE solver):
-        Typically, for a single dose `Dose` at t=0:
-        y0 = [0, Dose]
-        If starting simulation after absorption has begun, estimate residual
-        masses in both compartments.
+        Typically, for a single dose `Dose` at t=0: y0 = [0, Dose]
 
     Initial Parameter Estimates (for optimization):
-        - ka: Related to Tmax (time of peak concentration). Rough guess: 1/Tmax.
-              Can be sensitive, try values like 0.5, 1.0, 2.0 (1/hr).
-        - cl: Estimate from NCA: CL/F = Dose / AUC_inf (F=bioavailability).
-              Guess F (e.g., 1) if unknown.
-        - vd: Estimate from NCA: Vd/F = CL/F / lambda_z. Use terminal slope
-              lambda_z. Or Vd/F ~ Dose / (AUC*lambda_z). Often larger than
-              physiological volumes. Check literature for similar drugs.
-    
-    Optimizer Bounds:
-         - Lower Bounds: All parameters (ka, cl, vd, ke) must be > 0. Use a small positive number (e.g., 1e-9).
-         - Upper Bounds: Less critical, but use plausible limits.
+        - ka: Related to Tmax (time of peak concentration). Guess ~1/Tmax.
+        - cl_f: Estimate from NCA: CL/F = Dose / AUC_inf.
+        - vd_f: Estimate from NCA: Vd/F = (CL/F) / lambda_z (where lambda_z ≈ ke). lambda_z
+            is the terminal slope of the ln(conc):time profile. Alternatively: Vd/F ~ Dose / (AUC*lambda_z). 
+            Often larger than physiological volumes. Check literature for similar drugs.
+
+        Optimizer Bounds:
+         - Lower Bounds: ka, cl_f, vd_f typically set > small positive value (e.g., 1e-9).
+        - Upper Bounds: Less critical, but use plausible limits.
            - ka: Can be large (e.g., 10 or 100 1/hr), but usually < 50.
-           - cl(/F): Should generally not exceed physiological limits like cardiac output or relevant organ blood flow (e.g., < 100-200 L/hr for human hepatic/renal flow).
-           - vd(/F): Highly variable, but unlikely to be thousands of L/kg. Can be informed by Vz/F from NCA. Start relatively large if unsure (e.g., 1000 L).
-           - ke: Usually < 10 1/hr. Related to cl/vd bounds.
+           - cl_f: Should generally not exceed physiological limits like cardiac output or relevant organ blood flow (e.g., < 100-200 L/hr for human hepatic/renal flow).
+           - vd_f: Highly variable, but unlikely to be thousands of L/kg. Can be informed by Vz/F from NCA. Start relatively large if unsure (e.g., 1000 L).
+
 
     Common Covariate Associations (Fixed Effects):
-        These parameters may be influenced by subject attributes:
-        - cl(/F): Often associated with body weight (allometric scaling), renal function
-                  (e.g., Creatinine Clearance - CrCL) if renally excreted, hepatic
-                  function markers if hepatically metabolized, age, genetic polymorphisms.
-        - vd(/F): Often associated with body weight (allometric scaling), sometimes
-                  body composition (fat mass for lipophilic drugs), age.
-        - ka: Can be influenced by formulation differences, food effects, GI transit
-              time/pH modifiers, age (esp. pediatrics/geriatrics).
-        - F (Bioavailability, implicitly affecting cl/F, vd/F): Influenced by formulation,
-              food, gut wall metabolism/transporters (genetics, drug interactions).
+        - cl_f: CL often related to weight (allometry), renal/hepatic function, age, genetics. F affected by gut factors.
+        - vd_f: Vd often related to weight (allometry), body composition, age. F affects apparent value.
+        - ka: Formulation, food, GI conditions (transit time, pH), age.
 
     Parameterization of Random Effects (Mixed Effects):
         In population modeling, inter-individual variability (IIV) is estimated:
         - Concept: Assumes each subject's parameter value (P_i) varies around the
                    typical population value (P_pop), often modeled using a log-normal
                    distribution: P_i = P_pop * exp(eta_i), where eta_i ~ N(0, omega^2).
-        - Estimated Term: The variance (omega^2) or standard deviation (omega) of the
-                         etas for each parameter exhibiting IIV.
-        - Common Parameters with IIV: Typically CL/F, Vd/F, and Ka often show
-                                     significant IIV.
-        - Initial Estimates for omega (SD): A common starting guess is ~0.3 (approx.
-                                          30% CV). Typical range might be 0.1 to 0.6.
-        - Bounds for omega^2 (Variance): Lower bound > 0 (e.g., 1e-6). Upper bound
-                                       can be relatively large (e.g., 1 or 4).
+        - Estimated Term: omega^2 (variance) or omega (SD) of IIV.
+        - Common Parameters with IIV: CL/F, Vd/F, Ka often show significant IIV.
+        - Initial Estimates for omega (SD): Start ~0.3 (30% CV). Range 0.1-0.6.
+        - Bounds for omega^2 (Variance): Lower > 0. Upper relatively large (e.g., 1-4).
+
 
               
     When to Prefer This Model:
@@ -258,6 +272,17 @@ class OneCompartmentAbsorption(PKBaseODE):
         4. Population Modeling: In population PK (PopPK), relationships between F, CL,
            and Vd can sometimes be disentangled using data from multiple dose levels
            or studies, potentially leveraging covariate information.
+           
+    Potential Model Extensions:
+        - Add compartments (Two-compartment absorption model).
+        - Implement non-linear elimination (Michaelis-Menten).
+        - Add transit compartments for absorption delay.
+        - Include effect compartment for PK/PD modeling.
+
+    Parameter Sensitivity (Qualitative):
+        - Increasing `ka`: Faster absorption, earlier Tmax, potentially higher Cmax.
+        - Increasing `cl_f`: Lower AUC, lower Cmax, faster decline (shorter t1/2).
+        - Increasing `vd_f`: Lower Cmax, slower decline (longer t1/2), no change to AUC.
     """
     def __init__(self, ):
         pass
@@ -294,63 +319,76 @@ def one_compartment_absorption2(t, y, ka, ke):
 class OneCompartmentAbsorption2(PKBaseODE):
     """
     One-compartment model with first-order absorption (Gut -> Central).
-    Parameterized by Ka, Ke, Vd. (Ke = CL/Vd)
+    Parameterized by Ka, Elimination Rate Constant (Ke), Apparent Volume (Vd/F).
 
-    Alternative parameterization of the 1-compartment absorption model.
+    Represents oral or other extravascular administration with first-order
+    absorption and first-order elimination from a single compartment. This uses
+    the elimination rate constant (Ke) directly.
+
+    Key Model Assumptions:
+        - First-order absorption process.
+        - Single, well-stirred central compartment.
+        - First-order elimination process (parameterized by Ke).
+        - Instantaneous distribution within the compartment.
+        - Constant parameters over time and concentration range.
 
     States (y):
         y[0]: Mass in Central Compartment (amount)
         y[1]: Mass in Gut/Absorption Compartment (amount)
+        Order: [Central, Gut]
 
     Parameters (*params for ode/mass_to_depvar):
         ka (float): First-order absorption rate constant (1/time).
-        ke (float): First-order elimination rate constant (1/time).
-        vd (float): Volume of distribution of the central compartment (volume).
+        ke (float): First-order elimination rate constant (1/time). Note: Ke = CL/Vd.
+        vd_f (float): Apparent volume of distribution (Vd/F) of the central compartment (volume).
+
+    Units and Output:
+        - Ensure consistency in units (e.g., hours, Liters, mg).
+        - Typical units: ka(1/hr), ke(1/hr), vd_f(L).
+        - ODE solver returns mass in compartments [Central, Gut] over time.
+        - `mass_to_depvar` converts Central mass (y[0]) to concentration using Vd/F.
+          Concentration = Mass / (Vd/F).
+
+    Handling Dosing in Simulations:
+        - Dosing handled externally by solver setup.
+        - Dose `Dose` at t=0: `y0 = [0, Dose]`.
+        - Multiple doses: Add `Dose` to Gut compartment mass (y[1]) at dose time.
+
+    Common Derived Parameters:
+        - Half-life (terminal): t1/2 = ln(2) / ke.
+        - Apparent Clearance (CL/F): cl_f = ke * vd_f.
+        - Area Under Curve (AUC): AUC_inf = Dose / cl_f = Dose / (ke * vd_f).
 
     Initial Conditions (y0 for ODE solver):
-        Typically, for a single dose `Dose` at t=0:
-        y0 = [0, Dose]
+        Typically, for a single dose `Dose` at t=0: y0 = [0, Dose]
 
     Initial Parameter Estimates (for optimization):
-        - ka: Related to Tmax. Rough guess: 1/Tmax. Try 0.5, 1.0, 2.0 (1/hr).
-        - ke: Estimate from terminal slope (lambda_z) of log(concentration) vs time.
-              ke ≈ lambda_z for this model after absorption phase.
-        - vd: Estimate from Dose / (ke * AUC). Or use CL estimate (CL = ke*vd)
-              from NCA (CL/F = Dose/AUC) combined with ke estimate. Check literature.
-    
-    Optimizer Bounds:
-         - Lower Bounds: All parameters (ka, cl, vd, ke) must be > 0. Use a small positive number (e.g., 1e-9).
-         - Upper Bounds: Less critical, but use plausible limits.
+        - ka: Related to Tmax. Guess ~1/Tmax.
+        - ke: Estimate from terminal slope of ln(C) vs t: ke ≈ lambda_z.
+        - vd_f: Estimate from NCA: Vd/F = (Dose / AUC_inf) / ke = CL/F / ke.
+
+        Optimizer Bounds:
+         - Lower Bounds: ka, ke, vd_f typically set > small positive value (e.g., 1e-9).
+        - Upper Bounds: Less critical, but use plausible limits.
            - ka: Can be large (e.g., 10 or 100 1/hr), but usually < 50.
-           - cl(/F): Should generally not exceed physiological limits like cardiac output or relevant organ blood flow (e.g., < 100-200 L/hr for human hepatic/renal flow).
            - vd(/F): Highly variable, but unlikely to be thousands of L/kg. Can be informed by Vz/F from NCA. Start relatively large if unsure (e.g., 1000 L).
            - ke: Usually < 10 1/hr. Related to cl/vd bounds.
 
     Common Covariate Associations (Fixed Effects):
-        These parameters may be influenced by subject attributes:
-        - cl(/F): Often associated with body weight (allometric scaling), renal function
-                  (e.g., Creatinine Clearance - CrCL) if renally excreted, hepatic
-                  function markers if hepatically metabolized, age, genetic polymorphisms.
-        - vd(/F): Often associated with body weight (allometric scaling), sometimes
-                  body composition (fat mass for lipophilic drugs), age.
-        - ka: Can be influenced by formulation differences, food effects, GI transit
-              time/pH modifiers, age (esp. pediatrics/geriatrics).
-        - F (Bioavailability, implicitly affecting cl/F, vd/F): Influenced by formulation,
-              food, gut wall metabolism/transporters (genetics, drug interactions).
+        - ke: As CL/Vd, influenced by factors affecting both (weight, organ function, age). Often modeled via CL and Vd covariates.
+        - vd_f: Vd often related to weight, body composition, age. F affects apparent value.
+        - ka: Formulation, food, GI conditions (transit time, pH), age.
 
     Parameterization of Random Effects (Mixed Effects):
         In population modeling, inter-individual variability (IIV) is estimated:
         - Concept: Assumes each subject's parameter value (P_i) varies around the
                    typical population value (P_pop), often modeled using a log-normal
                    distribution: P_i = P_pop * exp(eta_i), where eta_i ~ N(0, omega^2).
-        - Estimated Term: The variance (omega^2) or standard deviation (omega) of the
-                         etas for each parameter exhibiting IIV.
-        - Common Parameters with IIV: Typically CL/F, Vd/F, and Ka often show
-                                     significant IIV.
-        - Initial Estimates for omega (SD): A common starting guess is ~0.3 (approx.
-                                          30% CV). Typical range might be 0.1 to 0.6.
-        - Bounds for omega^2 (Variance): Lower bound > 0 (e.g., 1e-6). Upper bound
-                                       can be relatively large (e.g., 1 or 4).
+        - Estimated Term: omega^2 (variance) or omega (SD) of IIV.
+        - Common Parameters with IIV: Ke (or CL/F), Vd/F, Ka often show IIV.
+        - Initial Estimates for omega (SD): Start ~0.3 (30% CV).
+        - Bounds for omega^2 (Variance): Lower > 0. Upper relatively large (e.g., 1-4).
+
     
     When to Prefer This Model:
         1. Default Choice: Often the first model tried for extravascular data
@@ -391,6 +429,21 @@ class OneCompartmentAbsorption2(PKBaseODE):
         4. Population Modeling: In population PK (PopPK), relationships between F, CL,
            and Vd can sometimes be disentangled using data from multiple dose levels
            or studies, potentially leveraging covariate information.
+    
+    Potential Model Extensions:
+        - Add compartments (Two-compartment absorption model).
+        - Implement non-linear elimination (Michaelis-Menten).
+        - Add transit compartments for absorption delay.
+        - Include effect compartment for PK/PD modeling.
+    
+    Parameter Sensitivity (Qualitative):
+        - Increasing `ka`: Faster absorption, earlier Tmax, potentially higher Cmax.
+        - Increasing `ke`: Faster elimination rate, shorter t1/2, lower AUC (assuming fixed Vd/F), lower Cmax.
+        - Increasing `vd_f`: Lower concentrations overall (C = Mass / (Vd/F)), lower Cmax, longer time to
+            eliminate a given mass but t1/2 depends only on Ke in this param. Increases apparent
+            CL (CL/F = ke * Vd/F) leading to lower AUC.
+        
+    
     """
     def __init__(self, ):
         pass
@@ -408,54 +461,65 @@ class OneCompartmentAbsorption2(PKBaseODE):
 
 class OneCompartmentBolus_CL(PKBaseODE):
     """
-    One-compartment IV Bolus model.
-    Parameterized by Clearance (cl) and Volume of Distribution (vd).
+    One-compartment IV Bolus model. Parameterized by Clearance (CL) and Volume (Vd).
 
-    Simplest model for IV bolus injection. Assumes instantaneous distribution
-    throughout a single compartment volume and first-order elimination.
+    Simplest model for IV bolus injection, assuming instantaneous distribution
+    and first-order elimination. Forms the basis for many PK calculations.
+
+    Key Model Assumptions:
+        - Instantaneous administration and distribution (bolus input).
+        - Single, well-stirred central compartment.
+        - First-order elimination process (rate proportional to amount).
+        - Constant parameters over time and concentration range.
 
     States (y):
         y[0]: Mass in Central Compartment (amount)
+        Order: [Central]
 
     Parameters (*params for ode/mass_to_depvar):
         cl (float): Clearance from the central compartment (volume/time).
         vd (float): Volume of distribution of the central compartment (volume).
 
+    Units and Output:
+        - Ensure consistency (e.g., hr, L, mg). Typical units: cl(L/hr), vd(L).
+        - ODE solver returns mass in the Central compartment (y[0]) over time.
+        - `mass_to_depvar` converts Central mass to concentration using Vd.
+          Concentration = Mass / Vd.
+
+    Handling Dosing in Simulations:
+        - Dosing handled externally by solver setup.
+        - For dose `Dose` at t=0: Set initial conditions `y0 = [Dose]`.
+        - Multiple doses: At dose time, set/add `Dose` to Central compartment mass (y[0]).
+
+    Common Derived Parameters:
+        - Elimination rate constant: ke = cl / vd.
+        - Half-life: t1/2 = ln(2) / ke = ln(2) * vd / cl.
+        - Area Under Curve (AUC): AUC_inf = Dose / cl.
+        - Initial Concentration (theoretical): C0 = Dose / vd.
+
     Initial Conditions (y0 for ODE solver):
-        For a single IV bolus dose `Dose` at t=0:
-        y0 = [Dose]
-        If simulating a later dose in a series, y0 is the residual mass
-        just before the new dose, and the dose is added: y0 = [ResidualMass + Dose].
+        For a single IV bolus dose `Dose` at t=0: y0 = [Dose]
 
     Initial Parameter Estimates (for optimization):
         - cl: Estimate from NCA: CL = Dose / AUC_inf.
-        - vd: Estimate from NCA: Vd = CL / lambda_z, where lambda_z is the
-              terminal slope. Alternatively, extrapolate C(t) to t=0 on a
-              semi-log plot to get C0, then Vd ≈ Dose / C0. Check literature.
-    
-    Optimizer Bounds:
-         - Lower Bounds: All parameters (cl, vd, ke) must be > 0 (e.g., 1e-9).
-         - Upper Bounds: Use plausible physiological limits.
-           - cl: Should not exceed cardiac output / relevant organ blood flow (e.g., < 100-200 L/hr for human).
-           - vd: Highly variable. Informed by Vz from NCA. Start large if unsure (e.g., 1000 L).
-           - ke: Usually < 10 1/hr. Related to cl/vd bounds.
+        - vd: Estimate from NCA: Vd = CL / lambda_z (this Vd is Vz). lambda_z is the slope of the 
+            terminal phase of the the ln(conc):time profile. 
+            Alternatively: Vd ≈ Dose / C0 (C0 defined in `Common Derived Parameters`).
+
+        Optimizer Bounds:
+         - Lower Bounds: cl, vd typically set > small positive value (e.g., 1e-9).
+         - Upper Bounds: Plausible physiological limits (CL < blood flow, Vd < huge).
 
     Common Covariate Associations (Fixed Effects):
-        These parameters may be influenced by subject attributes:
-        - cl: Associated with body weight (allometry), renal function (CrCL), hepatic
-              function markers, age, genetic polymorphisms (relevant enzymes/transporters).
-        - vd: Associated with body weight (allometry), body composition (lipophilicity), age.
-        - ke: As a composite parameter (cl/vd), its direct covariate relationships
-              are often modeled via CL and Vd separately.
+        - cl: Weight (allometry), renal/hepatic function, age, genetics.
+        - vd: Weight (allometry), body composition, age.
 
     Parameterization of Random Effects (Mixed Effects):
-        In population modeling, inter-individual variability (IIV) is estimated:
-        - Concept: P_i = P_pop * exp(eta_i), where eta_i ~ N(0, omega^2).
-        - Estimated Term: omega^2 (variance) or omega (SD) for parameters with IIV.
-        - Common Parameters with IIV: CL and Vd typically exhibit IIV.
-        - Initial Estimates for omega (SD): Common start ~0.3 (approx. 30% CV).
-        - Bounds for omega^2 (Variance): Lower > 0 (e.g., 1e-6). Upper relatively
-                                       large (e.g., 1 or 4).
+        - Concept: P_i = P_pop * exp(eta_i), eta_i ~ N(0, omega^2).
+        - Estimated Term: omega^2 (variance) or omega (SD) of IIV.
+        - Common Parameters with IIV: CL and Vd typically show IIV.
+        - Initial Estimates for omega (SD): Start ~0.3 (30% CV).
+        - Bounds for omega^2 (Variance): Lower > 0. Upper relatively large (e.g., 1-4).
     
     When to Prefer This Model:
         1. Rapid IV Administration: Applicable for IV bolus or very short infusions.
@@ -488,6 +552,15 @@ class OneCompartmentBolus_CL(PKBaseODE):
            representing CL and Vz/Vdss) can provide starting points or bounds when
            developing a two-compartment model (where CL is the same, but Vd splits
            into V1 and V2).
+    
+    Potential Model Extensions:
+        - Add peripheral compartments (Two-compartment bolus model).
+        - Implement non-linear elimination (Michaelis-Menten).
+        - Include effect compartment for PK/PD modeling.
+
+    Parameter Sensitivity (Qualitative):
+        - Increasing `cl`: Faster decline (shorter t1/2), lower AUC.
+        - Increasing `vd`: Slower decline (longer t1/2), lower C0/initial concentrations, no change to AUC.
     """
     def __init__(self, ):
         pass
@@ -507,52 +580,69 @@ class OneCompartmentBolus_CL(PKBaseODE):
 
 class OneCompartmentBolus_Ke(PKBaseODE):
     """
-    One-compartment IV Bolus model.
-    Parameterized by Elimination Rate Constant (ke) and Volume of Distribution (vd).
+    One-compartment IV Bolus model. Parameterized by Elimination Rate Constant (Ke) and Volume (Vd).
 
-    Alternative parameterization of the 1-compartment IV bolus model.
+    Alternative parameterization for IV bolus, assuming instantaneous distribution
+    and first-order elimination defined by Ke.
+
+    Key Model Assumptions:
+        - Instantaneous administration and distribution (bolus input).
+        - Single, well-stirred central compartment.
+        - First-order elimination process (parameterized by Ke).
+        - Constant parameters over time and concentration range.
 
     States (y):
         y[0]: Mass in Central Compartment (amount)
+        Order: [Central]
 
     Parameters (*params for ode/mass_to_depvar):
-        ke (float): First-order elimination rate constant (1/time).
+        ke (float): First-order elimination rate constant (1/time). Note: Ke = CL/Vd.
         vd (float): Volume of distribution of the central compartment (volume).
 
+    Units and Output:
+        - Ensure consistency (e.g., hr, L, mg). Typical units: ke(1/hr), vd(L).
+        - ODE solver returns mass in the Central compartment (y[0]) over time.
+        - `mass_to_depvar` converts Central mass to concentration using Vd.
+          Concentration = Mass / Vd.
+
+    Handling Dosing in Simulations:
+        - Dosing handled externally by solver setup.
+        - Dose `Dose` at t=0: `y0 = [Dose]`.
+        - Multiple doses: Set/add `Dose` to Central compartment mass (y[0]) at dose time.
+
+    Common Derived Parameters:
+        - Half-life: t1/2 = ln(2) / ke.
+        - Clearance: cl = ke * vd.
+        - Area Under Curve (AUC): AUC_inf = Dose / cl = Dose / (ke * vd).
+        - Initial Concentration (theoretical): C0 = Dose / vd.
+
     Initial Conditions (y0 for ODE solver):
-        For a single IV bolus dose `Dose` at t=0:
-        y0 = [Dose]
+        For a single IV bolus dose `Dose` at t=0: y0 = [Dose]
 
     Initial Parameter Estimates (for optimization):
-        - ke: Estimate from the terminal slope (lambda_z) of log(concentration) vs time.
-              For this model, ke = lambda_z.
-        - vd: Estimate from NCA: Vd = Dose / (AUC_inf * ke). Alternatively,
-              extrapolate C(t) to t=0 on semi-log plot to get C0, Vd ≈ Dose / C0.
-              Check literature.
-    
+        - ke: Estimate from terminal slope of log(C) vs t: ke ≈ lambda_z.
+        - vd: Estimate from NCA: Vd = (Dose / AUC_inf) / ke. Or Vd ≈ Dose / C0 (extrapolated).
+
     Optimizer Bounds:
-         - Lower Bounds: All parameters (cl, vd, ke) must be > 0 (e.g., 1e-9).
-         - Upper Bounds: Use plausible physiological limits.
+        - Lower Bounds: ke, vd typically set > small positive value (e.g., 1e-9).
+        - Upper Bounds: Use plausible physiological limits.
            - cl: Should not exceed cardiac output / relevant organ blood flow (e.g., < 100-200 L/hr for human).
            - vd: Highly variable. Informed by Vz from NCA. Start large if unsure (e.g., 1000 L).
            - ke: Usually < 10 1/hr. Related to cl/vd bounds.
 
     Common Covariate Associations (Fixed Effects):
-        These parameters may be influenced by subject attributes:
-        - cl: Associated with body weight (allometry), renal function (CrCL), hepatic
-              function markers, age, genetic polymorphisms (relevant enzymes/transporters).
-        - vd: Associated with body weight (allometry), body composition (lipophilicity), age.
-        - ke: As a composite parameter (cl/vd), its direct covariate relationships
-              are often modeled via CL and Vd separately.
+        - ke: As CL/Vd, influenced by factors affecting both (weight, organ function, age). 
+            Often modeled via CL and Vd covariates.
+        - vd: Weight (allometry), body composition, age.
 
     Parameterization of Random Effects (Mixed Effects):
         In population modeling, inter-individual variability (IIV) is estimated:
-        - Concept: P_i = P_pop * exp(eta_i), where eta_i ~ N(0, omega^2).
-        - Estimated Term: omega^2 (variance) or omega (SD) for parameters with IIV.
-        - Common Parameters with IIV: CL and Vd typically exhibit IIV.
-        - Initial Estimates for omega (SD): Common start ~0.3 (approx. 30% CV).
-        - Bounds for omega^2 (Variance): Lower > 0 (e.g., 1e-6). Upper relatively
-                                       large (e.g., 1 or 4).
+        - Concept: P_i = P_pop * exp(eta_i), eta_i ~ N(0, omega^2).
+        - Estimated Term: omega^2 (variance) or omega (SD) of IIV.
+        - Common Parameters with IIV: Ke (or CL) and Vd typically show IIV.
+        - Initial Estimates for omega (SD): Start ~0.3 (30% CV).
+        - Bounds for omega^2 (Variance): Lower > 0. Upper relatively large (e.g., 1-4).
+
               
     When to Prefer This Model:
         1. Rapid IV Administration: Applicable for IV bolus or very short infusions.
@@ -585,6 +675,15 @@ class OneCompartmentBolus_Ke(PKBaseODE):
            representing CL and Vz/Vdss) can provide starting points or bounds when
            developing a two-compartment model (where CL is the same, but Vd splits
            into V1 and V2).
+    
+    Potential Model Extensions:
+        - Add peripheral compartments (Two-compartment bolus model).
+        - Implement non-linear elimination (Michaelis-Menten).
+        - Include effect compartment for PK/PD modeling.
+
+    Parameter Sensitivity (Qualitative):
+        - Increasing `ke`: Faster decline (shorter t1/2), lower AUC (assuming fixed Vd).
+        - Increasing `vd`: Lower C0/initial concentrations, no change to t1/2 (fixed Ke), lower AUC (as CL = Ke*Vd increases).
     """
     def __init__(self, ):
         pass
@@ -606,65 +705,80 @@ class TwoCompartmentBolus(PKBaseODE):
     Parameterized by Clearance (cl), Volume Central (v1),
     Inter-compartmental Clearance (q), Volume Peripheral (v2).
 
-    Models distribution between central (e.g., blood) and peripheral
-    (e.g., tissue) compartments following IV bolus administration.
-    Elimination occurs only from the central compartment.
+    Models drug distribution between central and peripheral compartments following
+    an IV bolus, with first-order elimination from the central compartment.
+
+    Key Model Assumptions:
+        - Instantaneous administration and distribution into V1 (bolus input).
+        - Two well-stirred compartments (Central, Peripheral).
+        - First-order transfer between compartments (governed by Q, V1, V2).
+        - First-order elimination from the central compartment (governed by CL, V1).
+        - Constant parameters over time and concentration range.
 
     States (y):
         y[0]: Mass in Central Compartment (amount)
         y[1]: Mass in Peripheral Compartment (amount)
+        Order: [Central, Peripheral]
 
     Parameters (*params for ode/mass_to_depvar):
-        cl (float): Clearance from the central compartment (volume/time).
-        v1 (float): Volume of the central compartment (volume).
+        cl (float): Clearance from central compartment (volume/time).
+        v1 (float): Central volume (volume).
         q (float): Inter-compartmental clearance (volume/time).
-        v2 (float): Volume of the peripheral compartment (volume).
+        v2 (float): Peripheral volume (volume).
+
+    Units and Output:
+        - Ensure consistency (e.g., hr, L, mg). Typical units: cl, q (L/hr); v1, v2 (L).
+        - ODE solver returns mass in compartments [Central, Peripheral] over time.
+        - `mass_to_depvar` converts Central mass (y[0]) to concentration using V1.
+          Concentration = Mass / V1.
+
+    Handling Dosing in Simulations:
+        - Dosing handled externally by solver setup.
+        - Dose `Dose` at t=0: `y0 = [Dose, 0]`.
+        - Multiple doses: Set/add `Dose` to Central compartment mass (y[0]) at dose time.
+
+    Common Derived Parameters:
+        - Micro-constants: k10=cl/v1, k12=q/v1, k21=q/v2.
+        - Hybrid rate constants (alpha, beta): Derived from micro-constants, define the
+                                             bi-exponential decline. alpha > beta.
+        - Terminal half-life: t1/2,beta = ln(2) / beta (beta ≈ lambda_z).
+        - Volume of distribution at steady state: Vdss = v1 + v2.
+        - Area Under Curve (AUC): AUC_inf = Dose / cl.
 
     Initial Conditions (y0 for ODE solver):
-        For a single IV bolus dose `Dose` at t=0:
-        y0 = [Dose, 0]
-        For later doses, add `Dose` to the residual mass in y[0].
+        For a single IV bolus dose `Dose` at t=0: y0 = [Dose, 0]
 
     Initial Parameter Estimates (for optimization):
         - cl: Estimate from NCA: CL = Dose / AUC_inf.
         - v1: Often estimated initially from Vd ≈ Dose / C0 (from C(t) extrapolation),
               but V1 is typically smaller than Vd from NCA (Vdss or Vz). Start with
               a value smaller than Vdss (e.g., 1/3 to 1/2 Vdss), or based on physiology
-              (e.g., plasma volume). Check literature.
-        - q: Reflects the speed of distribution. Harder to estimate directly. Look
-              at the shape of the initial decline (distribution phase). Can start
-              with a value similar to CL or slightly higher/lower.
-        - v2: Related to Vdss (Vd at steady state = V1 + V2). Estimate Vdss from
-              NCA (Vdss = Dose * AUMC / AUC^2), then guess V2 = Vdss - V1 (initial guess).
-              Ensure V1, V2, Q, CL are positive. Check literature.
-    
-    Optimizer Bounds:
-         - Lower Bounds: All parameters (cl, v1, q, v2) must be > 0 (e.g., 1e-9).
-         - Upper Bounds: Use plausible limits.
+              (e.g., plasma volume). Check literature. Challenging. Smaller than Vdss/Vz. 
+              Use Dose / C0 cautiously.
+        - q: Distribution speed. Start similar to CL or based on visual inspection/literature.
+        - v2: Related to Vdss (Vd at steady state = V1 + V2). (1) Use NCA Vdss = Dose*AUMC/AUC^2, 
+            (2) plug Vdss into: V2 ≈ Vdss - V1_guess.
+
+        Optimizer Bounds:
+         - Lower Bounds: cl, v1, q, v2 typically set > small positive value (e.g., 1e-9).
+        - Upper Bounds: Use plausible limits.
            - cl: < Cardiac output / organ blood flow (e.g., < 100-200 L/hr).
            - v1: Typically > plasma volume but < Vz. Maybe < 500 L.
            - q: Highly variable, can exceed CL. Maybe < 500 L/hr.
            - v2: Can be large. Maybe < 2000 L. Informed by Vdss/Vz.
 
     Common Covariate Associations (Fixed Effects):
-        These parameters may be influenced by subject attributes:
-        - cl: Associated with body weight (allometry), renal function (CrCL), hepatic
-              function markers, age, genetics.
-        - v1, v2: Associated with body weight (allometry), body composition, age.
-        - q: Less commonly modeled with covariates, potentially related to cardiac
-             output or body weight.
+        - cl: Weight (allometry), renal/hepatic function, age, genetics.
+        - v1, v2: Weight (allometry), body composition, age.
+        - q: Less common, potentially cardiac output or weight.
 
     Parameterization of Random Effects (Mixed Effects):
-        In population modeling, inter-individual variability (IIV) is estimated:
-        - Concept: P_i = P_pop * exp(eta_i), where eta_i ~ N(0, omega^2).
-        - Estimated Term: omega^2 (variance) or omega (SD) for parameters with IIV.
-        - Common Parameters with IIV: Typically CL and V1 show significant IIV.
-                                     Variability on Q and V2 might also be estimated,
-                                     depending on data richness.
-        - Initial Estimates for omega (SD): Common start ~0.3 (approx. 30% CV) for CL, V1.
-                                          May start lower for Q, V2.
-        - Bounds for omega^2 (Variance): Lower > 0 (e.g., 1e-6). Upper relatively
-                                       large (e.g., 1 or 4).
+        - Concept: P_i = P_pop * exp(eta_i), eta_i ~ N(0, omega^2).
+        - Estimated Term: omega^2 (variance) or omega (SD) of IIV.
+        - Common Parameters with IIV: CL and V1 often show IIV. Q and V2 variability may also exist.
+        - Initial Estimates for omega (SD): Start ~0.3 (30% CV) for CL, V1. Maybe lower for Q, V2.
+        - Bounds for omega^2 (Variance): Lower > 0. Upper relatively large (e.g., 1-4).
+
     
     When to Prefer This Model:
         1. Bi-exponential Decline: IV bolus data clearly shows a bi-exponential
@@ -714,6 +828,20 @@ class TwoCompartmentBolus(PKBaseODE):
         5. Population Modeling: Greatly enhances the ability to estimate all parameters,
            especially the correlated distribution parameters, by leveraging data from
            multiple individuals.
+    
+    Potential Model Extensions:
+        - Add more compartments (Three-compartment model).
+        - Implement non-linear elimination (Michaelis-Menten) or distribution.
+        - Model Target-Mediated Drug Disposition (TMDD) if applicable.
+        - Include effect compartment for PK/PD modeling.
+
+    Parameter Sensitivity (Qualitative):
+        - Increasing `cl`: Faster terminal decline (beta), lower AUC. Little effect on initial distribution phase (alpha).
+        - Increasing `v1`: Lower initial concentration (C0), may slightly slow initial decline, complex effect on terminal phase.
+        - Increasing `q`: Faster distribution phase (larger alpha), faster transfer between compartments.
+            Terminal phase (beta) may become faster or slower depending on relative rates. Lower initial peak.
+        - Increasing `v2`: Slower distribution (smaller alpha), slower terminal phase (smaller beta, longer t1/2,beta), larger Vdss.
+            Less impact on initial concentration.
     """
     def __init__(self, ):
         pass
@@ -737,55 +865,66 @@ class TwoCompartmentAbsorption(PKBaseODE):
     Two-compartment model with first-order absorption (Gut -> Central -> Peripheral).
     Parameterized by Absorption Rate Const (ka), Clearance (cl), Volume Central (v1),
     Inter-compartmental Clearance (q), Volume Peripheral (v2).
+    
+    Models extravascular administration with absorption, distribution between central
+    and peripheral compartments, and elimination from central.
 
-    Models drug absorption from a depot (e.g., gut) into a central compartment,
-    distribution between the central and a peripheral compartment, and
-    elimination from the central compartment. This model is more complex than
-    a one-compartment model.
+    Key Model Assumptions:
+        - First-order absorption process.
+        - Two well-stirred compartments (Central, Peripheral) plus absorption site.
+        - First-order transfer between compartments (Q/F, V1/F, V2/F).
+        - First-order elimination from central compartment (CL/F, V1/F).
+        - Instantaneous distribution within each compartment.
+        - Constant parameters over time and concentration range.
 
     States (y):
         y[0]: Mass in Central Compartment (amount)
         y[1]: Mass in Peripheral Compartment (amount)
         y[2]: Mass in Gut/Absorption Compartment (amount)
+        Order: [Central, Peripheral, Gut]
 
     Parameters (*params for ode/mass_to_depvar):
         ka (float): First-order absorption rate constant (1/time).
-        cl (float): Clearance from the central compartment (volume/time).
-        v1 (float): Volume of the central compartment (volume).
-        q (float): Inter-compartmental clearance, governing distribution
-                     speed between central and peripheral (volume/time).
-        v2 (float): Volume of the peripheral compartment (volume).
-        Note: For oral data, parameters involving volume or clearance are often
-        estimated apparent values (e.g., cl/F, v1/F, q/F, v2/F) unless
-        bioavailability (F) is known or estimated separately (e.g., from IV data).
+        cl_f (float): Apparent clearance (CL/F) from central compartment (volume/time).
+        v1_f (float): Apparent central volume (V1/F) (volume).
+        q_f (float): Apparent inter-compartmental clearance (Q/F) (volume/time).
+        v2_f (float): Apparent peripheral volume (V2/F) (volume).
+        Note: Apparent parameters due to unknown bioavailability F.
+
+    Units and Output:
+        - Ensure consistency (e.g., hr, L, mg). Typical units: ka(1/hr); cl_f, q_f (L/hr); v1_f, v2_f (L).
+        - ODE solver returns mass in compartments [Central, Peripheral, Gut] over time.
+        - `mass_to_depvar` converts Central mass (y[0]) to concentration using V1/F.
+          Concentration = Mass / (V1/F).
+
+    Handling Dosing in Simulations:
+        - Dosing handled externally by solver setup.
+        - Dose `Dose` at t=0: `y0 = [0, 0, Dose]`.
+        - Multiple doses: Add `Dose` to Gut compartment mass (y[2]) at dose time.
+
+    Common Derived Parameters:
+        - Micro-constants (apparent): k10=cl_f/v1_f, k12=q_f/v1_f, k21=q_f/v2_f.
+        - Hybrid rate constants (alpha, beta) and terminal half-life (t1/2,beta = ln(2)/beta).
+        - Apparent volume at steady state: Vdss/F = v1_f + v2_f.
+        - Area Under Curve (AUC): AUC_inf = Dose / cl_f = (F * Dose) / CL.
 
     Initial Conditions (y0 for ODE solver):
-        Typically, for a single dose `Dose` administered orally at t=0:
-        y0 = [0, 0, Dose]  (Mass starts in the gut compartment)
-        For subsequent doses in a regimen, the `Dose` is added to the
-        residual mass in y[2] at the time of dosing.
+        Typically, for a single dose `Dose` at t=0: y0 = [0, 0, Dose]
 
     Initial Parameter Estimates (for optimization):
-        Obtaining good initial estimates is crucial for model fitting.
-        - ka: Related to Tmax (time of peak concentration). Rough initial guess:
-              1/Tmax. Often requires adjustment. Try values like 0.5, 1.0, 2.0 (1/hr).
-        - cl(/F): Estimate from NCA: CL/F = Dose / AUC_inf. (F=bioavailability)
-        - v1(/F): Harder to estimate directly from oral data. Often smaller than
-              total Vd. Start with a plausible physiological volume (e.g., plasma volume
-              ~3-5L for humans) or a fraction of the total Vd estimate. Literature
-              for similar drugs is helpful.
-        - q(/F): Reflects distribution speed. Start with a value potentially similar
-              to cl/F or based on literature/visual inspection of the distribution phase.
-        - v2(/F): Related to the extent of distribution. Estimate total Vdss/F or Vz/F
-              from NCA (e.g., Vz/F = (CL/F) / lambda_z). Initial guess:
-              V2/F ≈ Vz/F - V1/F (ensure V1/F < Vz/F).
-        Use NCA results and literature values as guidance. Ensure all parameters
-        are positive. Test if initial guesses produce a curve shape roughly
-        matching the data.
-    
-    Optimizer Bounds:
-         - Lower Bounds: All parameters (ka, cl, v1, q, v2) must be > 0 (e.g., 1e-9).
-         - Upper Bounds: Use plausible limits.
+        - ka: Related to Tmax. Guess ~1/Tmax.
+        - cl_f: Estimate from NCA: CL/F = Dose / AUC_inf.
+        - v1_f: Often smaller than total Vd. Start with a plausible physiological volume 
+            (e.g., plasma volume ~3-5L for humans) or a fraction of the total Vd estimate. 
+            Literature for similar drugs is helpful. Note that: Vdss/F = V1/F + V2/F.
+        - q_f: Distribution speed. Start similar to cl_f or based on literature/shape.
+        - v2_f: Related to the extent of distribution. Estimate total Vdss/F or Vz/F
+              from NCA (e.g., Vz/F = (CL/F, Vdss = Cl/F * MRT) / lambda_z). Initial guess:
+              V2/F ≈ (Vz/F OR Vdss/F) - V1/F (ensure V1/F < Vz/F).
+
+        Optimizer Bounds:
+         - Lower Bounds: ka, cl_f, v1_f, q_f, v2_f typically set > small positive value (e.g., 1e-9).
+         - - Upper Bounds: Use plausible limits.
            - ka: Typically < 50 1/hr.
            - cl(/F): < Cardiac output / organ blood flow (e.g., < 100-200 L/hr).
            - v1(/F): Typically larger than plasma volume but smaller than Vz/F. Maybe < 500 L.
@@ -794,26 +933,19 @@ class TwoCompartmentAbsorption(PKBaseODE):
            Bounds often informed by NCA Vz/F and Vdss/F.
 
     Common Covariate Associations (Fixed Effects):
-        These parameters may be influenced by subject attributes:
-        - cl(/F): Associated with body weight (allometry), renal function (CrCL), hepatic
-                  function markers, age, genetics.
-        - v1(/F), v2(/F): Associated with body weight (allometry), body composition, age.
-        - q(/F): Less commonly modeled with covariates, but potentially related to
-                 cardiac output or body weight.
-        - ka: Influenced by formulation, food, GI conditions, age.
-        - F (Implicit): Influenced by formulation, food, gut metabolism/transport.
+        - cl_f: CL often related to weight (allometry), renal/hepatic function, age, genetics. F affects apparent value.
+        - v1_f, v2_f: V1, V2 often related to weight (allometry), body composition, age. F affects apparent value.
+        - q_f: Q less commonly linked, potentially cardiac output or weight. F affects apparent value.
+        - ka: Formulation, food, GI factors, age.
 
     Parameterization of Random Effects (Mixed Effects):
         In population modeling, inter-individual variability (IIV) is estimated:
-        - Concept: P_i = P_pop * exp(eta_i), where eta_i ~ N(0, omega^2).
-        - Estimated Term: omega^2 (variance) or omega (SD) for parameters with IIV.
-        - Common Parameters with IIV: Typically CL/F, V1/F, Ka often show significant
-                                     IIV. V2/F and Q/F variability might also be estimated
-                                     but can sometimes be harder to identify reliably.
-        - Initial Estimates for omega (SD): Common start ~0.3 (approx. 30% CV) for CL,
-                                          V1, Ka. May start lower for Q, V2.
-        - Bounds for omega^2 (Variance): Lower > 0 (e.g., 1e-6). Upper relatively
-                                       large (e.g., 1 or 4).
+        - Concept: P_i = P_pop * exp(eta_i), eta_i ~ N(0, omega^2).
+        - Estimated Term: omega^2 (variance) or omega (SD) of IIV.
+        - Common Parameters with IIV: CL/F, V1/F, Ka often show IIV. V2/F and Q/F variability also possible.
+        - Initial Estimates for omega (SD): Start ~0.3 (30% CV) for CL/F, V1/F, Ka. Maybe lower for Q/F, V2/F.
+        - Bounds for omega^2 (Variance): Lower > 0. Upper relatively large (e.g., 1-4).
+
 
     When to Prefer This Model:
         1. Bi-exponential Decline Post-Absorption: The concentration-time data
@@ -863,6 +995,19 @@ class TwoCompartmentAbsorption(PKBaseODE):
            can significantly improve the identifiability and precision of all parameters,
            especially the distribution-related ones. Allows estimation of inter-individual
            variability and potential estimation of F.
+    
+    Potential Model Extensions:
+        - Add more compartments (Three-compartment absorption model).
+        - Implement non-linear elimination (MM) or distribution/absorption.
+        - Add transit compartments for absorption delay.
+        - Include effect compartment for PK/PD modeling.
+
+    Parameter Sensitivity (Qualitative):
+        - Increasing `ka`: Faster absorption, earlier Tmax, potentially higher Cmax.
+        - Increasing `cl_f`: Lower AUC, faster terminal decline, potentially lower Cmax.
+        - Increasing `v1_f`: Lower initial concentrations post-absorption, complex effects on profile shape.
+        - Increasing `q_f`: Faster distribution phase, potentially lower peak concentration (Cmax).
+        - Increasing `v2_f`: Slower distribution, slower terminal decline (longer t1/2,beta), larger Vdss/F.
     """
     def __init__(self, ):
         pass
@@ -909,59 +1054,64 @@ class OneCompartmentInfusion(PKBaseODE):
     One-compartment model with zero-order infusion.
     Parameterized by Infusion Rate (R0), Clearance (cl), Volume (vd).
 
-    Models drug administration via a constant rate infusion into a single
+    Models drug administration via constant rate infusion into a single
     compartment with first-order elimination.
 
-    Note: Assumes infusion runs from t=0 up to Tinf (infusion duration).
-    The ODE solver needs external logic to set R0=0 for t > Tinf.
-    This class only defines the dynamics *while* R0 is potentially non-zero.
+    Key Model Assumptions:
+        - Constant, zero-order infusion rate (R0) during infusion period.
+        - Single, well-stirred central compartment.
+        - First-order elimination process (rate proportional to amount).
+        - Instantaneous distribution within the compartment.
+        - Constant parameters over time and concentration range.
 
     States (y):
         y[0]: Mass in Central Compartment (amount)
+        Order: [Central]
 
     Parameters (*params for ode/mass_to_depvar):
-        R0 (float): Zero-order infusion rate (amount/time). Should be set to 0
-                    by the calling code for times after the infusion stops.
+        R0 (float): Zero-order infusion rate (amount/time). (Often fixed).
         cl (float): Clearance from the central compartment (volume/time).
         vd (float): Volume of distribution of the central compartment (volume).
 
+    Units and Output:
+        - Ensure consistency (e.g., hr, L, mg). Typical units: R0(mg/hr), cl(L/hr), vd(L).
+        - ODE solver returns mass in Central compartment (y[0]) over time.
+        - `mass_to_depvar` converts Central mass to concentration using Vd.
+          Concentration = Mass / Vd.
+
+    Handling Dosing in Simulations:
+        - Dosing handled externally by solver setup.
+        - Requires logic to set the `R0` parameter to the infusion rate during the
+          infusion period and set `R0 = 0` after the infusion stops (t > Tinf).
+
+    Common Derived Parameters:
+        - Elimination rate constant: ke = cl / vd.
+        - Half-life: t1/2 = ln(2) / ke = ln(2) * vd / cl.
+        - Steady-state concentration (if Tinf >> t1/2): Css = R0 / cl.
+        - Time to reach fraction (e.g., 90%) of Css: Approx 3.3 * t1/2.
+
     Initial Conditions (y0 for ODE solver):
-        Typically, if starting at t=0 with the infusion:
-        y0 = [0]
-        If infusion follows a bolus, or starts later, y0 reflects mass at t=0.
+        Typically, if starting at t=0 with the infusion: y0 = [0]
 
     Initial Parameter Estimates (for optimization):
-        - R0: Usually known from the dosing regimen (TotalDose / Tinf).
-        - cl: If steady-state (Css) is reached: CL = R0 / Css. Otherwise, use
-              NCA on post-infusion data (CL = Dose / AUC from Tinf to infinity)
-              or literature.
-        - vd: Estimate from post-infusion terminal slope (lambda_z): Vd = CL / lambda_z.
-              Or Vd = R0 / (Css * lambda_z) if Css is reached.
+        - R0: Usually known/fixed.
+        - cl: Estimate from Css if reached: CL = R0 / Css. Else use NCA post-infusion.
+        - vd: Estimate from post-infusion lambda_z: Vd = CL / lambda_z.
 
-    Optimizer Bounds (if estimating CL, Vd):
-         - Lower Bounds: cl > 0, vd > 0 (e.g., 1e-9).
-         - Upper Bounds: Plausible physiological limits.
-           - cl: Not exceeding cardiac output / relevant organ blood flow (e.g., < 100-200 L/hr).
-           - vd: Informed by Vz post-infusion. Start large if unsure (e.g., 1000 L).
-         (R0 is usually fixed based on dose regimen).
+        Optimizer Bounds (if estimating CL, Vd):
+         - Lower Bounds: cl, vd typically set > small positive value (e.g., 1e-9).
+         - Upper Bounds: Plausible physiological limits (CL < blood flow, Vd < huge).
 
     Common Covariate Associations (Fixed Effects):
-        These parameters may be influenced by subject attributes:
-        - cl: Associated with body weight (allometry), renal function (CrCL), hepatic
-              function markers, age, genetics.
-        - vd: Associated with body weight (allometry), body composition, age.
-        - R0: Usually determined by dosing protocol, but variability in pump rate or
-              delivery could potentially be modeled if relevant data exists (less common).
+        - cl: Weight (allometry), renal/hepatic function, age, genetics.
+        - vd: Weight (allometry), body composition, age.
 
     Parameterization of Random Effects (Mixed Effects):
-        In population modeling, inter-individual variability (IIV) is estimated:
-        - Concept: P_i = P_pop * exp(eta_i), where eta_i ~ N(0, omega^2).
-        - Estimated Term: omega^2 (variance) or omega (SD) for parameters with IIV.
-        - Common Parameters with IIV: CL and Vd typically exhibit IIV. IIV on R0 is
-                                     less common unless pump variability is a specific focus.
-        - Initial Estimates for omega (SD): Common start ~0.3 (approx. 30% CV) for CL, Vd.
-        - Bounds for omega^2 (Variance): Lower > 0 (e.g., 1e-6). Upper relatively
-                                       large (e.g., 1 or 4).
+        - Concept: P_i = P_pop * exp(eta_i), eta_i ~ N(0, omega^2).
+        - Estimated Term: omega^2 (variance) or omega (SD) of IIV.
+        - Common Parameters with IIV: CL and Vd typically show IIV.
+        - Initial Estimates for omega (SD): Start ~0.3 (30% CV).
+        - Bounds for omega^2 (Variance): Lower > 0. Upper relatively large (e.g., 1-4).
                                        
     When to Prefer This Model:
         1. Infusion Administration: Directly applicable for constant-rate IV infusion.
@@ -998,6 +1148,17 @@ class OneCompartmentInfusion(PKBaseODE):
            these estimates to potentially refine CL.
         4. Informing Multi-Compartment Infusion: Estimates of CL and Vd (as Vz/Vdss)
            can inform the development of a two-compartment infusion model.
+           
+    Potential Model Extensions:
+        - Add peripheral compartments (Two-compartment infusion model).
+        - Implement non-linear elimination (Michaelis-Menten).
+        - Include effect compartment for PK/PD modeling.
+
+    Parameter Sensitivity (Qualitative):
+        - Increasing `R0`: Higher concentrations during infusion, higher Css.
+        - Increasing `cl`: Lower concentrations during infusion, lower Css, faster decline post-infusion (shorter t1/2).
+        - Increasing `vd`: Slower approach to Css, lower concentrations for a given mass, slower
+            decline post-infusion (longer t1/2), no change to Css.
     """
     def __init__(self, ):
         pass
@@ -1022,38 +1183,49 @@ class OneCompartmentBolusMM(PKBaseODE):
     Parameterized by Max Elimination Rate (vmax), Michaelis Constant (km),
     and Volume of Distribution (vd).
 
-    Used when elimination process (e.g., enzyme metabolism, transport) can
-    become saturated at higher concentrations.
+    Models non-linear, saturable elimination following IV bolus administration.
+
+    Key Model Assumptions:
+        - Instantaneous administration and distribution (bolus input).
+        - Single, well-stirred central compartment.
+        - Saturable elimination process following Michaelis-Menten kinetics.
+        - Constant Vmax, Km, Vd parameters over time.
 
     States (y):
         y[0]: Mass in Central Compartment (amount)
+        Order: [Central]
 
     Parameters (*params for ode/mass_to_depvar):
         vmax (float): Maximum rate of elimination (amount/time).
-        km (float): Michaelis constant (concentration units). Concentration at
-                     which elimination rate is half of Vmax.
-        vd (float): Volume of distribution of the central compartment (volume).
+        km (float): Michaelis constant (concentration units); concentration at half Vmax.
+        vd (float): Volume of distribution (volume).
+
+    Units and Output:
+        - Ensure consistency (e.g., hr, L, mg). Typical units: vmax(mg/hr), km(mg/L), vd(L).
+        - ODE solver returns mass in the Central compartment (y[0]) over time.
+        - `mass_to_depvar` converts Central mass to concentration using Vd.
+          Concentration (C) = Mass / Vd. The elimination rate is Vmax*C / (Km + C).
+
+    Handling Dosing in Simulations:
+        - Dosing handled externally by solver setup.
+        - Dose `Dose` at t=0: `y0 = [Dose]`.
+        - Multiple doses: Set/add `Dose` to Central compartment mass (y[0]) at dose time.
+
+    Common Derived Parameters:
+        - Concentration-dependent Clearance: CL(C) = Vmax / (Km + C).
+        - Low-Concentration Clearance (C << Km): CL_linear ≈ Vmax / Km.
+        - Half-life is concentration-dependent and not constant.
 
     Initial Conditions (y0 for ODE solver):
-        For a single IV bolus dose `Dose` at t=0:
-        y0 = [Dose]
+        For a single IV bolus dose `Dose` at t=0: y0 = [Dose]
 
     Initial Parameter Estimates (for optimization):
-        - vmax: Represents the maximum elimination capacity. Harder to estimate directly.
-                Related to CL at low concentrations (CL_low_C ≈ Vmax/Km). Units are amount/time.
-                Check literature for related enzyme kinetics or drugs.
-        - km: Concentration at half-maximal elimination rate. Units are concentration.
-              If data shows non-linear elimination (e.g., semi-log plot not straight),
-              Km might be within the observed concentration range. Check literature.
-        - vd: Volume relating mass to concentration (C = Mass/Vd). Might be estimated
-              from low-dose data (where kinetics approximate first-order) using
-              linear methods, or from literature.
-        Estimation often requires data covering a range of concentrations, including
-        those high enough to approach saturation. Initial guesses can be challenging.
-    
-    Optimizer Bounds:
-         - Lower Bounds: vmax > 0, km > 0, vd > 0 (e.g., 1e-9).
-         - Upper Bounds: Plausible limits.
+        - vmax, km, vd: Challenging. Use literature/in vitro data if possible. Low-dose
+                       data might give Vd and Vmax/Km ratio. Requires data spanning Km.
+
+        Optimizer Bounds:
+         - Lower Bounds: vmax, km, vd typically set > small positive value (e.g., 1e-9).
+                  - Upper Bounds: Plausible limits.
            - vmax: Can be large, related to max enzyme/transporter capacity. Informed by
                    CL_linear * Km_guess. Start relatively large if needed.
            - km: Highly context dependent (concentration units). Can range from nM to mM.
@@ -1061,26 +1233,17 @@ class OneCompartmentBolusMM(PKBaseODE):
            - vd: Similar bounds as for linear Vd (e.g., < 1000 L).
 
     Common Covariate Associations (Fixed Effects):
-        These parameters may be influenced by subject attributes:
-        - vmax: Can be associated with body weight (allometry), organ function (liver/kidney
-                depending on enzyme location), genetics (enzyme/transporter polymorphisms),
-                drug interactions (induction/inhibition).
-        - km: Generally considered less likely to vary systematically with simple covariates
-              like weight, but could be affected by genetics or specific physiological states
-              altering enzyme affinity (less common than Vmax effects).
-        - vd: Associated with body weight (allometry), body composition, age.
+        - vmax: Weight (allometry), organ function, genetics (enzymes/transporters), interactions.
+        - km: Less commonly linked to simple covariates, potentially genetics (affinity changes).
+        - vd: Weight (allometry), body composition, age.
 
     Parameterization of Random Effects (Mixed Effects):
         In population modeling, inter-individual variability (IIV) is estimated:
-        - Concept: P_i = P_pop * exp(eta_i), where eta_i ~ N(0, omega^2). (Log-normal often
-                   used, though normal on Km might sometimes be considered).
-        - Estimated Term: omega^2 (variance) or omega (SD) for parameters with IIV.
-        - Common Parameters with IIV: Vmax, Vd often show significant IIV. Km variability
-                                     can sometimes be high or hard to estimate precisely.
-        - Initial Estimates for omega (SD): Common start ~0.3 (approx. 30% CV) for Vmax, Vd.
-                                          May need different starting guess for Km IIV.
-        - Bounds for omega^2 (Variance): Lower > 0 (e.g., 1e-6). Upper relatively
-                                       large (e.g., 1 or 4).
+        - Concept: P_i = P_pop * exp(eta_i), eta_i ~ N(0, omega^2).
+        - Estimated Term: omega^2 (variance) or omega (SD) of IIV.
+        - Common Parameters with IIV: Vmax, Vd often show IIV. Km variability also possible.
+        - Initial Estimates for omega (SD): Start ~0.3 (30% CV) for Vmax, Vd.
+        - Bounds for omega^2 (Variance): Lower > 0. Upper relatively large (e.g., 1-4).
     
     When to Prefer This Model:
         1. Non-Linear Kinetics Observed: Clearance appears dose-dependent (decreases
@@ -1126,6 +1289,18 @@ class OneCompartmentBolusMM(PKBaseODE):
         5. Population Approach: Analyzing data from multiple dose levels simultaneously
            in a population context can significantly improve the ability to estimate
            MM parameters compared to fitting individual datasets separately.
+    
+    Potential Model Extensions:
+        - Add peripheral compartments (Two-compartment MM model).
+        - Implement non-linear absorption or distribution.
+        - Include effect compartment for PK/PD modeling.
+
+    Parameter Sensitivity (Qualitative):
+        - Increasing `vmax`: Faster elimination, especially at higher concentrations (C > Km). Lower AUC.
+        - Increasing `km`: Decreases saturation, makes kinetics more linear over a wider range.
+            Increases concentrations needed to reach Vmax/2. Increases CL(C) at C >> Km.
+        - Increasing `vd`: Lower concentrations overall (C=Mass/Vd), which indirectly slows elimination rate (Vmax*C/(Km+C)).
+            Prolongs elimination time.
     """
     def __init__(self, ):
         pass
