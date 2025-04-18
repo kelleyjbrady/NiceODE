@@ -32,28 +32,48 @@ import cProfile
 from datetime import datetime
 
 now_str = datetime.now().strftime("_%d%m%Y-%H%M%S")
-with open(r'/workspaces/PK-Analysis/debug_scale_df.jb', 'rb') as f:
+#%%
+with open(r'/workspaces/PK-Analysis/absorbtion_debug_scale_df.jb', 'rb') as f:
     scale_df = jb.load(f)
 #%%
-apply_unit_conversion = True
-if apply_unit_conversion:
-    scale_df['dose_ng'] = (scale_df['AMT']*1000)
-    scale_df['DV_ng/L'] = (scale_df['DV'] * 1000) * 100
-    if scale_df['dose_ng'].max() > 0:
-        scale_df['DV_scale']= scale_df['DV_ng/L']/scale_df['dose_ng'].max()
-        scale_df['dose_scale'] = 1.0
-    else:
-        scale_df['DV_scale']= scale_df['DV_ng/L'].copy() / 20000000
-        #scale_df['DV_scale'] = np.log()
-        scale_df['DV_scale_alt'] = scale_df['DV_ng/L'] / np.exp(np.mean(np.log(scale_df['DV_ng/L'])))
-        scale_df['dose_scale'] = scale_df['dose_ng'].copy()
-        scale_df['DV_ln'] = np.log(scale_df['DV_ng/L'])
+scale_df['dose_ng'] = scale_df['AMT']*1000
+scale_df['DV_ng/L'] = (scale_df['DV'] * 1000)
+scale_df['dose_scale'] = scale_df['dose_ng'] / 1e5
+scale_df['DV_scale'] = scale_df['DV_ng/L'] / 1e5
+#scale_df['DV_scale']= scale_df['DV_ng/L']/scale_df['dose_ng'].max()
+#scale_df['dose_scale'] = 1.0
+
+zero_out_abs = True
+if zero_out_abs:
+    dfs = []
+    for c in scale_df['SUBJID'].unique():
+        work_df = scale_df.loc[scale_df['SUBJID'] == c, :].reset_index(drop = True)
+        tmax = work_df.loc[work_df['DV'] == work_df['DV'].max(), 'TIME'].to_numpy()[0]
+        gte_max_f = work_df['TIME'] >= tmax
+        t0_f = work_df['TIME'] == 0
+        work_df = work_df.loc[gte_max_f | t0_f, :]
+        #max_idx = work_df.loc[work_df['DV'] == work_df['DV'].max(), :].index[0]
+        #work_df = work_df.iloc[max_idx:, :]
+        #work_df['TIME'] = work_df['TIME'] - work_df['TIME'].min()
+        dfs.append(work_df.copy())
+    work_df = pd.concat(dfs)
+else:
+    work_df = scale_df.copy()
+
+work_df.loc[work_df['TIME'] == 0, 'solve_ode_at_TIME'] = False
+work_df.loc[work_df['TIME'] > 0, 'solve_ode_at_TIME'] = True
+
+scale_df = work_df.copy()
+
+
+
 piv_cols = []
 res_df = pd.DataFrame()
 #%%
 no_me_mod_fo =  CompartmentalModel(
-          ode_t0_cols=[ODEInitVals('DV')],
-          conc_at_time_col = 'DV',
+          ode_t0_cols=[ODEInitVals('dose_scale')],
+          conc_at_time_col = 'DV_scale',
+          solve_ode_at_time_col = 'solve_ode_at_TIME',
           population_coeff=[PopulationCoeffcient('cl', 18, subject_level_intercept=False,
                                                  #subject_level_intercept_sd_init_val = 0.2, 
                                                  #subject_level_intercept_sd_lower_bound=1e-6
@@ -75,10 +95,11 @@ no_me_mod_fo =  CompartmentalModel(
                                   # optimizer_tol = .1
                                   #minimize_method = 'COBYQA'
                                    )
-res_df['DV'] = scale_df['DV']
-no_me_mod_fo = no_me_mod_fo.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+res_df['DV_scale'] = scale_df['DV_scale']
+#%%
+no_me_mod_fo = no_me_mod_fo.fit2(scale_df,)
 res_df['no_me_fo_sse'] = no_me_mod_fo.predict2(scale_df)
-piv_cols.extend(['DV', 'no_me_fo_sse'])
+piv_cols.extend(['DV_scale', 'no_me_fo_sse'])
 # %%
 me_mod_fo =  CompartmentalModel(
           ode_t0_cols=[ODEInitVals('DV')],

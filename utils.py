@@ -1114,6 +1114,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         log_transform_dep_var = False,
         dose_col:str = None,
         time_col='TIME',
+        solve_ode_at_time_col:str = None,
         pk_model_class:PKBaseODE=None,
         ode_t0_cols: List[ODEInitVals] = None,
         population_coeff: List[PopulationCoeffcient] = [
@@ -1154,6 +1155,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.groupby_col = groupby_col
         self.conc_at_time_col = conc_at_time_col
         self.time_col = time_col
+        self.solve_ode_at_time_col = solve_ode_at_time_col
         self.verbose = verbose
         self.minimize_method = minimize_method
         self.pk_args_diffeq = get_function_args(self.pk_model_function)[2:] #this relys on defining the dif eqs as I have done
@@ -1366,7 +1368,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             yield deepcopy(data_out)
     @profile
     def _homongenize_timepoints(self,data, subject_id_c, time_col):
+        data = data.copy()
         data['tmp'] = 1
+        if self.solve_ode_at_time_col is not None:
+            data = data.loc[data[self.solve_ode_at_time_col], :].copy()
         time_mask_df = data.pivot( index = subject_id_c,
                                     columns = time_col,
                                     values = 'tmp').fillna(0)
@@ -1440,19 +1445,32 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return pop_coeffs, (subject_level_intercept_sds, subject_level_intercept_init_vals)
     @profile
     def _assemble_pred_matrices(self, data):
-        data = data.reset_index(drop = True).copy()
-        self.data = data.copy()
         subject_id_c = self.groupby_col
         conc_at_time_c = self.conc_at_time_col
-        verbose = self.verbose
         time_col = deepcopy(self.time_col)
-        self.unique_groups = np.array(data[subject_id_c].unique())
-        self.y_groups = np.array(data[subject_id_c].values)
-        self.y = np.array(data[conc_at_time_c].values, dtype = np.float64)
+        
+        data = data.reset_index(drop = True).copy()
+        self.data = data.copy()
         subject_data = data.drop_duplicates(subset=subject_id_c, keep = 'first').copy()
         self.subject_data = subject_data.copy()
-        self.subject_y0 = np.array(subject_data[conc_at_time_c].values, dtype = np.float64)
-        self.subject_y0_idx = np.array(subject_data.index.values, dtype = np.int64)
+        if self.solve_ode_at_time_col is None:
+            ode_data = data.copy()
+        else:
+            ode_data = data.loc[data[self.solve_ode_at_time_col], :]
+        self.ode_data = ode_data.copy()
+        verbose = self.verbose
+        
+        
+        self.unique_groups = subject_data[subject_id_c].unique().to_numpy() # list of unique subjects in order
+        self.y_groups = ode_data[subject_id_c].to_numpy() #subjects in order, repeated n timepoints time per subject 
+        self.y = ode_data[conc_at_time_c].to_numpy(dtype = np.float64) 
+        
+        #y0 is the fist y where ODE solutions are generated, this may or may not be the solution to the ODE at t0
+        #In the case of a model without absorption if all timepoints before
+        tmp = ode_data.drop_duplicates(subset=subject_id_c, keep = 'first')
+        self.subject_y0 = tmp[conc_at_time_c].to_numpy(dtype = np.float64)
+        self.subject_y0_idx = np.array(tmp.index.values, dtype = np.int64)
+        #below here has not been updated yet to use new flexible method of setting the y and ode inits
         ode_init_val_cols = [i.column_name for i in self.ode_t0_cols]
         self.ode_t0_vals = subject_data[ode_init_val_cols].reset_index(drop = True).copy()
         self.ode_t0_vals_are_subject_y0 = np.all(self.subject_y0 == self.ode_t0_vals.iloc[:,0])
