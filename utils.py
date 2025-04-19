@@ -1370,16 +1370,15 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     def _homongenize_timepoints(self,data, subject_id_c, time_col):
         data = data.copy()
         data['tmp'] = 1
-        if self.solve_ode_at_time_col is not None:
-            data = data.loc[data[self.solve_ode_at_time_col], :].copy()
         time_mask_df = data.pivot( index = subject_id_c,
                                     columns = time_col,
                                     values = 'tmp').fillna(0)
         self.time_mask = time_mask_df.to_numpy().astype(bool)
-        self.global_tp = np.array(time_mask_df.columns.values, dtype = np.float64)
-        self.global_t0 = self.global_tp[0]
-        self.global_tf = self.global_tp[-1]
-        self.global_tspan = np.array([self.global_t0, self.global_tf], dtype=np.float64)
+        self.global_tp_eval = np.array(time_mask_df.columns.values, dtype = np.float64)
+        self.global_t0_eval= self.global_tp_eval[0]
+        self.global_tf_eval = self.global_tp_eval[-1]
+        self.global_tspan_eval = np.array([self.global_t0_eval, self.global_tf_eval], dtype=np.float64)
+        self.global_tspan_init = np.array([0.0, self.global_tf_eval], dtype=np.float64)
     
     def _unpack_prepare_thetas(self,model_param_dep_vars:pd.DataFrame, subject_data:pd.DataFrame):
         thetas = pd.DataFrame( )
@@ -1457,19 +1456,20 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             ode_data = data.copy()
         else:
             ode_data = data.loc[data[self.solve_ode_at_time_col], :]
+        #ode data is 'fixed' from here forward
         self.ode_data = ode_data.copy()
         verbose = self.verbose
         
         
-        self.unique_groups = subject_data[subject_id_c].unique().to_numpy() # list of unique subjects in order
+        self.unique_groups = subject_data[subject_id_c].unique() # list of unique subjects in order
         self.y_groups = ode_data[subject_id_c].to_numpy() #subjects in order, repeated n timepoints time per subject 
         self.y = ode_data[conc_at_time_c].to_numpy(dtype = np.float64) 
         
         #y0 is the fist y where ODE solutions are generated, this may or may not be the solution to the ODE at t0
         #In the case of a model without absorption if all timepoints before
-        tmp = ode_data.drop_duplicates(subset=subject_id_c, keep = 'first')
-        self.subject_y0 = tmp[conc_at_time_c].to_numpy(dtype = np.float64)
-        self.subject_y0_idx = np.array(tmp.index.values, dtype = np.int64)
+        first_pred_t_df = ode_data.drop_duplicates(subset=subject_id_c, keep = 'first')
+        self.subject_y0 = first_pred_t_df[conc_at_time_c].to_numpy(dtype = np.float64)
+        self.subject_y0_idx = np.array(first_pred_t_df.index.values, dtype = np.int64)
         #below here has not been updated yet to use new flexible method of setting the y and ode inits
         ode_init_val_cols = [i.column_name for i in self.ode_t0_cols]
         self.ode_t0_vals = subject_data[ode_init_val_cols].reset_index(drop = True).copy()
@@ -1482,7 +1482,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         model_param_dep_vars = init_vals.loc[(init_vals['population_coeff'] == False)
                                              & (init_vals['model_error'] == False)
                                              , :]
-        self._homongenize_timepoints(data, subject_id_c, time_col)
+        
+        self._homongenize_timepoints(ode_data, subject_id_c, time_col)
         thetas, theta_data = self._unpack_prepare_thetas(model_param_dep_vars, subject_data)
         pop_coeffs, subject_level_intercept_info = self._unpack_prepare_pop_coeffs(model_params)
         subject_level_intercept_sds = subject_level_intercept_info[0]
@@ -1542,8 +1543,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         iter_obj =  zip(model_coeffs.iterrows(), ode_t0_vals.iterrows())
         partial_solve_ivp = partial(self._solve_ivp_parallel2,
                                  ode_class = self.pk_model_class,
-                                 tspan = self.global_tspan,
-                                 teval = self.global_tp if timepoints is None else timepoints,
+                                 tspan = self.global_tspan_init,
+                                 teval = self.global_tp_eval if timepoints is None else timepoints,
                                  method = self.ode_solver_method,
                                  )
         if parallel:
