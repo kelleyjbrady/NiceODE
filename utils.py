@@ -703,7 +703,7 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
     debug_print('Objective Call Complete ============= OBEJECTIVE CALL COMPLETE =======================')
     debug_print(f"Loss: {neg2_ll}\n")
     debug_print(f"b_i_estimates: {b_i_estimates}\n")
-    return neg2_ll, b_i_estimates
+    return neg2_ll, b_i_estimates, preds
     
     
     
@@ -777,7 +777,7 @@ def FO_approx_ll_loss(pop_coeffs, sigma,
             b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omegas2), J_sub.T @ residuals_sub)
     
 
-    return neg2_ll, b_i_approx
+    return neg2_ll, b_i_approx, preds
     
 #@njit 
 def create_vectorizable_J(J, groups_idx, n_random_effects):
@@ -1598,8 +1598,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
                 error = self.no_me_loss_function(self.y, preds, sigma, **self.no_me_loss_params)
             else:   
-                error, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, FO_b_i_apprx = subject_level_intercept_init_vals)
-
+                error, _, preds = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, FO_b_i_apprx = subject_level_intercept_init_vals)
+        self.preds_opt_.append(preds)
         return error
     
     def save_fitted_model(self, jb_file_name:str = None ):
@@ -1644,7 +1644,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
                 #error = self.no_me_loss_function(self.y, preds, sigma, **self.no_me_loss_params)
             else:
-                error, b_i_approx = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
+                error, b_i_approx, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
                 b_i_approx = pd.DataFrame(b_i_approx, dtype = pd.Float64Dtype(), columns = omegas.columns)
                 pop_coeffs_i = pd.DataFrame(dtype = pd.Float64Dtype(), columns = pop_coeffs.columns)
                 assert len(pop_coeffs) == 1
@@ -1735,7 +1735,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                  'subject_level_intercept_name':None
                                  } for c_tuple in thetas.columns.to_list()])
         init_params = np.concatenate(init_params, axis = 1, dtype=np.float64).flatten()
-        
+        self.preds_opt_ = []
         objective_function = partial(self._objective_function2,
                                      subject_level_intercept_init_vals = subject_level_intercept_init_vals,
                                      parallel = parallel,
