@@ -1628,7 +1628,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs, timepoints = timepoints)
             #hess_objective = self.no_me_loss_function        
-        elif self.n_subject_level_intercept_sds > 0:
+        elif (self.n_subject_level_intercept_sds > 0) or self.no_me_loss_needs_sigma:
             n_pop_c = self.n_population_coeff
             pop_coeffs = pd.DataFrame(params[:n_pop_c].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns[:n_pop_c])
             start_idx = n_pop_c
@@ -1639,19 +1639,24 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.subject_level_intercept_sds.columns)
             start_idx = end_idx
             thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
-            error, b_i_approx = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
-            b_i_approx = pd.DataFrame(b_i_approx, dtype = pd.Float64Dtype(), columns = omegas.columns)
-            pop_coeffs_i = pd.DataFrame(dtype = pd.Float64Dtype(), columns = pop_coeffs.columns)
-            assert len(pop_coeffs) == 1
-            for c in pop_coeffs_i.columns:
-                if c in b_i_approx.columns:
-                    b_i_c = b_i_approx[c].values.flatten()
-                else:
-                    b_i_c = np.repeat(0.0, len(b_i_approx))
-                pop_coeffs_i[c] = np.repeat(pop_coeffs[c].values[0], len(b_i_approx)) + b_i_c
-            model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs_i, thetas, beta_data)
-            preds = self._solve_ivp(model_coeffs)
-            self.b_i_approx = b_i_approx
+            if (self.no_me_loss_needs_sigma) and (self.n_subject_level_intercept_sds == 0):
+                model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
+                preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
+                #error = self.no_me_loss_function(self.y, preds, sigma, **self.no_me_loss_params)
+            else:
+                error, b_i_approx = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
+                b_i_approx = pd.DataFrame(b_i_approx, dtype = pd.Float64Dtype(), columns = omegas.columns)
+                pop_coeffs_i = pd.DataFrame(dtype = pd.Float64Dtype(), columns = pop_coeffs.columns)
+                assert len(pop_coeffs) == 1
+                for c in pop_coeffs_i.columns:
+                    if c in b_i_approx.columns:
+                        b_i_c = b_i_approx[c].values.flatten()
+                    else:
+                        b_i_c = np.repeat(0.0, len(b_i_approx))
+                    pop_coeffs_i[c] = np.repeat(pop_coeffs[c].values[0], len(b_i_approx)) + b_i_c
+                model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs_i, thetas, beta_data)
+                preds = self._solve_ivp(model_coeffs)
+                self.b_i_approx = b_i_approx
             
             #CI95% construction
             
