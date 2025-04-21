@@ -14,7 +14,8 @@ from diffeqs import( OneCompartmentFODiffEq,
                     first_order_one_compartment_model2,
                     parallel_elim_one_compartment_model, 
                     one_compartment_absorption, 
-                    OneCompartmentConc
+                    OneCompartmentConc,
+                    OneCompartmentBolus_CL
                     )
 import numpy as np
 
@@ -64,7 +65,8 @@ work_df.loc[work_df['TIME'] == 0, 'solve_ode_at_TIME'] = False
 work_df.loc[work_df['TIME'] > 0, 'solve_ode_at_TIME'] = True
 
 scale_df = work_df.copy()
-
+pred_df = scale_df.copy()
+pred_df['solve_ode_at_TIME'] = True
 
 
 piv_cols = []
@@ -78,13 +80,13 @@ no_me_mod_fo =  CompartmentalModel(
                                                  #subject_level_intercept_sd_init_val = 0.2, 
                                                  #subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('vd', 30, ),
+                            PopulationCoeffcient('vd', 40, ),
                          ],
           dep_vars= None, 
                                    no_me_loss_function=sum_of_squares_loss, 
                                    no_me_loss_needs_sigma=False,
                                    #optimizer_tol=.001, 
-                                   pk_model_class=OneCompartmentConc(), 
+                                   pk_model_class=OneCompartmentBolus_CL(), 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
                                                                           , optimization_init_val=.5
@@ -98,7 +100,7 @@ no_me_mod_fo =  CompartmentalModel(
 res_df['DV_scale'] = scale_df['DV_scale']
 #%%
 no_me_mod_fo = no_me_mod_fo.fit2(scale_df,)
-res_df['no_me_fo_sse'] = no_me_mod_fo.predict2(scale_df)
+res_df['no_me_fo_sse'] = no_me_mod_fo.predict2(pred_df)
 piv_cols.extend(['DV_scale', 'no_me_fo_sse'])
 # %%
 me_mod_fo =  CompartmentalModel(
@@ -131,6 +133,7 @@ me_mod_fo =  CompartmentalModel(
 
 
 me_mod_fo = me_mod_fo.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_fo{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
+
 res_df['me_fo_preds'] = me_mod_fo.predict2(scale_df)
 piv_cols.extend(['me_fo_preds', ])
 # %%
