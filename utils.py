@@ -1117,6 +1117,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         solve_ode_at_time_col:str = None,
         pk_model_class:PKBaseODE=None,
         ode_t0_cols: List[ODEInitVals] = None,
+        ode_t0_time_val:int|float = 0,
         population_coeff: List[PopulationCoeffcient] = [
             PopulationCoeffcient('k', 0.6), PopulationCoeffcient('vd', 2.0)],
         dep_vars: Dict[str, ObjectiveFunctionColumn] = {'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
@@ -1156,6 +1157,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.conc_at_time_col = conc_at_time_col
         self.time_col = time_col
         self.solve_ode_at_time_col = solve_ode_at_time_col
+        self.ode_t0_time_val = ode_t0_time_val
         self.verbose = verbose
         self.minimize_method = minimize_method
         self.pk_args_diffeq = get_function_args(self.pk_model_function)[2:] #this relys on defining the dif eqs as I have done
@@ -1367,8 +1369,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             data_out['initial_conc'] = deepcopy(initial_conc)
             yield deepcopy(data_out)
     @profile
-    def _homongenize_timepoints(self,data, subject_id_c, time_col):
-        data = data.copy()
+    def _homongenize_timepoints(self,ode_data, subject_data, subject_id_c, time_col):
+        data = ode_data.copy()
         data['tmp'] = 1
         time_mask_df = data.pivot( index = subject_id_c,
                                     columns = time_col,
@@ -1378,7 +1380,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.global_t0_eval= self.global_tp_eval[0]
         self.global_tf_eval = self.global_tp_eval[-1]
         self.global_tspan_eval = np.array([self.global_t0_eval, self.global_tf_eval], dtype=np.float64)
-        self.global_tspan_init = np.array([0.0, self.global_tf_eval], dtype=np.float64)
+        #this assumes that all of the subjects have the ODE init 
+        self.global_tspan_init = np.array([self.ode_t0_time_val, self.global_tf_eval], dtype=np.float64)
     
     def _unpack_prepare_thetas(self,model_param_dep_vars:pd.DataFrame, subject_data:pd.DataFrame):
         thetas = pd.DataFrame( )
@@ -1483,7 +1486,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                              & (init_vals['model_error'] == False)
                                              , :]
         
-        self._homongenize_timepoints(ode_data, subject_id_c, time_col)
+        self._homongenize_timepoints(ode_data, subject_data, subject_id_c, time_col)
         thetas, theta_data = self._unpack_prepare_thetas(model_param_dep_vars, subject_data)
         pop_coeffs, subject_level_intercept_info = self._unpack_prepare_pop_coeffs(model_params)
         subject_level_intercept_sds = subject_level_intercept_info[0]
@@ -1618,7 +1621,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             raise ValueError("The Model must be fit before prediction")
         params = self.fit_result_['x']
         _, _, _, beta_data = self._assemble_pred_matrices(data)
-        if self.n_subject_level_intercept_sds == 0:
+        if (self.n_subject_level_intercept_sds == 0) and (not self.no_me_loss_needs_sigma):
            
             pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns)
             thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
@@ -1653,11 +1656,33 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             #CI95% construction
             
         return preds
+    def _validate_data_chronology(self, data:pd.DataFrame, update_data_chronology:bool = False):
+        if update_data_chronology:
+            data = data.sort_values(by = [self.groupby_col, self.time_col]).copy()
+            sorted_data = data
+        else:
+            sorted_data = data.sort_values(by = [self.groupby_col, self.time_col]).copy()
+        if not np.all(sorted_data.values == data.values):
+            error_str = f"""Incoming data should be sorted by `groupby_col` ({self.groupby_col}) then `time_col`({self.time_col}).
+            Sort your pd.DataFrame data with `data.sort_values(by = [{self.groupby_col}, {self.time_col}])` or set the `fit` method's
+            `update_data_chronology` argument to `True`.
+            """
+            raise ValueError(error_str)
+        test_ode_t0_times = data.drop_duplicates(subset=self.groupby_col, keep = 'first').copy()[self.time_col]
+        if isinstance(self.ode_t0_time_val, int) or isinstance(self.ode_t0_time_val, float):
+            declared_t0 = np.repeat(self.ode_t0_time_val, len(test_ode_t0_times))
+        if not np.all(test_ode_t0_times == declared_t0):
+            error_str = """The declared initial timepoint values (`ode_t0_time_val`) for ODE solving do not match the first timepoint seen 
+            for each subject."""
+            raise ValueError(error_str)
+        return data
+    
     @profile
     def fit2(self, data, parallel = False, parallel_n_jobs = -1 ,
              n_iters_per_checkpoint = 0, warm_start = False,
              fit_id:uuid.UUID = None, ) -> Self:  
         fit_id = uuid.uuid4() if fit_id is None else fit_id
+        data = self._validate_data_chronology(data)
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data)
         subject_level_intercept_init_vals = self.subject_level_intercept_init_vals
         sigma_check_1 = len(omegas.values) > 0
