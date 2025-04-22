@@ -774,7 +774,26 @@ def FO_approx_ll_loss(pop_coeffs, sigma,
             filt = y_groups_idx == sub        
             J_sub = J[filt]
             residuals_sub = residuals[filt] 
-            b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omegas2), J_sub.T @ residuals_sub)
+            try:
+                # Ensure omegas2 is invertible (handle near-zero omegas)
+                # Add a small value to diagonal for stability if needed, or use pinv
+                min_omega_var = 1e-9 # Example threshold
+                stable_omegas2 = np.diag(np.maximum(np.diag(omegas2), min_omega_var))
+                omega_inv = np.linalg.inv(stable_omegas2)
+
+                # Corrected matrix A
+                A = J_sub.T @ J_sub + sigma2 * omega_inv
+                # Right-hand side
+                rhs = J_sub.T @ residuals_sub
+                # Solve
+                b_i_approx[sub_idx, :] = np.linalg.solve(A, rhs)
+
+            except np.linalg.LinAlgError:
+                print(f"Warning: Linear algebra error (likely singular matrix) for subject {sub}. Setting b_i to zero.")
+                
+            except Exception as e:
+                print(f"Error calculating b_i for subject {sub}: {e}")
+
     
 
     return neg2_ll, b_i_approx, preds
@@ -1450,7 +1469,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         subject_id_c = self.groupby_col
         conc_at_time_c = self.conc_at_time_col
         time_col = deepcopy(self.time_col)
-        
+        #I think I know what is going on with the off preds, perhaps these dataset preps are 
+        #not working as expected when 'data' is already the ode data?
         data = data.reset_index(drop = True).copy()
         self.data = data.copy()
         subject_data = data.drop_duplicates(subset=subject_id_c, keep = 'first').copy()
@@ -1547,6 +1567,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         partial_solve_ivp = partial(self._solve_ivp_parallel2,
                                  ode_class = self.pk_model_class,
                                  tspan = self.global_tspan_init,
+                                 #issue is with global_tp_eval? I think for this pred the 
+                                 #first global_tp_eval should be zero?
                                  teval = self.global_tp_eval if timepoints is None else timepoints,
                                  method = self.ode_solver_method,
                                  )
@@ -1651,6 +1673,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 for c in pop_coeffs_i.columns:
                     if c in b_i_approx.columns:
                         b_i_c = b_i_approx[c].values.flatten()
+                        #b_i_c = np.repeat(0.0, len(b_i_approx))
                     else:
                         b_i_c = np.repeat(0.0, len(b_i_approx))
                     pop_coeffs_i[c] = np.repeat(pop_coeffs[c].values[0], len(b_i_approx)) + b_i_c
