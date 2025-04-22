@@ -1162,7 +1162,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
 
     ):
         
-        
+        self.b_i_approx = None
         self.batch_id = uuid.uuid4() if batch_id is None else batch_id
         self.model_id = uuid.uuid4() if model_id is None else model_id
         self.model_name = model_name
@@ -1624,7 +1624,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 error = self.no_me_loss_function(self.y, preds, sigma, **self.no_me_loss_params)
             else:   
                 error, _, preds = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, FO_b_i_apprx = subject_level_intercept_init_vals)
-        self.preds_opt_.append(preds)
+        #self.preds_opt_.append(preds)
         return error
     
     def save_fitted_model(self, jb_file_name:str = None ):
