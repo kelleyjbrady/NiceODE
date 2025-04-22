@@ -768,6 +768,9 @@ def FO_approx_ll_loss(pop_coeffs, sigma,
                                          )
     
     #if predicting or debugging, solve for the optimal b_i given the first order apprx
+    #perhaps b_i approx is off in the 2cmpt case bc the model was learned on t1+ w/ 
+    #t0 as the intial condition but now t0 is in the data w/out a conc in the DV
+    # col, this should make the resdiduals very wrong
     b_i_approx = np.zeros((n_individuals, n_random_effects))
     if solve_for_omegas:
         for sub_idx, sub in enumerate(model_obj.unique_groups):
@@ -1638,11 +1641,15 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
     
     @profile
-    def predict2(self, data, parallel = None, parallel_n_jobs = None, timepoints = None ):
+    def predict2(self, data, parallel = None, parallel_n_jobs = None, timepoints = None, subject_level_prediction = True, predict_unknown_t0 = False ):
+        
         if self.fit_result_ is None:
             raise ValueError("The Model must be fit before prediction")
         params = self.fit_result_['x']
         _, _, _, beta_data = self._assemble_pred_matrices(data)
+        ode_t0_vals_are_subject_y0_init_status = deepcopy(self.ode_t0_vals_are_subject_y0)
+        if predict_unknown_t0:
+            self.ode_t0_vals_are_subject_y0 = True
         if (self.n_subject_level_intercept_sds == 0) and (not self.no_me_loss_needs_sigma):
            
             pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns)
@@ -1666,12 +1673,15 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
                 #error = self.no_me_loss_function(self.y, preds, sigma, **self.no_me_loss_params)
             else:
-                error, b_i_approx, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
+                if self.b_i_approx is None:
+                    error, b_i_approx, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
+                else:
+                    b_i_approx = self.b_i_approx
                 b_i_approx = pd.DataFrame(b_i_approx, dtype = pd.Float64Dtype(), columns = omegas.columns)
                 pop_coeffs_i = pd.DataFrame(dtype = pd.Float64Dtype(), columns = pop_coeffs.columns)
                 assert len(pop_coeffs) == 1
                 for c in pop_coeffs_i.columns:
-                    if c in b_i_approx.columns:
+                    if c in b_i_approx.columns and subject_level_prediction:
                         b_i_c = b_i_approx[c].values.flatten()
                         #b_i_c = np.repeat(0.0, len(b_i_approx))
                     else:
@@ -1682,7 +1692,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 self.b_i_approx = b_i_approx
             
             #CI95% construction
-            
+        self.ode_t0_vals_are_subject_y0 = ode_t0_vals_are_subject_y0_init_status
+           
         return preds
     def _validate_data_chronology(self, data:pd.DataFrame, update_data_chronology:bool = False):
         if update_data_chronology:
