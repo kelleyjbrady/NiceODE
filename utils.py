@@ -703,7 +703,7 @@ def FOCE_approx_ll_loss(pop_coeffs, sigma, omegas, thetas, theta_data, model_obj
     debug_print('Objective Call Complete ============= OBEJECTIVE CALL COMPLETE =======================')
     debug_print(f"Loss: {neg2_ll}\n")
     debug_print(f"b_i_estimates: {b_i_estimates}\n")
-    return neg2_ll, b_i_estimates
+    return neg2_ll, b_i_estimates, preds
     
     
     
@@ -768,16 +768,38 @@ def FO_approx_ll_loss(pop_coeffs, sigma,
                                          )
     
     #if predicting or debugging, solve for the optimal b_i given the first order apprx
+    #perhaps b_i approx is off in the 2cmpt case bc the model was learned on t1+ w/ 
+    #t0 as the intial condition but now t0 is in the data w/out a conc in the DV
+    # col, this should make the resdiduals very wrong
     b_i_approx = np.zeros((n_individuals, n_random_effects))
     if solve_for_omegas:
         for sub_idx, sub in enumerate(model_obj.unique_groups):
             filt = y_groups_idx == sub        
             J_sub = J[filt]
             residuals_sub = residuals[filt] 
-            b_i_approx[sub_idx, :] = np.linalg.solve(J_sub.T @ J_sub + np.linalg.inv(omegas2), J_sub.T @ residuals_sub)
+            try:
+                # Ensure omegas2 is invertible (handle near-zero omegas)
+                # Add a small value to diagonal for stability if needed, or use pinv
+                min_omega_var = 1e-9 # Example threshold
+                stable_omegas2 = np.diag(np.maximum(np.diag(omegas2), min_omega_var))
+                omega_inv = np.linalg.inv(stable_omegas2)
+
+                # Corrected matrix A
+                A = J_sub.T @ J_sub + sigma2 * omega_inv
+                # Right-hand side
+                rhs = J_sub.T @ residuals_sub
+                # Solve
+                b_i_approx[sub_idx, :] = np.linalg.solve(A, rhs)
+
+            except np.linalg.LinAlgError:
+                print(f"Warning: Linear algebra error (likely singular matrix) for subject {sub}. Setting b_i to zero.")
+                
+            except Exception as e:
+                print(f"Error calculating b_i for subject {sub}: {e}")
+
     
 
-    return neg2_ll, b_i_approx
+    return neg2_ll, b_i_approx, preds
     
 #@njit 
 def create_vectorizable_J(J, groups_idx, n_random_effects):
@@ -1114,8 +1136,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         log_transform_dep_var = False,
         dose_col:str = None,
         time_col='TIME',
+        solve_ode_at_time_col:str = None,
         pk_model_class:PKBaseODE=None,
         ode_t0_cols: List[ODEInitVals] = None,
+        ode_t0_time_val:int|float = 0,
         population_coeff: List[PopulationCoeffcient] = [
             PopulationCoeffcient('k', 0.6), PopulationCoeffcient('vd', 2.0)],
         dep_vars: Dict[str, ObjectiveFunctionColumn] = {'k': [ObjectiveFunctionColumn('mgkg'), ObjectiveFunctionColumn('age')],
@@ -1138,7 +1162,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
 
     ):
         
-        
+        self.b_i_approx = None
         self.batch_id = uuid.uuid4() if batch_id is None else batch_id
         self.model_id = uuid.uuid4() if model_id is None else model_id
         self.model_name = model_name
@@ -1154,6 +1178,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.groupby_col = groupby_col
         self.conc_at_time_col = conc_at_time_col
         self.time_col = time_col
+        self.solve_ode_at_time_col = solve_ode_at_time_col
+        self.ode_t0_time_val = ode_t0_time_val
         self.verbose = verbose
         self.minimize_method = minimize_method
         self.pk_args_diffeq = get_function_args(self.pk_model_function)[2:] #this relys on defining the dif eqs as I have done
@@ -1365,16 +1391,19 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             data_out['initial_conc'] = deepcopy(initial_conc)
             yield deepcopy(data_out)
     @profile
-    def _homongenize_timepoints(self,data, subject_id_c, time_col):
+    def _homongenize_timepoints(self,ode_data, subject_data, subject_id_c, time_col):
+        data = ode_data.copy()
         data['tmp'] = 1
         time_mask_df = data.pivot( index = subject_id_c,
                                     columns = time_col,
                                     values = 'tmp').fillna(0)
         self.time_mask = time_mask_df.to_numpy().astype(bool)
-        self.global_tp = np.array(time_mask_df.columns.values, dtype = np.float64)
-        self.global_t0 = self.global_tp[0]
-        self.global_tf = self.global_tp[-1]
-        self.global_tspan = np.array([self.global_t0, self.global_tf], dtype=np.float64)
+        self.global_tp_eval = np.array(time_mask_df.columns.values, dtype = np.float64)
+        self.global_t0_eval= self.global_tp_eval[0]
+        self.global_tf_eval = self.global_tp_eval[-1]
+        self.global_tspan_eval = np.array([self.global_t0_eval, self.global_tf_eval], dtype=np.float64)
+        #this assumes that all of the subjects have the ODE init 
+        self.global_tspan_init = np.array([self.ode_t0_time_val, self.global_tf_eval], dtype=np.float64)
     
     def _unpack_prepare_thetas(self,model_param_dep_vars:pd.DataFrame, subject_data:pd.DataFrame):
         thetas = pd.DataFrame( )
@@ -1440,19 +1469,34 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return pop_coeffs, (subject_level_intercept_sds, subject_level_intercept_init_vals)
     @profile
     def _assemble_pred_matrices(self, data):
-        data = data.reset_index(drop = True).copy()
-        self.data = data.copy()
         subject_id_c = self.groupby_col
         conc_at_time_c = self.conc_at_time_col
-        verbose = self.verbose
         time_col = deepcopy(self.time_col)
-        self.unique_groups = np.array(data[subject_id_c].unique())
-        self.y_groups = np.array(data[subject_id_c].values)
-        self.y = np.array(data[conc_at_time_c].values, dtype = np.float64)
+        #I think I know what is going on with the off preds, perhaps these dataset preps are 
+        #not working as expected when 'data' is already the ode data?
+        data = data.reset_index(drop = True).copy()
+        self.data = data.copy()
         subject_data = data.drop_duplicates(subset=subject_id_c, keep = 'first').copy()
         self.subject_data = subject_data.copy()
-        self.subject_y0 = np.array(subject_data[conc_at_time_c].values, dtype = np.float64)
-        self.subject_y0_idx = np.array(subject_data.index.values, dtype = np.int64)
+        if self.solve_ode_at_time_col is None:
+            ode_data = data.copy()
+        else:
+            ode_data = data.loc[data[self.solve_ode_at_time_col], :]
+        #ode data is 'fixed' from here forward
+        self.ode_data = ode_data.copy()
+        verbose = self.verbose
+        
+        
+        self.unique_groups = subject_data[subject_id_c].unique() # list of unique subjects in order
+        self.y_groups = ode_data[subject_id_c].to_numpy() #subjects in order, repeated n timepoints time per subject 
+        self.y = ode_data[conc_at_time_c].to_numpy(dtype = np.float64) 
+        
+        #y0 is the fist y where ODE solutions are generated, this may or may not be the solution to the ODE at t0
+        #In the case of a model without absorption if all timepoints before
+        first_pred_t_df = ode_data.drop_duplicates(subset=subject_id_c, keep = 'first')
+        self.subject_y0 = first_pred_t_df[conc_at_time_c].to_numpy(dtype = np.float64)
+        self.subject_y0_idx = np.array(first_pred_t_df.index.values, dtype = np.int64)
+        #below here has not been updated yet to use new flexible method of setting the y and ode inits
         ode_init_val_cols = [i.column_name for i in self.ode_t0_cols]
         self.ode_t0_vals = subject_data[ode_init_val_cols].reset_index(drop = True).copy()
         self.ode_t0_vals_are_subject_y0 = np.all(self.subject_y0 == self.ode_t0_vals.iloc[:,0])
@@ -1464,7 +1508,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         model_param_dep_vars = init_vals.loc[(init_vals['population_coeff'] == False)
                                              & (init_vals['model_error'] == False)
                                              , :]
-        self._homongenize_timepoints(data, subject_id_c, time_col)
+        
+        self._homongenize_timepoints(ode_data, subject_data, subject_id_c, time_col)
         thetas, theta_data = self._unpack_prepare_thetas(model_param_dep_vars, subject_data)
         pop_coeffs, subject_level_intercept_info = self._unpack_prepare_pop_coeffs(model_params)
         subject_level_intercept_sds = subject_level_intercept_info[0]
@@ -1524,8 +1569,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         iter_obj =  zip(model_coeffs.iterrows(), ode_t0_vals.iterrows())
         partial_solve_ivp = partial(self._solve_ivp_parallel2,
                                  ode_class = self.pk_model_class,
-                                 tspan = self.global_tspan,
-                                 teval = self.global_tp if timepoints is None else timepoints,
+                                 tspan = self.global_tspan_init,
+                                 #issue is with global_tp_eval? I think for this pred the 
+                                 #first global_tp_eval should be zero?
+                                 teval = self.global_tp_eval if timepoints is None else timepoints,
                                  method = self.ode_solver_method,
                                  )
         if parallel:
@@ -1576,8 +1623,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
                 error = self.no_me_loss_function(self.y, preds, sigma, **self.no_me_loss_params)
             else:   
-                error, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, FO_b_i_apprx = subject_level_intercept_init_vals)
-
+                error, _, preds = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, FO_b_i_apprx = subject_level_intercept_init_vals)
+        #self.preds_opt_.append(preds)
         return error
     
     def save_fitted_model(self, jb_file_name:str = None ):
@@ -1594,19 +1641,23 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
     
     @profile
-    def predict2(self, data, parallel = None, parallel_n_jobs = None, timepoints = None ):
+    def predict2(self, data, parallel = None, parallel_n_jobs = None, timepoints = None, subject_level_prediction = True, predict_unknown_t0 = False ):
+        
         if self.fit_result_ is None:
             raise ValueError("The Model must be fit before prediction")
         params = self.fit_result_['x']
         _, _, _, beta_data = self._assemble_pred_matrices(data)
-        if self.n_subject_level_intercept_sds == 0:
+        ode_t0_vals_are_subject_y0_init_status = deepcopy(self.ode_t0_vals_are_subject_y0)
+        if predict_unknown_t0:
+            self.ode_t0_vals_are_subject_y0 = True
+        if (self.n_subject_level_intercept_sds == 0) and (not self.no_me_loss_needs_sigma):
            
             pop_coeffs = pd.DataFrame(params[:self.n_population_coeff].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns)
             thetas = pd.DataFrame(params[self.n_population_coeff:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
             model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
             preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs, timepoints = timepoints)
             #hess_objective = self.no_me_loss_function        
-        elif self.n_subject_level_intercept_sds > 0:
+        elif (self.n_subject_level_intercept_sds > 0) or self.no_me_loss_needs_sigma:
             n_pop_c = self.n_population_coeff
             pop_coeffs = pd.DataFrame(params[:n_pop_c].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_pop_coeffs.columns[:n_pop_c])
             start_idx = n_pop_c
@@ -1617,28 +1668,60 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             omegas = pd.DataFrame(params[start_idx:end_idx].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.subject_level_intercept_sds.columns)
             start_idx = end_idx
             thetas = pd.DataFrame(params[start_idx:].reshape(1,-1), dtype = pd.Float64Dtype(), columns = self.init_thetas.columns)
-            error, b_i_approx = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
-            b_i_approx = pd.DataFrame(b_i_approx, dtype = pd.Float64Dtype(), columns = omegas.columns)
-            pop_coeffs_i = pd.DataFrame(dtype = pd.Float64Dtype(), columns = pop_coeffs.columns)
-            assert len(pop_coeffs) == 1
-            for c in pop_coeffs_i.columns:
-                if c in b_i_approx.columns:
-                    b_i_c = b_i_approx[c].values.flatten()
+            if (self.no_me_loss_needs_sigma) and (self.n_subject_level_intercept_sds == 0):
+                model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs, thetas, beta_data)
+                preds = self._solve_ivp(model_coeffs, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
+                #error = self.no_me_loss_function(self.y, preds, sigma, **self.no_me_loss_params)
+            else:
+                if self.b_i_approx is None:
+                    error, b_i_approx, _ = self.me_loss_function(pop_coeffs, sigma, omegas, thetas, beta_data, self, solve_for_omegas = True)
                 else:
-                    b_i_c = np.repeat(0.0, len(b_i_approx))
-                pop_coeffs_i[c] = np.repeat(pop_coeffs[c].values[0], len(b_i_approx)) + b_i_c
-            model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs_i, thetas, beta_data)
-            preds = self._solve_ivp(model_coeffs)
-            self.b_i_approx = b_i_approx
+                    b_i_approx = self.b_i_approx
+                b_i_approx = pd.DataFrame(b_i_approx, dtype = pd.Float64Dtype(), columns = omegas.columns)
+                pop_coeffs_i = pd.DataFrame(dtype = pd.Float64Dtype(), columns = pop_coeffs.columns)
+                assert len(pop_coeffs) == 1
+                for c in pop_coeffs_i.columns:
+                    if c in b_i_approx.columns and subject_level_prediction:
+                        b_i_c = b_i_approx[c].values.flatten()
+                        #b_i_c = np.repeat(0.0, len(b_i_approx))
+                    else:
+                        b_i_c = np.repeat(0.0, len(b_i_approx))
+                    pop_coeffs_i[c] = np.repeat(pop_coeffs[c].values[0], len(b_i_approx)) + b_i_c
+                model_coeffs = self._generate_pk_model_coeff_vectorized(pop_coeffs_i, thetas, beta_data)
+                preds = self._solve_ivp(model_coeffs)
+                self.b_i_approx = b_i_approx
             
             #CI95% construction
-            
+        self.ode_t0_vals_are_subject_y0 = ode_t0_vals_are_subject_y0_init_status
+           
         return preds
+    def _validate_data_chronology(self, data:pd.DataFrame, update_data_chronology:bool = False):
+        if update_data_chronology:
+            data = data.sort_values(by = [self.groupby_col, self.time_col]).copy()
+            sorted_data = data
+        else:
+            sorted_data = data.sort_values(by = [self.groupby_col, self.time_col]).copy()
+        if not np.all(sorted_data.values == data.values):
+            error_str = f"""Incoming data should be sorted by `groupby_col` ({self.groupby_col}) then `time_col`({self.time_col}).
+            Sort your pd.DataFrame data with `data.sort_values(by = [{self.groupby_col}, {self.time_col}])` or set the `fit` method's
+            `update_data_chronology` argument to `True`.
+            """
+            raise ValueError(error_str)
+        test_ode_t0_times = data.drop_duplicates(subset=self.groupby_col, keep = 'first').copy()[self.time_col]
+        if isinstance(self.ode_t0_time_val, int) or isinstance(self.ode_t0_time_val, float):
+            declared_t0 = np.repeat(self.ode_t0_time_val, len(test_ode_t0_times))
+        if not np.all(test_ode_t0_times == declared_t0):
+            error_str = """The declared initial timepoint values (`ode_t0_time_val`) for ODE solving do not match the first timepoint seen 
+            for each subject."""
+            raise ValueError(error_str)
+        return data
+    
     @profile
     def fit2(self, data, parallel = False, parallel_n_jobs = -1 ,
              n_iters_per_checkpoint = 0, warm_start = False,
              fit_id:uuid.UUID = None, ) -> Self:  
         fit_id = uuid.uuid4() if fit_id is None else fit_id
+        data = self._validate_data_chronology(data)
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data)
         subject_level_intercept_init_vals = self.subject_level_intercept_init_vals
         sigma_check_1 = len(omegas.values) > 0
@@ -1686,7 +1769,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                  'subject_level_intercept_name':None
                                  } for c_tuple in thetas.columns.to_list()])
         init_params = np.concatenate(init_params, axis = 1, dtype=np.float64).flatten()
-        
+        self.preds_opt_ = []
         objective_function = partial(self._objective_function2,
                                      subject_level_intercept_init_vals = subject_level_intercept_init_vals,
                                      parallel = parallel,
