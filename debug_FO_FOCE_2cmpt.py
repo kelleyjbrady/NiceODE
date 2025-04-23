@@ -79,7 +79,7 @@ res_df[['SUBJID', 'TIME',  'DV_scale']] = pred_df[['SUBJID', 'TIME', 'DV_scale']
 
 # %%
 me_mod_fo =  CompartmentalModel(
-    model_name = "debug_hydrocortisone_2cmptbolus_cl-v1ME-q-v2_fo_3",
+    model_name = "debug_hydrocortisone_2cmptbolus_cl-v1ME-q-v2_fo_jit",
           ode_t0_cols=[ ODEInitVals('dose_scale'), ODEInitVals('c2_init'),],
           conc_at_time_col = 'DV_scale',
           solve_ode_at_time_col = 'solve_ode_at_TIME',
@@ -423,46 +423,83 @@ piv_cols.append(me3_mod_fo.model_name)
 me3_mod_fo.save_fitted_model(jb_file_name = me3_mod_fo.model_name)
 #%%
 b_i_apprx_df = pd.DataFrame( dtype = pd.Float64Dtype())
-b_i_apprx_df['b_i_fo_cl'] = me_mod_fo.b_i_approx[('cl', 'omega2_cl')].to_numpy()
+b_i_apprx_df['b_i_fo_cl'] = me3_mod_fo.b_i_approx[('cl', 'omega2_cl')].to_numpy()
+b_i_apprx_df['b_i_fo_v1'] = me3_mod_fo.b_i_approx[('v1', 'omega2_v1')].to_numpy()
+b_i_apprx_df['b_i_fo_q'] = me3_mod_fo.b_i_approx[('q', 'omega2_q')].to_numpy()
 b_i_apprx_df['SUBJID'] = scale_df['SUBJID'].drop_duplicates().values
 scale_df = (scale_df.merge(b_i_apprx_df, how = 'left', on = 'SUBJID') 
             if 'b_i_fo_cl' not in scale_df.columns else scale_df.copy())
 
-me_mod_foce =  CompartmentalModel(
-          ode_t0_cols=[ODEInitVals('DV')],
-          population_coeff=[PopulationCoeffcient('cl', 25, subject_level_intercept=True,
-                                                 optimization_lower_bound = np.log(15), 
-                                                 optimization_upper_bound = np.log(40),
-                                                 subject_level_intercept_sd_init_val = 0.38, 
-                                                 subject_level_intercept_sd_lower_bound = .001, 
-                                                 subject_level_intercept_sd_upper_bound = 2,
-                                                 subject_level_intercept_init_vals_column_name='b_i_fo_cl',
+me3_mod_foce =  CompartmentalModel(
+    model_name = "debug_hydrocortisone_2cmptbolus_clME-v1ME-qME-v2_foCE_2",
+          ode_t0_cols=[ ODEInitVals('dose_scale'), ODEInitVals('c2_init'),],
+          conc_at_time_col = 'DV_scale',
+          solve_ode_at_time_col = 'solve_ode_at_TIME',
+          population_coeff=[
+                            PopulationCoeffcient('cl', 12, 
+                                                 #subject_level_intercept=True,
+                                                 optimization_lower_bound = np.log(5),
+                                                 optimization_upper_bound = np.log(30),
+                                                 subject_level_intercept=True, 
+                                                subject_level_intercept_sd_init_val = 0.2, 
+                                                subject_level_intercept_sd_upper_bound = 5,
+                                                subject_level_intercept_sd_lower_bound=1e-6,
+                                                subject_level_intercept_init_vals_column_name='b_i_fo_cl'
                                                  ),
-                            PopulationCoeffcient('vd', 80
-                                                 , optimization_lower_bound = np.log(70)
-                                                 , optimization_upper_bound = np.log(90)
-                                                 
+                            PopulationCoeffcient('v1',
+                                                 41,
+                                                  optimization_lower_bound = np.log(20),
+                                                 optimization_upper_bound = np.log(60),
+                                                subject_level_intercept=True, 
+                                                subject_level_intercept_sd_init_val = 0.15, 
+                                                subject_level_intercept_sd_upper_bound = 5,
+                                                subject_level_intercept_sd_lower_bound=1e-6, 
+                                                subject_level_intercept_init_vals_column_name='b_i_fo_v1'
                                                  ),
+                            PopulationCoeffcient('q', 6.2,
+                                                 optimization_lower_bound = np.log(1e-6),
+                                                 optimization_upper_bound = np.log(80),
+                                                 subject_level_intercept=True, 
+                                                subject_level_intercept_sd_init_val = 0.007, 
+                                                subject_level_intercept_sd_upper_bound = 5,
+                                                subject_level_intercept_sd_lower_bound=1e-6,
+                                                subject_level_intercept_init_vals_column_name='b_i_fo_q'
+                                                ),
+                            PopulationCoeffcient('v2', 1,
+                                                 optimization_lower_bound = np.log(1e-3),
+                                                 optimization_upper_bound = np.log(10),
+                                                 #subject_level_intercept=True, 
+                                                #subject_level_intercept_sd_init_val = 0.1, 
+                                                #subject_level_intercept_sd_upper_bound = 5,
+                                                #subject_level_intercept_sd_lower_bound=1e-6
+                                                ),
                          ],
           dep_vars= None, 
                                    no_me_loss_function=sum_of_squares_loss, 
-                                   #optimizer_tol=.00001, 
-                                   pk_model_function=first_order_one_compartment_model2, 
-                                   me_loss_function=FOCE_approx_ll_loss, 
-                                   model_error_sigma=PopulationCoeffcient('sigma', .18
-                                                                       ,log_transform_init_val=False
-                                                                       , optimization_lower_bound=.001, 
-                                                                       optimization_upper_bound=4
-                                                                       )
+                                   me_loss_function = FOCE_approx_ll_loss,
+                                   no_me_loss_needs_sigma=False,
+                                   optimizer_tol=None, 
+                                   pk_model_class=TwoCompartmentBolus(), 
+                                   model_error_sigma=PopulationCoeffcient('sigma'
+                                                                          ,log_transform_init_val=False
+                                                                          , optimization_init_val=.2
+                                                                          ,optimization_lower_bound=0.00001
+                                                                          ,optimization_upper_bound=1
+                                                                          ),
                                    #ode_solver_method='BDF'
+                                   minimize_method = 'COBYQA',
                                    )
+fit_model = True
+if fit_model:
+    me3_mod_foce = me3_mod_foce.fit2(scale_df, )
+else:
+    with open(f"logs/fitted_model_{me3_mod_foce.model_name}.jb", 'rb') as f:
+        me3_mod_foce = jb.load(f)
+
+res_df[me3_mod_foce.model_name] = me3_mod_foce.predict2(pred_df)
+piv_cols.append(me3_mod_foce.model_name)
+me3_mod_foce.save_fitted_model(jb_file_name = me3_mod_foce.model_name)
 
 
 
 # %%
-me_mod_foce.fit2(scale_df,checkpoint_filename=f'mod_abs_test_me_foce_{now_str}.jb', n_iters_per_checkpoint=1, parallel=False, parallel_n_jobs=4)
-
-
-with open('me_mod_debug_foce.jb', 'wb') as f:
-    jb.dump(me_mod_foce, f)
-

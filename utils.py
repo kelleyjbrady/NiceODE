@@ -34,6 +34,7 @@ from typing import Literal, Tuple
 from scipy.optimize._minimize import MINIMIZE_METHODS_NEW_CB
 import joblib as jb
 from typing import Self
+import numba
 
 def debug_print(print_obj, debug = False):
     if debug:
@@ -1472,8 +1473,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         subject_id_c = self.groupby_col
         conc_at_time_c = self.conc_at_time_col
         time_col = deepcopy(self.time_col)
-        #I think I know what is going on with the off preds, perhaps these dataset preps are 
-        #not working as expected when 'data' is already the ode data?
         data = data.reset_index(drop = True).copy()
         self.data = data.copy()
         subject_data = data.drop_duplicates(subset=subject_id_c, keep = 'first').copy()
@@ -1496,7 +1495,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         first_pred_t_df = ode_data.drop_duplicates(subset=subject_id_c, keep = 'first')
         self.subject_y0 = first_pred_t_df[conc_at_time_c].to_numpy(dtype = np.float64)
         self.subject_y0_idx = np.array(first_pred_t_df.index.values, dtype = np.int64)
-        #below here has not been updated yet to use new flexible method of setting the y and ode inits
         ode_init_val_cols = [i.column_name for i in self.ode_t0_cols]
         self.ode_t0_vals = subject_data[ode_init_val_cols].reset_index(drop = True).copy()
         self.ode_t0_vals_are_subject_y0 = np.all(self.subject_y0 == self.ode_t0_vals.iloc[:,0])
@@ -1551,8 +1549,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                             args=(*args,))
     
     def _solve_ivp_parallel2(self, y0, args, tspan = None, teval = None, ode_class:PKBaseODE = None, method = None):
-        
-        pred_obj = solve_ivp(ode_class.ode,
+
+        ode = numba.jit(ode_class.get_solver_function())
+        pred_obj = solve_ivp(ode,
                                 tspan,
                             y0,
                             t_eval=teval,
@@ -1798,6 +1797,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if len(omegas.values) > 0:
             _ = self.predict2(data, parallel = parallel, parallel_n_jobs = parallel_n_jobs)
         return deepcopy(self)
+    
     def _generate_fitted_model_name(self, ignore_fit_status = False):
         if (self.fit_result_ is None) and not ignore_fit_status:
             raise ValueError("The Model must be fit before generating a fitted model id")

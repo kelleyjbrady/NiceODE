@@ -44,6 +44,7 @@ scale_df['dose_ng'] = scale_df['AMT']*1000
 scale_df['DV_ng/L'] = (scale_df['DV'] * 1000)
 scale_df['dose_scale'] = scale_df['dose_ng'] / 1e5
 scale_df['DV_scale'] = scale_df['DV_ng/L'] / 1e5
+scale_df['solve_ode_at_TIME'] = True
 #scale_df['DV_scale']= scale_df['DV_ng/L']/scale_df['dose_ng'].max()
 #scale_df['dose_scale'] = 1.0
 piv_cols = []
@@ -53,7 +54,7 @@ piv_cols.append('DV_scale')
 
 # %%
 me_mod_fo =  CompartmentalModel(
-    model_name = "debug_hydrocortisone_abs_ka-clME-vd_fo",
+    model_name = "debug_hydrocortisone_abs_ka-clME-vd_fo_2",
           ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('dose_scale'),],
           conc_at_time_col = 'DV_scale',
           population_coeff=[
@@ -92,7 +93,7 @@ me_mod_fo =  CompartmentalModel(
                                                                           ),
                                    #ode_solver_method='BDF'
                                    )
-fit_model = False
+fit_model = True
 if fit_model:
     me_mod_fo = me_mod_fo.fit2(scale_df, )
 else:
@@ -104,7 +105,7 @@ me_mod_fo.save_fitted_model(jb_file_name = me_mod_fo.model_name)
 
 #%%
 me2_mod_fo =  CompartmentalModel(
-    model_name = "debug_hydrocortisone_abs_kaME-clME-vd_fo",
+    model_name = "debug_hydrocortisone_abs_kaME-clME-vd_fo_2",
           ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('dose_scale'),],
           conc_at_time_col = 'DV_scale',
           population_coeff=[
@@ -144,7 +145,7 @@ me2_mod_fo =  CompartmentalModel(
                                    #ode_solver_method='BDF'
                                    )
 
-fit_model = False
+fit_model = True
 if fit_model:
     me2_mod_fo = me2_mod_fo.fit2(scale_df, )
 else:
@@ -157,7 +158,7 @@ me2_mod_fo.save_fitted_model(jb_file_name = me2_mod_fo.model_name)
 
 #%%
 me_mod_fo2 =  CompartmentalModel(
-    model_name = "debug_hydrocortisone_abs_ka-ke-vd_sse",
+    model_name = "debug_hydrocortisone_abs_ka-ke-vd_sse_2",
           ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('dose_scale'),],
           conc_at_time_col = 'DV_scale',
           population_coeff=[
@@ -218,7 +219,7 @@ res_df['indiv_fit_preds'] = fit_res_df['pred_y'].copy()
 piv_cols.append('indiv_fit_preds')
 
 #%%
-fit_model = False
+fit_model = True
 if fit_model:
     me_mod_fo2 = me_mod_fo2.fit2(scale_df, )
 else:
