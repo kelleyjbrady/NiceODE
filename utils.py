@@ -1550,8 +1550,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     
     def _solve_ivp_parallel2(self, y0, args, tspan = None, teval = None, ode_class:PKBaseODE = None, method = None):
 
-        ode = numba.jit(ode_class.get_solver_function())
-        pred_obj = solve_ivp(ode,
+        pred_obj = solve_ivp(ode_class.ode,
                                 tspan,
                             y0,
                             t_eval=teval,

@@ -79,7 +79,7 @@ res_df[['SUBJID', 'TIME',  'DV_scale']] = pred_df[['SUBJID', 'TIME', 'DV_scale']
 
 # %%
 me_mod_fo =  CompartmentalModel(
-    model_name = "debug_hydrocortisone_2cmptbolus_cl-v1ME-q-v2_fo_jit",
+    model_name = "debug_hydrocortisone_2cmptbolus_cl-v1ME-q-v2_fo_nojit",
           ode_t0_cols=[ ODEInitVals('dose_scale'), ODEInitVals('c2_init'),],
           conc_at_time_col = 'DV_scale',
           solve_ode_at_time_col = 'solve_ode_at_TIME',

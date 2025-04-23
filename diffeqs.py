@@ -148,14 +148,11 @@ class PKBaseODE(abc.ABC):
         ode(t, y, *params): Defines the ODE system.
         mass_to_depvar(pred_mass_central, *params): Converts mass to concentration.
     """
-    def __init__(self, jit_ode = False):
-        """Initializes the base class."""
-        super().__init__()
-        self._jit_ode_enabled = jit_ode
-        self._cached_solver_ode_func = None
+    def __init__(self, ):
+        pass
 
     @abc.abstractmethod
-    def _ode(self, t, y, *params):
+    def ode(self, t, y, *params):
         """
         Defines the system of ordinary differential equations.
 
@@ -192,58 +189,12 @@ class PKBaseODE(abc.ABC):
                 (e.g., concentration = mass / volume).
         """
         pass
-    def get_solver_function(self):
-        """
-        Returns the ODE function suitable for passing to an ODE solver.
-
-        Applies Numba JIT compilation on the first call if enabled during
-        initialization. Caches the result for subsequent calls.
-        """
-        if self._cached_solver_ode_func is not None:
-            return self._cached_solver_ode_func
-
-        target_func = None
-
-        try:
-            ode_impl_func = self._ode.__func__
-        except AttributeError:
-             warnings.warn(f"_ode on {self.__class__.__name__} is not a standard method.")
-             # Fallback to using the bound method directly if JIT is off
-             ode_impl_func = self._ode # This won't work with numba.jit later
-
-        if self._jit_ode_enabled:
-            print(f"Attempting Numba JIT compilation for {self.__class__.__name__}._ode...")
-
-
-            def ode_wrapper(t, y, *params):
-                # 'self' is the instance of the PKBaseODE subclass
-                # Calls the *actual* implementation provided by the user subclass
-                return ode_impl_func(self, t, y, *params)
-
-            try:
-                # Attempt to JIT the wrapper function
-                target_func = numba.jit(ode_wrapper, nopython=True)
-                print(f"Numba JIT activated for {self.__class__.__name__}")
-
-            except Exception as e:
-                warnings.warn(f"Numba JIT compilation failed for {self.__class__.__name__}: {e}. Falling back to pure Python.")
-                # Fallback: Use the original BOUND method if JIT fails
-                target_func = self._ode # The original bound method instance.ode
-
-        else:
-            print(f"Numba JIT disabled for {self.__class__.__name__}. Using pure Python method.")
-            # JIT disabled: Use the original BOUND method
-            target_func = self._ode # The original bound method instance.ode
-
-        # Cache and return the chosen function
-        self._cached_solver_ode_func = target_func
-        return self._cached_solver_ode_func
 
     
 class OneCompartmentConc(PKBaseODE):
     def __init__(self, ):
         pass
-    def _ode(self, t, y, cl, vd):
+    def ode(self, t, y, cl, vd):
         """
         Defines the differential equation for a one-compartment pharmacokinetic model.
 
@@ -407,7 +358,7 @@ class OneCompartmentAbsorption(PKBaseODE):
     def __init__(self, ):
         pass
 
-    def _ode(self, t, y, ka, cl, vd):
+    def ode(self, t, y, ka, cl, vd):
         central_mass, gut_mass = y
         # Elimination rate constant ke = cl / vd
         dCMdt = ka * gut_mass - (cl / vd) * central_mass
@@ -568,7 +519,7 @@ class OneCompartmentAbsorption2(PKBaseODE):
     def __init__(self, ):
         pass
 
-    def _ode(self, t, y, ka, ke, vd):
+    def ode(self, t, y, ka, ke, vd):
         central_mass, gut_mass = y
         dCMdt = ka * gut_mass - ke * central_mass
         dGdt = -ka * gut_mass
@@ -687,7 +638,7 @@ class OneCompartmentBolus_CL(PKBaseODE):
     def __init__(self, ):
         pass
 
-    def _ode(self, t, y, cl, vd):
+    def ode(self, t, y, cl, vd):
         """ODE system for 1-cmt IV bolus (CL, Vd)."""
         central_mass = y[0]
         # Elimination rate constant ke = cl / vd
@@ -812,7 +763,7 @@ class OneCompartmentBolus_Ke(PKBaseODE):
     def __init__(self, ):
         pass
 
-    def _ode(self, t, y, ke, vd):
+    def ode(self, t, y, ke, vd):
         """ODE system for 1-cmt IV bolus (Ke, Vd)."""
         central_mass = y[0]
         dCMdt = -ke * central_mass
@@ -972,7 +923,7 @@ class TwoCompartmentBolus(PKBaseODE):
     def __init__(self, ):
         pass
 
-    def _ode(self, t, y, cl, v1, q, v2):
+    def ode(self, t, y, cl, v1, q, v2):
         """ODE system for 2-cmt IV bolus."""
         central_mass, peripheral_mass = y
         # Micro-rate constants (internal): k10=cl/v1, k12=q/v1, k21=q/v2
@@ -1140,7 +1091,7 @@ class TwoCompartmentAbsorption(PKBaseODE):
     def __init__(self, ):
         pass
 
-    def _ode(self, t, y, ka, cl, v1, q, v2):
+    def ode(self, t, y, ka, cl, v1, q, v2):
         """ODE system for 2-cmt absorption."""
         central_mass, peripheral_mass, gut_mass = y
 
@@ -1290,13 +1241,10 @@ class OneCompartmentInfusion(PKBaseODE):
     
     {nca_docstring}
     """
-    def __init__(self, jit_ode = False ):
-        if jit_ode:
-            self._ode = numba.jit(self.ode)
-        else:
-            self._ode = self.ode
+    def __init__(self, ):
+        pass
 
-    def _ode(self, t, y, R0, cl, vd):
+    def ode(self, t, y, R0, cl, vd):
         """ODE system for 1-cmt infusion."""
         central_mass = y[0]
         # Elimination rate constant ke = cl / vd
@@ -1443,7 +1391,7 @@ class OneCompartmentBolusMM(PKBaseODE):
     def __init__(self, ):
         pass
 
-    def _ode(self, t, y, vmax, km, vd):
+    def ode(self, t, y, vmax, km, vd):
         """ODE system for 1-cmt IV bolus with MM elimination."""
         central_mass = y[0]
         # Avoid division by zero if vd is zero (should not happen)
