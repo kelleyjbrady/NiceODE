@@ -633,3 +633,4 @@ check_args_arbit_lin_10.jb
 check_args_arbit_lin_15.jb
 result_arbit_allo.jb
 check_test_5.jb
+gitmv.py
