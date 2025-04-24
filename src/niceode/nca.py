@@ -8,13 +8,19 @@ import seaborn as sns
 import os
 import matplotlib.pyplot as plt
 
-def estimate_subject_slope_cv(df, time_col = 'TIME', conc_col = 'CONC_ln', id_col = 'ID',):
+
+def estimate_subject_slope_cv(
+    df,
+    time_col="TIME",
+    conc_col="CONC_ln",
+    id_col="ID",
+):
     df = df.copy()
     sub_max_conc = df[conc_col].max()
     max_time = df.loc[df[conc_col] == sub_max_conc, time_col].values[-1]
-    #zero_window_start = df[zero_start_col].values[0]
-    df['orig_conc'] = df[conc_col].copy()
-    df[conc_col] =safe_signed_log(df[conc_col])
+    # zero_window_start = df[zero_start_col].values[0]
+    df["orig_conc"] = df[conc_col].copy()
+    df[conc_col] = safe_signed_log(df[conc_col])
     times = df[time_col].unique()
     results = []
     for start_idx, starttime in enumerate(times):
@@ -22,16 +28,16 @@ def estimate_subject_slope_cv(df, time_col = 'TIME', conc_col = 'CONC_ln', id_co
             testing = 1
         start_idx_slopes = []
         if (start_idx + 1) < len(times):
-            for end_idx, endtime in enumerate(times[start_idx+1:]):
+            for end_idx, endtime in enumerate(times[start_idx + 1 :]):
                 f = (df[time_col] >= starttime) & (df[time_col] <= endtime)
                 work_df = df.loc[f, :]
                 x = work_df[time_col].values
                 y = work_df[conc_col].values
-                auc_y = work_df['orig_conc'].values
+                auc_y = work_df["orig_conc"].values
                 section_auc = auc(x, auc_y)
                 auc_per_time = section_auc / (endtime - starttime)
                 slope, intercept, r_value, p_value, std_err = linregress(x, y)
-                
+
                 n = len(work_df[time_col].unique())
                 k = 1  # Number of predictors (time)
                 if n > 2:
@@ -41,42 +47,60 @@ def estimate_subject_slope_cv(df, time_col = 'TIME', conc_col = 'CONC_ln', id_co
                 start_idx_slopes.append(slope)
                 if len(start_idx_slopes) > 1:
                     slope_cv = np.std(start_idx_slopes) / np.mean(start_idx_slopes)
-                    #tmp_ar = np.array(start_idx_slopes)
+                    # tmp_ar = np.array(start_idx_slopes)
                     start_idx_slopes_signs = np.mean(np.sign(start_idx_slopes))
-                    
+
                 else:
                     slope_cv = None
                     start_idx_slopes_signs = None
-                results.append({
-                    id_col:work_df[id_col].unique()[0],
-                    #'start_index': start_idx,
-                    #'end_index': end_idx,
-                    'auc_per_time':auc_per_time,
-                    'start_time': starttime,
-                    'end_time': endtime,
-                    'slope': slope,
-                    'startidx_endidx_slope_cv':slope_cv,
-                    'startidx_endidx_slope_sign':np.sign(slope),
-                    'intercept': intercept,
-                    'r_value': r_value,
-                    'adj_r2': adj_r2,
-                    'n_points': n, 
-                    'max_conc':sub_max_conc, 
-                    'max_conc_time':max_time,
-                })
+                results.append(
+                    {
+                        id_col: work_df[id_col].unique()[0],
+                        #'start_index': start_idx,
+                        #'end_index': end_idx,
+                        "auc_per_time": auc_per_time,
+                        "start_time": starttime,
+                        "end_time": endtime,
+                        "slope": slope,
+                        "startidx_endidx_slope_cv": slope_cv,
+                        "startidx_endidx_slope_sign": np.sign(slope),
+                        "intercept": intercept,
+                        "r_value": r_value,
+                        "adj_r2": adj_r2,
+                        "n_points": n,
+                        "max_conc": sub_max_conc,
+                        "max_conc_time": max_time,
+                    }
+                )
     df_out = pd.DataFrame(results)
-    df_out['abs_cv'] = np.abs(df_out['startidx_endidx_slope_cv'])
-    #df_out['cv_sign'] = np.sign(df_out['start_idx_slope_cv'])
-    signs = df_out.groupby('start_time')['startidx_endidx_slope_sign'].mean().reset_index().rename(columns = {'startidx_endidx_slope_sign':'start_time_mean_slope_sign'})
-    start_idx_cv_mean = df_out.groupby('start_time')['abs_cv'].mean().reset_index().rename(columns = {'abs_cv':'start_time_mean_abs_cv'})
-    start_idx_cv_std = df_out.groupby('start_time')['abs_cv'].std().reset_index().rename(columns = {'abs_cv':'start_time_std_mean_cv'})
-    df_out = (df_out
-            .merge(signs, how = 'left', on = 'start_time')
-            .merge(start_idx_cv_mean, how = 'left', on = 'start_time')
-            .merge(start_idx_cv_std, how = 'left', on = 'start_time')
-           )
-    
+    df_out["abs_cv"] = np.abs(df_out["startidx_endidx_slope_cv"])
+    # df_out['cv_sign'] = np.sign(df_out['start_idx_slope_cv'])
+    signs = (
+        df_out.groupby("start_time")["startidx_endidx_slope_sign"]
+        .mean()
+        .reset_index()
+        .rename(columns={"startidx_endidx_slope_sign": "start_time_mean_slope_sign"})
+    )
+    start_idx_cv_mean = (
+        df_out.groupby("start_time")["abs_cv"]
+        .mean()
+        .reset_index()
+        .rename(columns={"abs_cv": "start_time_mean_abs_cv"})
+    )
+    start_idx_cv_std = (
+        df_out.groupby("start_time")["abs_cv"]
+        .std()
+        .reset_index()
+        .rename(columns={"abs_cv": "start_time_std_mean_cv"})
+    )
+    df_out = (
+        df_out.merge(signs, how="left", on="start_time")
+        .merge(start_idx_cv_mean, how="left", on="start_time")
+        .merge(start_idx_cv_std, how="left", on="start_time")
+    )
+
     return df_out
+
 
 def masked_signed_safe_log(x):
     s = np.zeros_like(x, dtype=np.float64)  # Initialize with zeros
@@ -85,20 +109,17 @@ def masked_signed_safe_log(x):
 
     s[non_zero_mask] = np.sign(x[non_zero_mask]) * np.log(np.abs(x[non_zero_mask]))
 
-    return s 
+    return s
 
 
-def indentify_low_conc_zones2(df,
-                              time_col = 'TIME',
-                              conc_col = 'CONC_ln',
-                              id_col = 'ID', 
-                              low_frac = 0.005
-                              ):
+def indentify_low_conc_zones2(
+    df, time_col="TIME", conc_col="CONC_ln", id_col="ID", low_frac=0.005
+):
     df = df.copy()
     sub_max_conc = df[conc_col].max()
     max_time = df.loc[df[conc_col] == sub_max_conc, time_col].values[-1]
-    df['orig_conc'] = df[conc_col].copy()
-    df[conc_col] =safe_signed_log(df[conc_col])
+    df["orig_conc"] = df[conc_col].copy()
+    df[conc_col] = safe_signed_log(df[conc_col])
     times = df[time_col].unique()
     results = []
     for start_idx, starttime in enumerate(times):
@@ -106,130 +127,141 @@ def indentify_low_conc_zones2(df,
             testing = 1
         start_idx_slopes = []
         if (start_idx + 1) < len(times):
-            for end_idx, endtime in enumerate(times[start_idx+1:]):
+            for end_idx, endtime in enumerate(times[start_idx + 1 :]):
                 f = (df[time_col] >= starttime) & (df[time_col] <= endtime)
                 work_df = df.loc[f, :]
                 x = work_df[time_col].values
                 y = work_df[conc_col].values
-                auc_y = work_df['orig_conc'].values
+                auc_y = work_df["orig_conc"].values
                 section_auc = auc(x, auc_y)
                 auc_per_time = section_auc / (endtime - starttime)
-                
+
                 n = len(work_df[time_col].unique())
-                results.append({
-                    id_col:work_df[id_col].unique()[0],
-                    #'start_index': start_idx,
-                    #'end_index': end_idx,
-                    'auc_per_time':auc_per_time,
-                    'start_time': starttime,
-                    'end_time': endtime,
-                    'n_points': n, 
-                    'max_conc':sub_max_conc, 
-                    'max_conc_time':max_time,
-                })
+                results.append(
+                    {
+                        id_col: work_df[id_col].unique()[0],
+                        #'start_index': start_idx,
+                        #'end_index': end_idx,
+                        "auc_per_time": auc_per_time,
+                        "start_time": starttime,
+                        "end_time": endtime,
+                        "n_points": n,
+                        "max_conc": sub_max_conc,
+                        "max_conc_time": max_time,
+                    }
+                )
     tmp_res = pd.DataFrame(results)
-    return identify_low_conc_zones([tmp_res], low_frac = low_frac)
+    return identify_low_conc_zones([tmp_res], low_frac=low_frac)
 
 
-def identify_low_conc_zones(dfs:List[pd.DataFrame], low_frac = 0.01, id_col = 'ID'):
+def identify_low_conc_zones(dfs: List[pd.DataFrame], low_frac=0.01, id_col="ID"):
     subject_zero_zones = []
     for tmp in dfs:
         id = tmp[id_col].values[0]
-        max_auc = tmp['auc_per_time'].max()
-        #f1 = tmp['auc_per_time'] < max_auc*.01
-        tmp.loc[tmp['auc_per_time'] < max_auc*low_frac, 'auc_per_time_gt_lim'] = 0
-        tmp.loc[tmp['auc_per_time'] >= max_auc*low_frac, 'auc_per_time_gt_lim'] = 1
-        ind = (tmp.groupby('start_time')['auc_per_time_gt_lim'].sum(
-        ).reset_index().rename(columns={'auc_per_time_gt_lim': 'start_time_ind'}))
-        ind.loc[ind['start_time_ind'] != 0] = 1
-        tmp = tmp.merge(ind, how = 'left', on = 'start_time')
-        f1 = tmp['start_time_ind'] == 0
-        time_at_max_conc = tmp['max_conc_time'].values[0]
-        f2 = tmp['start_time'] > time_at_max_conc
+        max_auc = tmp["auc_per_time"].max()
+        # f1 = tmp['auc_per_time'] < max_auc*.01
+        tmp.loc[tmp["auc_per_time"] < max_auc * low_frac, "auc_per_time_gt_lim"] = 0
+        tmp.loc[tmp["auc_per_time"] >= max_auc * low_frac, "auc_per_time_gt_lim"] = 1
+        ind = (
+            tmp.groupby("start_time")["auc_per_time_gt_lim"]
+            .sum()
+            .reset_index()
+            .rename(columns={"auc_per_time_gt_lim": "start_time_ind"})
+        )
+        ind.loc[ind["start_time_ind"] != 0] = 1
+        tmp = tmp.merge(ind, how="left", on="start_time")
+        f1 = tmp["start_time_ind"] == 0
+        time_at_max_conc = tmp["max_conc_time"].values[0]
+        f2 = tmp["start_time"] > time_at_max_conc
         tmp_f = tmp.loc[f1 & f2, :]
-        brack = tmp_f.loc[tmp_f['start_time'] == tmp_f['start_time'].min(), :]
+        brack = tmp_f.loc[tmp_f["start_time"] == tmp_f["start_time"].min(), :]
 
         subject_zero_zones.append(
             {
-                id_col:id, 
-                'zero_window_time_start':brack['start_time'].values[0] if len(brack) > 0 else np.inf,
-                'consecutive_zero_windows':len(brack)
-                
+                id_col: id,
+                "zero_window_time_start": brack["start_time"].values[0]
+                if len(brack) > 0
+                else np.inf,
+                "consecutive_zero_windows": len(brack),
             }
         )
     return pd.DataFrame(subject_zero_zones)
 
-def estimate_k_halflife(dfs, zero_zone_df = None, adj_r2_threshold = 0.8, id_col = 'ID'):
-    zero_zone_df = identify_low_conc_zones(dfs) if zero_zone_df is None else zero_zone_df
+
+def estimate_k_halflife(dfs, zero_zone_df=None, adj_r2_threshold=0.8, id_col="ID"):
+    zero_zone_df = (
+        identify_low_conc_zones(dfs) if zero_zone_df is None else zero_zone_df
+    )
     res = []
     adj_r2_ind_col = f"adj_r2_gte_{adj_r2_threshold}"
     for tmp in dfs:
-        if tmp[id_col].values[0] == 'M9':
+        if tmp[id_col].values[0] == "M9":
             debugging = True
-        #id = tmp['ID'].values[0]
-        tmp = tmp.merge(zero_zone_df, how = 'left', on = id_col)#.copy()
-        f1 = tmp['start_time'] < tmp['zero_window_time_start']
-        f2 = tmp['end_time'] <= tmp['zero_window_time_start']
+        # id = tmp['ID'].values[0]
+        tmp = tmp.merge(zero_zone_df, how="left", on=id_col)  # .copy()
+        f1 = tmp["start_time"] < tmp["zero_window_time_start"]
+        f2 = tmp["end_time"] <= tmp["zero_window_time_start"]
         tmp = tmp.loc[f1 & f2, :]
-        
-        tmp['startidx_endidx_slope_sign'] = np.sign(tmp['slope'])
-        start_idx_avg_slope = (tmp
-                                          .groupby('start_time')['startidx_endidx_slope_sign']
-                                          .mean()
-                                          .reset_index()
-                                          .rename(columns = {'startidx_endidx_slope_sign':'startidx_avg_slope_sign'})
-                                          
-                                          )
-        tmp = tmp.merge(start_idx_avg_slope, how = 'left', on = 'start_time')
-        f3 = tmp['startidx_avg_slope_sign'] == -1
+
+        tmp["startidx_endidx_slope_sign"] = np.sign(tmp["slope"])
+        start_idx_avg_slope = (
+            tmp.groupby("start_time")["startidx_endidx_slope_sign"]
+            .mean()
+            .reset_index()
+            .rename(columns={"startidx_endidx_slope_sign": "startidx_avg_slope_sign"})
+        )
+        tmp = tmp.merge(start_idx_avg_slope, how="left", on="start_time")
+        f3 = tmp["startidx_avg_slope_sign"] == -1
         tmp = tmp.loc[f3, :]
-        tmp['adj_r2_threshold'] = adj_r2_threshold
-        tmp.loc[tmp['adj_r2'] >= adj_r2_threshold, 'adj_r2_gte_threshold'] = 1
-        tmp.loc[tmp['adj_r2'] < adj_r2_threshold, 'adj_r2_gte_threshold'] = 0
-        start_idx_thresh = (tmp
-                        .groupby('start_time')['adj_r2_gte_threshold']
-                        .mean()
-                        .reset_index()
-                        .rename(columns = {'adj_r2_gte_threshold':'startidx_avg_adj_r2_gte_threshold'})
-                        
-                            )
-        avg_adj_r2 = (tmp
-                        .groupby('start_time')['adj_r2']
-                        .mean()
-                        .reset_index()
-                        .rename(columns = {'adj_r2':'startidx_avg_adj_r2'})
-                        
-                            )
-        tmp = tmp.merge(avg_adj_r2, how = 'left', on = 'start_time')
-        tmp = tmp.merge(start_idx_thresh, how = 'left', on = 'start_time')
-        f = tmp['startidx_avg_adj_r2_gte_threshold'] == 1 
+        tmp["adj_r2_threshold"] = adj_r2_threshold
+        tmp.loc[tmp["adj_r2"] >= adj_r2_threshold, "adj_r2_gte_threshold"] = 1
+        tmp.loc[tmp["adj_r2"] < adj_r2_threshold, "adj_r2_gte_threshold"] = 0
+        start_idx_thresh = (
+            tmp.groupby("start_time")["adj_r2_gte_threshold"]
+            .mean()
+            .reset_index()
+            .rename(
+                columns={"adj_r2_gte_threshold": "startidx_avg_adj_r2_gte_threshold"}
+            )
+        )
+        avg_adj_r2 = (
+            tmp.groupby("start_time")["adj_r2"]
+            .mean()
+            .reset_index()
+            .rename(columns={"adj_r2": "startidx_avg_adj_r2"})
+        )
+        tmp = tmp.merge(avg_adj_r2, how="left", on="start_time")
+        tmp = tmp.merge(start_idx_thresh, how="left", on="start_time")
+        f = tmp["startidx_avg_adj_r2_gte_threshold"] == 1
         good_liniearity_df = tmp.loc[f, :]
         if len(good_liniearity_df) > 0:
             tmp = good_liniearity_df.copy()
-            f = tmp['startidx_avg_adj_r2'] == tmp['startidx_avg_adj_r2'].max()
+            f = tmp["startidx_avg_adj_r2"] == tmp["startidx_avg_adj_r2"].max()
             tmp = tmp.loc[f, :].copy()
-            f = tmp['end_time'] == tmp['end_time'].max()
+            f = tmp["end_time"] == tmp["end_time"].max()
             tmp = tmp.loc[f, :].copy()
-            
 
-            #out_df['geom_mean_halflife_est'] = np.exp(np.mean(masked_signed_safe_log(out_df['window_halflife_est'])))
-            tmp['method'] = 'adj_r2'
-            
+            # out_df['geom_mean_halflife_est'] = np.exp(np.mean(masked_signed_safe_log(out_df['window_halflife_est'])))
+            tmp["method"] = "adj_r2"
+
         if len(good_liniearity_df) == 0:
-            max_end = tmp['end_time'].max()
-            tmp = tmp.loc[tmp['end_time'] == max_end]
-            max_start = tmp['start_time'].max()
-            tmp = tmp.loc[tmp['start_time'] == max_start]
-            tmp['method'] = 'final_nonzero_section'
+            max_end = tmp["end_time"].max()
+            tmp = tmp.loc[tmp["end_time"] == max_end]
+            max_start = tmp["start_time"].max()
+            tmp = tmp.loc[tmp["start_time"] == max_start]
+            tmp["method"] = "final_nonzero_section"
             debugging = True
         out_df = tmp.copy()
-        out_df['window_k_est'] = -1*out_df['slope'].values
-        #out_df['geom_mean_k_est'] = np.exp(np.mean(masked_signed_safe_log(out_df['window_k_est'])))
-        out_df['window_halflife_est'] = 0.693/out_df['window_k_est']
+        out_df["window_k_est"] = -1 * out_df["slope"].values
+        # out_df['geom_mean_k_est'] = np.exp(np.mean(masked_signed_safe_log(out_df['window_k_est'])))
+        out_df["window_halflife_est"] = 0.693 / out_df["window_k_est"]
         res.append(out_df.copy())
-    return pd.concat(res).reset_index(drop = True)
+    return pd.concat(res).reset_index(drop=True)
 
-def analyze_pk_data(df, subject_col = 'subject', time_col = 'time', conc_col = 'conc'):  # df has columns 'subject', 'time', 'conc'
+
+def analyze_pk_data(
+    df, subject_col="subject", time_col="time", conc_col="conc"
+):  # df has columns 'subject', 'time', 'conc'
     results = {}
     for subject_id in df[subject_col].unique():
         subject_data = df[df[subject_col] == subject_id].sort_values(time_col)
@@ -239,7 +271,7 @@ def analyze_pk_data(df, subject_col = 'subject', time_col = 'time', conc_col = '
         # 1. Calculate AUC/Δt
         auc_dt = []
         for i in range(1, len(times)):
-            auc = np.trapz(concs[:i+1], times[:i+1])  # Trapezoidal rule
+            auc = np.trapz(concs[: i + 1], times[: i + 1])  # Trapezoidal rule
             dt = times[i] - times[0]
             auc_dt.append(auc / dt)
 
@@ -253,43 +285,48 @@ def analyze_pk_data(df, subject_col = 'subject', time_col = 'time', conc_col = '
         threshold = 0.5 * np.nanmax(rolling_sd)
         t_elim_index = np.where(rolling_sd < threshold)[0]
         t_elim_index = t_elim_index[0] if len(t_elim_index) > 0 else None
-        t_elim = times[t_elim_index+1] if t_elim_index is not None else None
-
+        t_elim = times[t_elim_index + 1] if t_elim_index is not None else None
 
         # 4. Detect Zero Concentration Start (Example: Consecutive Zeros)
         t_zero_index = None
         if t_elim_index is not None:
             for i in range(t_elim_index, len(delta_auc_dt)):
-                if np.all(np.abs(delta_auc_dt[i:i+3]) < 0.001): # Check 3 consecutive points
+                if np.all(
+                    np.abs(delta_auc_dt[i : i + 3]) < 0.001
+                ):  # Check 3 consecutive points
                     t_zero_index = i
                     break
-        t_zero = times[t_zero_index+1] if t_zero_index is not None else None
+        t_zero = times[t_zero_index + 1] if t_zero_index is not None else None
 
         # 5. Calculate Elimination Rate Constant (k)
         if t_elim is not None and t_zero is not None:
-            elim_phase_data = subject_data[(subject_data[time_col] >= t_elim) & (subject_data[time_col] <= t_zero)]
-            if len(elim_phase_data) > 1 :
-                slope, intercept, r_value, p_value, std_err = linregress(elim_phase_data[time_col], np.log(elim_phase_data[conc_col]))
+            elim_phase_data = subject_data[
+                (subject_data[time_col] >= t_elim) & (subject_data[time_col] <= t_zero)
+            ]
+            if len(elim_phase_data) > 1:
+                slope, intercept, r_value, p_value, std_err = linregress(
+                    elim_phase_data[time_col], np.log(elim_phase_data[conc_col])
+                )
                 k = -slope
             else:
                 k = np.nan
         else:
             k = np.nan
 
-        results[subject_id] = {'t_elim': t_elim, 't_zero': t_zero, 'k': k}
+        results[subject_id] = {"t_elim": t_elim, "t_zero": t_zero, "k": k}
 
     return results
 
+
 def log_trapazoidal_section_auc(time, conc):
-    
     wiggle = 0.0
     old_method = False
     if old_method:
-        #orig_settings = np.seterr(divide='ignore')
-        tmp_auc = ((np.diff(conc)
-                /(np.diff(safe_signed_log(conc))+wiggle))
-        *(np.diff(time)))
-        #np.seterr(**orig_settings)
+        # orig_settings = np.seterr(divide='ignore')
+        tmp_auc = (np.diff(conc) / (np.diff(safe_signed_log(conc)) + wiggle)) * (
+            np.diff(time)
+        )
+        # np.seterr(**orig_settings)
         tmp_auc[np.isnan(tmp_auc)] = 0
     else:
         conc_diff = np.diff(conc)
@@ -298,16 +335,18 @@ def log_trapazoidal_section_auc(time, conc):
         tmp_auc = np.zeros_like(time_diff)
         nonzero_mask = log_conc_diff != 0
         tmp_auc[nonzero_mask] = (
-            (conc_diff[nonzero_mask]/log_conc_diff[nonzero_mask])*time_diff[nonzero_mask]
-            )
-        #tmp_auc = s
-    
+            conc_diff[nonzero_mask] / log_conc_diff[nonzero_mask]
+        ) * time_diff[nonzero_mask]
+        # tmp_auc = s
+
     return tmp_auc
+
 
 def section_auc(time, conc):
     avg_conc = (conc[:-1] + conc[1:]) / 2
     delta_t = np.diff(time)
-    return avg_conc*delta_t
+    return avg_conc * delta_t
+
 
 def auc_trapz_slope_is_pos(conc):
     tmp = np.sign(np.diff(conc))
@@ -315,200 +354,224 @@ def auc_trapz_slope_is_pos(conc):
     tmp[tmp <= 0] = False
     return tmp.astype(bool)
 
-def extend_auc_to_inf(time, conc, zero_start,terminal_k):
+
+def extend_auc_to_inf(time, conc, zero_start, terminal_k):
     final_conc = conc[time < zero_start][-1]
     final_time = time[time < zero_start][-1]
-    auc_to_inf = final_conc/terminal_k
-    
-    
+    auc_to_inf = final_conc / terminal_k
+
     auc_res = pd.DataFrame()
-    auc_res['time_start'] = [final_time]
-    auc_res['time_end'] = [np.inf]
-    auc_res['conc_start'] = [final_conc]
-    auc_res['conc_end'] = [0.0]
-    auc_res['section_auc_log_trap'] = [auc_to_inf]
-    auc_res['section_auc'] = [auc_to_inf]
-    #auc_res['section_auc_alt'] = n_alt
-    auc_res['section_slope_is_pos'] = [False]
-   
+    auc_res["time_start"] = [final_time]
+    auc_res["time_end"] = [np.inf]
+    auc_res["conc_start"] = [final_conc]
+    auc_res["conc_end"] = [0.0]
+    auc_res["section_auc_log_trap"] = [auc_to_inf]
+    auc_res["section_auc"] = [auc_to_inf]
+    # auc_res['section_auc_alt'] = n_alt
+    auc_res["section_slope_is_pos"] = [False]
+
     return auc_res
 
-def extend_aumc_to_inf(time, conc, zero_start,terminal_k):
+
+def extend_aumc_to_inf(time, conc, zero_start, terminal_k):
     final_time = time[time < zero_start][-1]
     final_conc = conc[time < zero_start][-1]
-    aumc_to_inf = (final_conc * final_time / terminal_k) + (final_conc / (terminal_k**2))
-    
+    aumc_to_inf = (final_conc * final_time / terminal_k) + (
+        final_conc / (terminal_k**2)
+    )
+
     auc_res = pd.DataFrame()
-    auc_res['time_start'] = [final_time]
-    auc_res['time_end'] = [np.inf]
-    auc_res['conc_start'] = [final_conc]
-    auc_res['conc_end'] = [0.0]
-    auc_res['section_auc_log_trap'] = [aumc_to_inf]
-    auc_res['section_auc'] = [aumc_to_inf]
-    #auc_res['section_auc_alt'] = n_alt
-    auc_res['section_slope_is_pos'] = [False]
+    auc_res["time_start"] = [final_time]
+    auc_res["time_end"] = [np.inf]
+    auc_res["conc_start"] = [final_conc]
+    auc_res["conc_end"] = [0.0]
+    auc_res["section_auc_log_trap"] = [aumc_to_inf]
+    auc_res["section_auc"] = [aumc_to_inf]
+    # auc_res['section_auc_alt'] = n_alt
+    auc_res["section_slope_is_pos"] = [False]
     return auc_res
 
-def generate_auc_res_df(time, conc, log_trap_auc_comp, linear_auc_comp, auc_section_slope, ):
+
+def generate_auc_res_df(
+    time,
+    conc,
+    log_trap_auc_comp,
+    linear_auc_comp,
+    auc_section_slope,
+):
     auc_res = pd.DataFrame()
-    auc_res['time_start'] = time[:-1] 
-    auc_res['time_end'] = time[1:]
-    auc_res['conc_start'] = conc[:-1]
-    auc_res['conc_end'] = conc[1:]
-    auc_res['section_auc_log_trap'] = log_trap_auc_comp
-    auc_res['section_auc'] = linear_auc_comp
-    #auc_res['section_auc_alt'] = n_alt
-    auc_res['section_slope_is_pos'] = auc_section_slope
-    #s=auc_section_slope
-    #auc_res['linup_logdown'] = np.sum(linear_auc_comp[s]) + np.sum(log_trap_auc_comp[~s])
-    #auc_res['logup_lindown'] = np.sum(linear_auc_comp[~s]) + np.sum(log_trap_auc_comp[s])
-    #auc_res['linear_auc'] = np.sum(linear_auc_comp)
-    #auc_res['lin_auc_alt'] = n_alt
-    #auc_res['log_auc'] = np.sum(log_trap_auc_comp)
-    
+    auc_res["time_start"] = time[:-1]
+    auc_res["time_end"] = time[1:]
+    auc_res["conc_start"] = conc[:-1]
+    auc_res["conc_end"] = conc[1:]
+    auc_res["section_auc_log_trap"] = log_trap_auc_comp
+    auc_res["section_auc"] = linear_auc_comp
+    # auc_res['section_auc_alt'] = n_alt
+    auc_res["section_slope_is_pos"] = auc_section_slope
+    # s=auc_section_slope
+    # auc_res['linup_logdown'] = np.sum(linear_auc_comp[s]) + np.sum(log_trap_auc_comp[~s])
+    # auc_res['logup_lindown'] = np.sum(linear_auc_comp[~s]) + np.sum(log_trap_auc_comp[s])
+    # auc_res['linear_auc'] = np.sum(linear_auc_comp)
+    # auc_res['lin_auc_alt'] = n_alt
+    # auc_res['log_auc'] = np.sum(log_trap_auc_comp)
+
     return auc_res
 
-def calculate_section_aucs(time, conc, zero_start =None, terminal_k=None, ):
 
-    
+def calculate_section_aucs(
+    time,
+    conc,
+    zero_start=None,
+    terminal_k=None,
+):
     t = log_trapazoidal_section_auc(time, conc)
-    
+
     n = section_auc(time, conc)
 
-    #n_alt = auc(time, conc)
+    # n_alt = auc(time, conc)
     s = auc_trapz_slope_is_pos(conc)
 
-    
     auc_res = generate_auc_res_df(time, conc, t, n, s)
-    
-    
+
     return auc_res
 
 
-def prepare_section_aucs(df,
-                         id_col = 'ID',
-                         conc_col = 'CONC', 
-                         time_col = 'TIME'):
+def prepare_section_aucs(df, id_col="ID", conc_col="CONC", time_col="TIME"):
     debugging_tmp = False
     auc_df = []
     aumc_df = []
     for sub in df[id_col].unique():
-        
-            #orig_settings = np.seterr(all='raise')
-        #prepare data needed for both AUC and AUMC
+        # orig_settings = np.seterr(all='raise')
+        # prepare data needed for both AUC and AUMC
         work_df = df.loc[df[id_col] == sub, :].copy()
         conc = work_df[conc_col].values
         time = work_df[time_col].values
-        zero_start = work_df['zero_window_time_start_x'].unique()[0]
-        terminal_k = work_df['window_k_est'].unique()[0]
-        if sub == 'M10':
+        zero_start = work_df["zero_window_time_start_x"].unique()[0]
+        terminal_k = work_df["window_k_est"].unique()[0]
+        if sub == "M10":
             debugging_tmp = True
             debug_vars = {}
             debug_vars[conc_col] = np.copy(conc)
-            debug_vars['time'] = np.copy(time)
-            debug_vars['zero_start'] = np.copy(zero_start)
-            debug_vars['terminal_k'] = np.copy(terminal_k)
-        #calculate AUC components
-        aucs = calculate_section_aucs(time,conc , zero_start, terminal_k)
+            debug_vars["time"] = np.copy(time)
+            debug_vars["zero_start"] = np.copy(zero_start)
+            debug_vars["terminal_k"] = np.copy(terminal_k)
+        # calculate AUC components
+        aucs = calculate_section_aucs(time, conc, zero_start, terminal_k)
         auc_inf = extend_auc_to_inf(time, conc, zero_start, terminal_k)
-        aucs = pd.concat([aucs, auc_inf]).sort_values(by = 'time_start')
-        aucs['zero_window_time_start'] = zero_start
-        aucs['terminal_k'] = terminal_k
-        #if debugging_tmp:
-            #np.seterr(**orig_settings) 
+        aucs = pd.concat([aucs, auc_inf]).sort_values(by="time_start")
+        aucs["zero_window_time_start"] = zero_start
+        aucs["terminal_k"] = terminal_k
+        # if debugging_tmp:
+        # np.seterr(**orig_settings)
         aucs[id_col] = sub
-        #calculate AUMC components
+        # calculate AUMC components
         conctime = time * conc
-        aumcs = calculate_section_aucs(time, conctime, zero_start, terminal_k, )
-        #aumc_inf = extend_aumc_to_inf(work_df[time_col].values, work_df['ConcTime'].values, zero_start, terminal_k)
+        aumcs = calculate_section_aucs(
+            time,
+            conctime,
+            zero_start,
+            terminal_k,
+        )
+        # aumc_inf = extend_aumc_to_inf(work_df[time_col].values, work_df['ConcTime'].values, zero_start, terminal_k)
         aumc_inf = extend_aumc_to_inf(time, conc, zero_start, terminal_k)
-        aumcs = pd.concat([aumcs, aumc_inf]).sort_values(by = 'time_start')
-        aumcs['zero_window_time_start'] = zero_start
-        aumcs['terminal_k'] = terminal_k
+        aumcs = pd.concat([aumcs, aumc_inf]).sort_values(by="time_start")
+        aumcs["zero_window_time_start"] = zero_start
+        aumcs["terminal_k"] = terminal_k
         aumcs[id_col] = sub
         auc_df.append(aucs)
         aumc_df.append(aumcs)
-    auc_df = pd.concat(auc_df).reset_index(drop = True)
-    aumc_df = pd.concat(aumc_df).reset_index(drop = True)
+    auc_df = pd.concat(auc_df).reset_index(drop=True)
+    aumc_df = pd.concat(aumc_df).reset_index(drop=True)
     return auc_df, aumc_df
 
-def calculate_auc_from_sections(df, id_col = 'ID'):
-    df = df.copy()
-    f1 = df['time_start'] < df['zero_window_time_start']
-    f2 = df['time_end'] < df['zero_window_time_start']
-    f3 = (df['time_start'] < df['zero_window_time_start']) & (df['time_end'] == np.inf)
-    tmp = df.loc[(f1 & f2) | f3, :].copy()
-    linear_only_auc = (tmp
-                    .groupby(id_col)[['section_auc']]
-                    .sum()
-                    .reset_index()
-                    .rename(columns = {'section_auc':'linear_auc'})
-                    
-                    )
-    tmp_up = tmp.loc[tmp['section_slope_is_pos']]
-    linear_up = tmp_up.groupby(id_col)['section_auc'].sum().reset_index()
-    tmp_down = tmp.loc[~tmp['section_slope_is_pos']]
-    log_down = tmp_down.groupby(id_col)['section_auc_log_trap'].sum().reset_index()
-    tmp = linear_up.merge(log_down, how = 'left', on = id_col)
-    tmp['linup_logdown_auc'] = tmp['section_auc'] + tmp['section_auc_log_trap']
-    return tmp.merge(linear_only_auc, how = 'left', on = id_col).copy()
 
-def plot_nca_sections(df, ks_df, id_col = 'ID', time_col = 'TIME', dv_col = 'CONC' ):
+def calculate_auc_from_sections(df, id_col="ID"):
+    df = df.copy()
+    f1 = df["time_start"] < df["zero_window_time_start"]
+    f2 = df["time_end"] < df["zero_window_time_start"]
+    f3 = (df["time_start"] < df["zero_window_time_start"]) & (df["time_end"] == np.inf)
+    tmp = df.loc[(f1 & f2) | f3, :].copy()
+    linear_only_auc = (
+        tmp.groupby(id_col)[["section_auc"]]
+        .sum()
+        .reset_index()
+        .rename(columns={"section_auc": "linear_auc"})
+    )
+    tmp_up = tmp.loc[tmp["section_slope_is_pos"]]
+    linear_up = tmp_up.groupby(id_col)["section_auc"].sum().reset_index()
+    tmp_down = tmp.loc[~tmp["section_slope_is_pos"]]
+    log_down = tmp_down.groupby(id_col)["section_auc_log_trap"].sum().reset_index()
+    tmp = linear_up.merge(log_down, how="left", on=id_col)
+    tmp["linup_logdown_auc"] = tmp["section_auc"] + tmp["section_auc_log_trap"]
+    return tmp.merge(linear_only_auc, how="left", on=id_col).copy()
+
+
+def plot_nca_sections(df, ks_df, id_col="ID", time_col="TIME", dv_col="CONC"):
     df = df.copy()
     ks = ks_df.copy()
-    plot_dir = 'plots'
+    plot_dir = "plots"
     if not os.path.exists(plot_dir):
-        os.makedirs('plots')
+        os.makedirs("plots")
 
     for id in df[id_col].unique():
         fig, axs = plt.subplots(2)
         plot_me = df.loc[(df[id_col] == id) & (df[time_col] < 200), :].copy()
-        info_df = ks.loc[ks[id_col] == id, ]
-        plot_me['conc_ln'] = safe_signed_log(plot_me[dv_col])
-        sns.lineplot(plot_me, x = time_col, y = dv_col,ax = axs[0], marker='o')
+        info_df = ks.loc[ks[id_col] == id,]
+        plot_me["conc_ln"] = safe_signed_log(plot_me[dv_col])
+        sns.lineplot(plot_me, x=time_col, y=dv_col, ax=axs[0], marker="o")
         y_max = plot_me[dv_col].max()
-        y_max_ln = plot_me['conc_ln'].max() 
-        terminal_slope_start = info_df['start_time'].values[0]
-        terminal_slope_end = info_df['end_time'].max()
+        y_max_ln = plot_me["conc_ln"].max()
+        terminal_slope_start = info_df["start_time"].values[0]
+        terminal_slope_end = info_df["end_time"].max()
         x_max = plot_me[time_col].max()
-        zero_zone_start = info_df['zero_window_time_start'].values[0]
-        axs[0].fill_betweenx(y = np.linspace(0, y_max, 5),
-                            x1 = np.repeat(terminal_slope_start, 5),
-                            x2 = np.repeat(terminal_slope_end, 5),
-                            alpha = .5, color = 'green',
-                            label = 'Terminal Slope Zone'
-                            )
-        axs[0].fill_betweenx(y = np.linspace(0, y_max, 5),
-                            x1 = np.repeat(zero_zone_start, 5),
-                            x2 = np.repeat(x_max, 5),
-                            alpha = .5, color = 'red',
-                            label = '~0 AUC Zone'
-                            )
-        sns.lineplot(plot_me, x = time_col, y = 'conc_ln',ax = axs[1], marker = 'o')
-        axs[1].fill_betweenx(y = np.linspace(0, y_max_ln, 5),
-                            x1 = np.repeat(terminal_slope_start, 5),
-                            x2 = np.repeat(terminal_slope_end, 5),
-                            alpha = .5, color = 'green',
-                            label = 'Terminal Slope Zone'
-                            )
-        axs[1].fill_betweenx(y = np.linspace(0, y_max_ln, 5),
-                            x1 = np.repeat(zero_zone_start, 5),
-                            x2 = np.repeat(x_max, 5),
-                            alpha = .5, color = 'red',
-                            label = '~0 AUC Zone'
-                            )
-        plt.suptitle(f'{id} Concentration Time Profile')
-        
-        plt.savefig(os.path.join(plot_dir, f'{id}_conctime_new2.png'), dpi = 300)
-        
-def calculate_mrt(aumc_df, auc_df, id_col = 'ID'):
+        zero_zone_start = info_df["zero_window_time_start"].values[0]
+        axs[0].fill_betweenx(
+            y=np.linspace(0, y_max, 5),
+            x1=np.repeat(terminal_slope_start, 5),
+            x2=np.repeat(terminal_slope_end, 5),
+            alpha=0.5,
+            color="green",
+            label="Terminal Slope Zone",
+        )
+        axs[0].fill_betweenx(
+            y=np.linspace(0, y_max, 5),
+            x1=np.repeat(zero_zone_start, 5),
+            x2=np.repeat(x_max, 5),
+            alpha=0.5,
+            color="red",
+            label="~0 AUC Zone",
+        )
+        sns.lineplot(plot_me, x=time_col, y="conc_ln", ax=axs[1], marker="o")
+        axs[1].fill_betweenx(
+            y=np.linspace(0, y_max_ln, 5),
+            x1=np.repeat(terminal_slope_start, 5),
+            x2=np.repeat(terminal_slope_end, 5),
+            alpha=0.5,
+            color="green",
+            label="Terminal Slope Zone",
+        )
+        axs[1].fill_betweenx(
+            y=np.linspace(0, y_max_ln, 5),
+            x1=np.repeat(zero_zone_start, 5),
+            x2=np.repeat(x_max, 5),
+            alpha=0.5,
+            color="red",
+            label="~0 AUC Zone",
+        )
+        plt.suptitle(f"{id} Concentration Time Profile")
+
+        plt.savefig(os.path.join(plot_dir, f"{id}_conctime_new2.png"), dpi=300)
+
+
+def calculate_mrt(aumc_df, auc_df, id_col="ID"):
     auc_df = auc_df.copy()
     aumc_df = aumc_df.copy()
-    aumc_df['linup_logdown_aumc'] = aumc_df['linup_logdown_auc'].copy()
-    auc_df['linup_logdown_auc'] = auc_df['linup_logdown_auc'].copy()
-    merge_cols_auc = [id_col, 'linup_logdown_auc']
-    merge_cols_aumc = [id_col, 'linup_logdown_aumc']
-    mrt_res = auc_df[merge_cols_auc].merge(aumc_df[merge_cols_aumc], how = 'left', on = id_col)
-    mrt_res['mrt'] = mrt_res['linup_logdown_aumc'] / mrt_res['linup_logdown_auc']
+    aumc_df["linup_logdown_aumc"] = aumc_df["linup_logdown_auc"].copy()
+    auc_df["linup_logdown_auc"] = auc_df["linup_logdown_auc"].copy()
+    merge_cols_auc = [id_col, "linup_logdown_auc"]
+    merge_cols_aumc = [id_col, "linup_logdown_aumc"]
+    mrt_res = auc_df[merge_cols_auc].merge(
+        aumc_df[merge_cols_aumc], how="left", on=id_col
+    )
+    mrt_res["mrt"] = mrt_res["linup_logdown_aumc"] / mrt_res["linup_logdown_auc"]
     return mrt_res.copy()
-    

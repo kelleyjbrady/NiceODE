@@ -25,7 +25,7 @@ from typing import Literal, Tuple
 from scipy.optimize._minimize import MINIMIZE_METHODS_NEW_CB
 import joblib as jb
 from typing import Self
-from diffeqs import PKBaseODE
+from .diffeqs import PKBaseODE
 import uuid
 
 
