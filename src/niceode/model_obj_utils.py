@@ -1,6 +1,5 @@
-from diffeqs import first_order_one_compartment_model
-from utils import determine_ode_output_size, get_function_args
-from utils import PopulationCoeffcient, ObjectiveFunctionColumn, CompartmentalModel
+from utils import  get_function_args
+from utils import PopulationCoeffcient, ObjectiveFunctionColumn
 from copy import deepcopy
 
 def template_CompartmentalModel_params(ode_func):

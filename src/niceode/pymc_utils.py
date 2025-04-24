@@ -6,23 +6,12 @@ from jax.experimental.ode import odeint
 import numpy as np
 import pymc as pm
 import diffrax
-import jax
-import jax.numpy as jnp
-import numpy as np
-import pymc as pm
-from pytensor.gradient import grad_not_implemented
-from pytensor.graph.op import Apply, Op
+from pytensor.graph.op import Apply
 from pytensor.compile.ops import as_op
-from pytensor.tensor.type import TensorType
-import pytensor.tensor as pt
 import pytensor as ptb
 from scipy.integrate import solve_ivp
 import pandas as pd
-from typing import List
-from joblib import Parallel, delayed
-from functools import partial
 from pytensor import scan
-from pymc.ode import DifferentialEquation
 import icomo
 
 

@@ -1,0 +1,3 @@
+[tool.poetry]
+name = "niceode"
+version = "0.1.0"
