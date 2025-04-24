@@ -500,3 +500,15 @@ def plot_nca_sections(df, ks_df, id_col = 'ID', time_col = 'TIME', dv_col = 'CON
         plt.suptitle(f'{id} Concentration Time Profile')
         
         plt.savefig(os.path.join(plot_dir, f'{id}_conctime_new2.png'), dpi = 300)
+        
+def calculate_mrt(aumc_df, auc_df, id_col = 'ID'):
+    auc_df = auc_df.copy()
+    aumc_df = aumc_df.copy()
+    aumc_df['linup_logdown_aumc'] = aumc_df['linup_logdown_auc'].copy()
+    auc_df['linup_logdown_auc'] = auc_df['linup_logdown_auc'].copy()
+    merge_cols_auc = [id_col, 'linup_logdown_auc']
+    merge_cols_aumc = [id_col, 'linup_logdown_aumc']
+    mrt_res = auc_df[merge_cols_auc].merge(aumc_df[merge_cols_aumc], how = 'left', on = id_col)
+    mrt_res['mrt'] = mrt_res['linup_logdown_aumc'] / mrt_res['linup_logdown_auc']
+    return mrt_res.copy()
+    
