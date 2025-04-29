@@ -1,3 +1,6 @@
 [tool.poetry]
 name = "niceode"
 version = "0.1.0"
+packages = [
+    { include = "niceode", from = "src" }
+]

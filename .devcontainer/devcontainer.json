@@ -5,7 +5,7 @@
     //  "dockerfile": "dockerfile", // Or adjust path as needed
     //  "context": ".." // Or adjust build context path
     //},
-    "image": "cuda-py:20250411121001", 
+    "image": "cuda-py:20250424112927", 
     // Add arguments to be passed to 'docker run'
     "runArgs": [
       "--gpus=all"
