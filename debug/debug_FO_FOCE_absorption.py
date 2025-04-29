@@ -2,17 +2,17 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from utils import plot_subject_levels
+from niceode.utils import plot_subject_levels
 import joblib as jb
-from utils import sum_of_squares_loss, numba_one_compartment_model, PopulationCoeffcient, ODEInitVals, mean_squared_error_loss, huber_loss
+from niceode.utils import sum_of_squares_loss, numba_one_compartment_model, PopulationCoeffcient, ODEInitVals, mean_squared_error_loss, huber_loss
 import cProfile
 from datetime import datetime
 import uuid
 
 
 # %%
-from utils import CompartmentalModel, FOCE_approx_ll_loss, FO_approx_ll_loss
-from diffeqs import( OneCompartmentFODiffEq,
+from niceode.utils import CompartmentalModel, FOCE_approx_ll_loss, FO_approx_ll_loss
+from niceode.diffeqs import( OneCompartmentFODiffEq,
                     mm_one_compartment_model,
                     first_order_one_compartment_model,
                     first_order_one_compartment_model2,
@@ -37,7 +37,7 @@ pk_model_function = diffeq_obj.diff_eq()
 
 #now_str = datetime.now().strftime("_%d%m%Y-%H%M%S")
 batch_id = uuid.uuid4()
-with open(r'/workspaces/PK-Analysis/absorbtion_debug_scale_df.jb', 'rb') as f:
+with open(r'/workspaces/PK-Analysis/data/absorbtion_debug_scale_df.jb', 'rb') as f:
     scale_df = jb.load(f)
 #%%
 scale_df['dose_ng'] = scale_df['AMT']*1000
