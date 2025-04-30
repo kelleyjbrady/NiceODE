@@ -56,7 +56,6 @@ res_df_all[['SUBJID', 'TIME',  'DV_scale']] = df_allroute[['ID_x', 'TIME_x', 'DV
 piv_cols = ['DV_scale']
 #%%
 
-
 dfs = []
 for sub in df_oral['SUBJID'].unique():
     dfs.append(estimate_subject_slope_cv(df_oral.loc[df_oral['SUBJID'] == sub, :],
@@ -85,6 +84,7 @@ auc_res = calculate_auc_from_sections(auc_sections_df, id_col = 'SUBJID')
 
 #%%
 clf_df = df_oral.merge(auc_res, how = 'left', on = 'SUBJID')
+#%%
 clf_df = clf_df.loc[clf_df['TIME'] == 0, :].copy()
 #clf_df['dose_ng'] = clf_df['AMT']*1000 #defaults to ug, dose is known to be 20mg
 clf_df['cl/F_L_per_h'] = (clf_df['DOSE_ng'] #ng
@@ -102,6 +102,17 @@ vss_res['vss'] = (vss_res['mrt'] * #hr
                   vss_res['cl/F__L/hr'] #L/R
                   )
 vss_res['vss'].describe()
+
+#%%
+from niceode.nca import NCA
+nca_obj = NCA(
+    subject_id_col='SUBJID', 
+    conc_col='CONC_ng/mL',
+    time_col='TIME', 
+    dose_col='DOSE_ng',
+    data = df_oral
+)
+nca_obj.estimate_all_nca_params()
 #%%
 me_mod_fo =  CompartmentalModel(
     model_name = "debug_cp1805_abs_ka-clME-vd_sse_nodep_dermal",

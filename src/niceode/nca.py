@@ -195,9 +195,8 @@ def estimate_k_halflife(dfs, zero_zone_df=None, adj_r2_threshold=0.8, id_col="ID
     res = []
     adj_r2_ind_col = f"adj_r2_gte_{adj_r2_threshold}"
     for tmp in dfs:
-        if tmp[id_col].values[0] == "M9":
-            debugging = True
         # id = tmp['ID'].values[0]
+        #I think this merge can probably happen 1x on the outside of this loop
         tmp = tmp.merge(zero_zone_df, how="left", on=id_col)  # .copy()
         f1 = tmp["start_time"] < tmp["zero_window_time_start"]
         f2 = tmp["end_time"] <= tmp["zero_window_time_start"]
@@ -271,7 +270,7 @@ def analyze_pk_data(
         # 1. Calculate AUC/Δt
         auc_dt = []
         for i in range(1, len(times)):
-            auc = np.trapz(concs[: i + 1], times[: i + 1])  # Trapezoidal rule
+            auc = np.trapezoid(concs[: i + 1], times[: i + 1])  # Trapezoidal rule
             dt = times[i] - times[0]
             auc_dt.append(auc / dt)
 
@@ -563,7 +562,7 @@ def plot_nca_sections(df, ks_df, id_col="ID", time_col="TIME", dv_col="CONC"):
         plt.savefig(os.path.join(plot_dir, f"{id}_conctime_new2.png"), dpi=300)
 
 
-def calculate_mrt(aumc_df, auc_df, id_col="ID"):
+def calculate_mrt(aumc_df, auc_df, id_col="ID", mrt_result_name = 'mrt'):
     auc_df = auc_df.copy()
     aumc_df = aumc_df.copy()
     aumc_df["linup_logdown_aumc"] = aumc_df["linup_logdown_auc"].copy()
@@ -573,5 +572,144 @@ def calculate_mrt(aumc_df, auc_df, id_col="ID"):
     mrt_res = auc_df[merge_cols_auc].merge(
         aumc_df[merge_cols_aumc], how="left", on=id_col
     )
-    mrt_res["mrt"] = mrt_res["linup_logdown_aumc"] / mrt_res["linup_logdown_auc"]
+    mrt_res[mrt_result_name] = mrt_res["linup_logdown_aumc"] / mrt_res["linup_logdown_auc"]
     return mrt_res.copy()
+
+class NCA():
+    def __init__(self, subject_id_col:str, conc_col:str, time_col:str, dose_col:str, data:pd.DataFrame ):
+        self.subject_id_col = subject_id_col
+        self.conc_col = conc_col
+        self.time_col = time_col
+        self.dose_col = dose_col
+        self.data = data.copy()
+        self.auc = None
+        self.aumc = None, 
+        self.halflife = None
+        self.elimk_est = None
+        self.zero_starts = None
+        self.ks = None
+        self.mrt_res = None
+        self.apparent_cl = None
+        
+    def estimate_halflife_elimk(self,
+                                zero_zone_low_frac = 0.01,
+                                terminal_phase_adj_r2_thresh = 0.8, 
+                                
+                                ) -> pd.DataFrame:
+        self.halflife_result_name = 'window_halflife_est'
+        self.elimk_result_name = 'window_k_est'
+        df = self.data.copy()
+        dfs = []
+        for sub in df[self.subject_id_col].unique():
+            dfs.append(estimate_subject_slope_cv(df.loc[df[self.subject_id_col] == sub, :],
+                                                conc_col=self.conc_col, id_col=self.subject_id_col))
+            
+
+
+
+        zero_starts = identify_low_conc_zones(dfs,
+                                              zero_zone_low_frac,
+                                              id_col = self.subject_id_col
+                                              )
+        ks = estimate_k_halflife(dfs,
+                                 zero_zone_df=zero_starts,
+                                 id_col = self.subject_id_col,
+                                 adj_r2_threshold=terminal_phase_adj_r2_thresh
+                                 )
+        ks[[self.halflife_result_name, self.elimk_result_name]].describe()
+        self.zero_starts = zero_starts.copy()
+        self.halflife = ks[self.halflife_result_name].copy()
+        self.elimk_est = ks[self.elimk_result_name].copy()
+        self.ks = ks.copy()
+        return ks
+    
+    def estimate_auc_aumc(self, ):
+        df = self.data.copy()
+        if self.zero_starts is None:
+            _ = self.estimate_halflife_elimk()
+        auc_calc_df = (df
+               .merge(self.zero_starts, how = 'left', on = self.subject_id_col)
+               .merge(self.ks, how = 'left', on = self.subject_id_col)
+               .copy())
+        auc_sections_df, aumc_sections_df = prepare_section_aucs(auc_calc_df, 
+                                                                id_col = self.subject_id_col, 
+                                                                conc_col=self.conc_col, 
+                                                                time_col = self.time_col
+                                                                )
+        aumcs_res = calculate_auc_from_sections(aumc_sections_df, id_col = self.subject_id_col)
+        auc_res = calculate_auc_from_sections(auc_sections_df, id_col = self.subject_id_col)
+
+        self.auc_sections_df = auc_sections_df.copy()
+        self.aumc_sections_df = aumc_sections_df.copy()
+        self.aumc = aumcs_res.copy()
+        self.auc = auc_res.copy()
+        return auc_res.copy(), aumcs_res.copy()
+    
+    def estimate_apparent_cl(self, ):
+        df = self.data.copy()
+        self.apparent_cl_result_name = 'cl/F'
+        if self.auc is None:
+            _, _ = self.estimate_auc_aumc()
+        clf_df = df.merge(self.auc, how = 'left', on = self.subject_id_col)
+        clf_df = clf_df.loc[clf_df[self.time_col] == 0, :].copy()
+        #clf_df['dose_ng'] = clf_df['AMT']*1000 #defaults to ug, dose is known to be 20mg
+        clf_df[self.apparent_cl_result_name] = (clf_df[self.dose_col] #ng
+                        /clf_df['linup_logdown_auc'] #ng*h/L
+                        )
+        clf_df[self.apparent_cl_result_name]
+        self.apparent_cl = clf_df.copy()
+        return clf_df.copy()
+    
+    def estimate_mrt(self, ):
+        if self.auc is None:
+            _, _ = self.estimate_auc_aumc()
+        if self.apparent_cl is None:
+            _ = self.estimate_apparent_cl()
+        self.mrt_result_name = 'mrt'
+        self.mrt_res = calculate_mrt(self.aumc, self.auc, id_col = self.subject_id_col)
+        return self.mrt_res.copy()
+    
+    def estimate_vss(self, ):
+        if self.mrt_res is None:
+            _ = self.estimate_mrt()
+        if self.apparent_cl is None:
+            _ = self.estimate_apparent_cl()
+        self.vss_result_name = 'vss'
+        vss_res = self.mrt_res.merge(self.apparent_cl, how = 'left', on = self.subject_id_col)
+        vss_res[self.vss_result_name] = (vss_res[self.mrt_result_name] * #hr
+                        vss_res[self.apparent_cl_result_name] #L/R
+                        )
+        self.vss_res = vss_res.copy()
+        return vss_res[self.vss_result_name].copy()
+                
+    def estimate_all_nca_params(self, zero_zone_low_frac = 0.01,
+                                terminal_phase_adj_r2_thresh = 0.8,
+                                
+                                ):
+        _ = self.estimate_halflife_elimk(zero_zone_low_frac = zero_zone_low_frac,
+                                terminal_phase_adj_r2_thresh = terminal_phase_adj_r2_thresh,)
+        _, _ = self.estimate_auc_aumc()
+        _ = self.estimate_apparent_cl()
+        _ = self.estimate_mrt()
+        _ = self.estimate_vss()
+        res_df = self.ks[[self.subject_id_col,self.halflife_result_name, self.elimk_result_name]]
+        res_df = res_df.merge(self.auc[[self.subject_id_col, 'linup_logdown_auc']],
+                              how = 'left', on = self.subject_id_col
+                              )
+        tmp = (self.aumc[[self.subject_id_col, 'linup_logdown_auc']]
+               .rename(columns = {'linup_logdown_auc':'linup_logdown_aumc'})
+               )
+        res_df = res_df.merge(tmp,
+                              how = 'left', on = self.subject_id_col
+                              )
+        res_df = res_df.merge(self.apparent_cl[[self.subject_id_col, self.apparent_cl_result_name]],
+                              how = 'left', on = self.subject_id_col
+                              )
+        res_df = res_df.merge(self.mrt_res[[self.subject_id_col, self.mrt_result_name]],
+                              how = 'left', on = self.subject_id_col)
+        res_df = res_df.merge(self.vss_res[[self.subject_id_col, self.vss_result_name]],
+                              how = 'left', on = self.subject_id_col
+                              )
+        return res_df.copy()
+        
+        

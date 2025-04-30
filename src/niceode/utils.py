@@ -1432,7 +1432,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     def __init__(
         self,
         model_name: str = None,
-        groupby_col: str = "SUBJID",
+        subject_id_col: str = "SUBJID",
         conc_at_time_col: str = "DV",
         log_transform_dep_var=False,
         dose_col: str = None,
@@ -1479,7 +1479,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.log_transform_dep_var = log_transform_dep_var
         self.ode_output_size = determine_ode_output_size(self.pk_model_function)
         self.ode_t0_cols = self._validate_ode_t0_vals_size(ode_t0_cols)
-        self.groupby_col = groupby_col
+        self.groupby_col = subject_id_col
         self.conc_at_time_col = conc_at_time_col
         self.time_col = time_col
         self.solve_ode_at_time_col = solve_ode_at_time_col
@@ -1990,8 +1990,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             self._solve_ivp_parallel2,
             ode_class=self.pk_model_class,
             tspan=self.global_tspan_init,
-            # issue is with global_tp_eval? I think for this pred the
-            # first global_tp_eval should be zero?
             teval=self.global_tp_eval if timepoints is None else timepoints,
             method=self.ode_solver_method,
         )
@@ -2018,7 +2016,26 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if timepoints is None:
             sol = sol[time_mask.flatten()]
         return sol
-
+    
+    def _unpack_no_me_params(self, params, beta_data):
+        pop_coeffs = pd.DataFrame(
+                params[: self.n_population_coeff].reshape(1, -1),
+                dtype=pd.Float64Dtype(),
+                columns=self.init_pop_coeffs.columns,
+            )
+        thetas = pd.DataFrame(
+            params[self.n_population_coeff :].reshape(1, -1),
+            dtype=pd.Float64Dtype(),
+            columns=self.init_thetas.columns,
+        )
+        model_coeffs = self._generate_pk_model_coeff_vectorized(
+            pop_coeffs, thetas, beta_data
+        )
+        return [model_coeffs, thetas, beta_data]
+    
+    def _unpack_me_params(self, ):
+        raise NotImplementedError
+        
     @profile
     def _objective_function2(
         self,
