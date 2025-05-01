@@ -5,7 +5,7 @@ from niceode.utils import CompartmentalModel
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from niceode.utils import plot_subject_levels, neg2_log_likelihood_loss
+from niceode.utils import plot_subject_levels, neg2_log_likelihood_loss, FOCE_approx_ll_loss
 import joblib as jb
 from niceode.utils import sum_of_squares_loss, numba_one_compartment_model, PopulationCoeffcient, ODEInitVals, mean_squared_error_loss, huber_loss
 import cProfile
@@ -54,11 +54,15 @@ piv_cols = []
 res_df[['SUBJID', 'TIME',  'DV_scale']] = df_oral[['ID_x', 'TIME_x', 'DV_scale']].copy()
 res_df_all[['SUBJID', 'TIME',  'DV_scale']] = df_allroute[['ID_x', 'TIME_x', 'DV_scale']].copy()
 piv_cols = ['DV_scale']
+df_nca = df_oral.copy()
 #%%
 
 dfs = []
+work_dfs = []
 for sub in df_oral['SUBJID'].unique():
-    dfs.append(estimate_subject_slope_cv(df_oral.loc[df_oral['SUBJID'] == sub, :],
+    work_df = df_oral.loc[df_oral['SUBJID'] == sub, :]
+    work_dfs.append(work_df.copy())
+    dfs.append(estimate_subject_slope_cv(work_df,
                                          conc_col='CONC_ng/L', id_col='SUBJID'))
     
 
@@ -107,18 +111,20 @@ vss_res['vss'].describe()
 from niceode.nca import NCA
 nca_obj = NCA(
     subject_id_col='SUBJID', 
-    conc_col='CONC_ng/mL',
+    conc_col='CONC_ng/L',
     time_col='TIME', 
     dose_col='DOSE_ng',
-    data = df_oral
+    data = df_nca
 )
-nca_obj.estimate_all_nca_params()
+#%%
+noboot_tmp = nca_obj.estimate_all_nca_params(terminal_phase_adj_r2_thresh=0.85)
+#tmp = nca_obj.estimate_all_nca_params(terminal_phase_adj_r2_thresh=0.85, n_boots=10)
 #%%
 me_mod_fo =  CompartmentalModel(
     model_name = "debug_cp1805_abs_ka-clME-vd_sse_nodep_dermal",
           ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('AMT_scale'),],
           conc_at_time_col = 'DV_scale',
-          groupby_col = 'ID_x', 
+          subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
                             PopulationCoeffcient('ka', 2, 
@@ -189,7 +195,7 @@ me_mod_fo =  CompartmentalModel(
     model_name = "debug_cp1805_abs_kaME-clME-vdME_FO_nodep_dermal",
           ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('AMT_scale'),],
           conc_at_time_col = 'DV_scale',
-          groupby_col = 'ID_x', 
+          subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
                             PopulationCoeffcient('ka', .7, 
@@ -244,6 +250,80 @@ res_df[me_mod_fo.model_name] = me_mod_fo.predict2(df_oral)
 piv_cols.append(me_mod_fo.model_name)
 me_mod_fo.save_fitted_model(jb_file_name = me_mod_fo.model_name)
 
+#%%
+b_i_apprx_df = pd.DataFrame( dtype = pd.Float64Dtype())
+b_i_apprx_df['b_i_fo_ka'] = me_mod_fo.b_i_approx[('ka', 'omega2_ka')].to_numpy()
+b_i_apprx_df['b_i_fo_cl'] = me_mod_fo.b_i_approx[('cl', 'omega2_cl')].to_numpy()
+b_i_apprx_df['b_i_fo_vd'] = me_mod_fo.b_i_approx[('vd', 'omega2_vd')].to_numpy()
+b_i_apprx_df['SUBJID'] = df_oral['SUBJID'].drop_duplicates().values
+scale_df = (df_oral.merge(b_i_apprx_df, how = 'left', on = 'SUBJID') 
+            if 'b_i_fo_cl' not in df_oral.columns else df_oral.copy())
+
+me_mod_foce =  CompartmentalModel(
+    model_name = "debug_cp1805_abs_kaME-clME-vdME_FOCE_nodep_dermal",
+          ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('AMT_scale'),],
+          conc_at_time_col = 'DV_scale',
+          subject_id_col = 'ID_x', 
+          time_col = 'TIME_x',
+          population_coeff=[
+                            PopulationCoeffcient('ka', .7, 
+                                                 subject_level_intercept=True,
+                                                 optimization_lower_bound = np.log(1e-6),
+                                                 #optimization_upper_bound = np.log(3),
+                                                 subject_level_intercept_sd_init_val = 0.4, 
+                                                 subject_level_intercept_sd_upper_bound = 2,
+                                                subject_level_intercept_sd_lower_bound=1e-2,
+                                                subject_level_intercept_init_vals_column_name='b_i_fo_ka'
+                                                 ),
+                            PopulationCoeffcient('cl',
+                                                 .1,
+                                                  optimization_lower_bound = np.log(1e-4),
+                                                  optimization_upper_bound=np.log(1),
+                                                 #optimization_upper_bound = np.log(.005),
+                                                #subject_level_intercept=True, 
+                                                #subject_level_intercept_sd_init_val = 0.3, 
+                                                #subject_level_intercept_sd_upper_bound = 5,
+                                                #subject_level_intercept_sd_lower_bound=1e-6,
+                                                #subject_level_intercept_init_vals_column_name='b_i_fo_cl'
+                                                
+                                                 ),
+                            PopulationCoeffcient('vd', 1.2
+                                                , optimization_lower_bound = np.log(.1)
+                                                ,optimization_upper_bound=np.log(5),
+                                                subject_level_intercept=True, 
+                                                subject_level_intercept_sd_init_val = 0.25, 
+                                                subject_level_intercept_sd_upper_bound = 2,
+                                                subject_level_intercept_sd_lower_bound=1e-2,
+                                                #, optimization_upper_bound = np.log(.05)
+                                                subject_level_intercept_init_vals_column_name='b_i_fo_vd'
+                                                
+                                                ),
+                         ],
+          dep_vars= None, 
+                                   no_me_loss_function=neg2_log_likelihood_loss, 
+                                   me_loss_function = FOCE_approx_ll_loss,
+                                   no_me_loss_needs_sigma=True,
+                                   optimizer_tol=None, 
+                                   pk_model_class=OneCompartmentAbsorption(), 
+                                   model_error_sigma=PopulationCoeffcient('sigma'
+                                                                          ,log_transform_init_val=False
+                                                                          , optimization_init_val=.9
+                                                                          ,optimization_lower_bound=0.01
+                                                                          ,optimization_upper_bound=1.5
+                                                                          ),
+                                   #ode_solver_method='BDF'
+                                   minimize_method = 'COBYQA'
+                                   )
+fit_model = True
+if fit_model:
+    me_mod_foce = me_mod_foce.fit2(df_oral, )
+else:
+    with open(f"logs/fitted_model_{me_mod_foce.model_name}.jb", 'rb') as f:
+        me_mod_foce = jb.load(f)
+res_df[me_mod_foce.model_name] = me_mod_foce.predict2(df_oral)
+piv_cols.append(me_mod_foce.model_name)
+me_mod_foce.save_fitted_model(jb_file_name = me_mod_foce.model_name)
+
 
 #%%
 df_oral['c2_init'] = 0.0
@@ -251,7 +331,7 @@ me_mod_fo =  CompartmentalModel(
     model_name = "debug_cp1805_abs_ka-cl-v1-q-v2_sse_nodep",
           ode_t0_cols=[ ODEInitVals('DV_scale'),ODEInitVals('c2_init'), ODEInitVals('AMT_scale'),],
           conc_at_time_col = 'DV_scale',
-          groupby_col = 'ID_x', 
+          subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
                             PopulationCoeffcient('ka', 1, 
@@ -322,7 +402,7 @@ me_mod_fo =  CompartmentalModel(
     model_name = "debug_cp1805_2cmpabs_kaME-clME-v1ME-qME-v2ME_neg2ll_nodep",
           ode_t0_cols=[ ODEInitVals('DV_scale'),ODEInitVals('c2_init'), ODEInitVals('AMT_scale'),],
           conc_at_time_col = 'DV_scale',
-          groupby_col = 'ID_x', 
+          subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
                             PopulationCoeffcient('ka', 1, 
@@ -400,3 +480,4 @@ long_df = res_df.melt(id_vars = ['SUBJID', 'TIME'], value_vars = piv_cols, value
 px.line(data_frame=long_df, x = 'TIME', y = 'Conc', color = 'pred_method', line_group='SUBJID', animation_frame='SUBJID')
 
 #test
+# %%
