@@ -7,6 +7,9 @@ from typing import List
 import seaborn as sns
 import os
 import matplotlib.pyplot as plt
+from copy import deepcopy
+from tqdm import tqdm
+
 
 
 def estimate_subject_slope_cv(
@@ -602,8 +605,7 @@ class NCA():
         dfs = []
         for sub in df[self.subject_id_col].unique():
             dfs.append(estimate_subject_slope_cv(df.loc[df[self.subject_id_col] == sub, :],
-                                                conc_col=self.conc_col, id_col=self.subject_id_col))
-            
+                                                conc_col=self.conc_col, id_col=self.subject_id_col))    
 
 
 
@@ -616,11 +618,12 @@ class NCA():
                                  id_col = self.subject_id_col,
                                  adj_r2_threshold=terminal_phase_adj_r2_thresh
                                  )
-        ks[[self.halflife_result_name, self.elimk_result_name]].describe()
+        #ks[[self.halflife_result_name, self.elimk_result_name]].describe()
         self.zero_starts = zero_starts.copy()
         self.halflife = ks[self.halflife_result_name].copy()
         self.elimk_est = ks[self.elimk_result_name].copy()
         self.ks = ks.copy()
+        self._dfs = deepcopy(dfs)
         return ks
     
     def estimate_auc_aumc(self, ):
@@ -684,32 +687,54 @@ class NCA():
                 
     def estimate_all_nca_params(self, zero_zone_low_frac = 0.01,
                                 terminal_phase_adj_r2_thresh = 0.8,
-                                
+                                n_boots = 0
                                 ):
-        _ = self.estimate_halflife_elimk(zero_zone_low_frac = zero_zone_low_frac,
-                                terminal_phase_adj_r2_thresh = terminal_phase_adj_r2_thresh,)
-        _, _ = self.estimate_auc_aumc()
-        _ = self.estimate_apparent_cl()
-        _ = self.estimate_mrt()
-        _ = self.estimate_vss()
-        res_df = self.ks[[self.subject_id_col,self.halflife_result_name, self.elimk_result_name]]
-        res_df = res_df.merge(self.auc[[self.subject_id_col, 'linup_logdown_auc']],
-                              how = 'left', on = self.subject_id_col
-                              )
-        tmp = (self.aumc[[self.subject_id_col, 'linup_logdown_auc']]
-               .rename(columns = {'linup_logdown_auc':'linup_logdown_aumc'})
-               )
-        res_df = res_df.merge(tmp,
-                              how = 'left', on = self.subject_id_col
-                              )
-        res_df = res_df.merge(self.apparent_cl[[self.subject_id_col, self.apparent_cl_result_name]],
-                              how = 'left', on = self.subject_id_col
-                              )
-        res_df = res_df.merge(self.mrt_res[[self.subject_id_col, self.mrt_result_name]],
-                              how = 'left', on = self.subject_id_col)
-        res_df = res_df.merge(self.vss_res[[self.subject_id_col, self.vss_result_name]],
-                              how = 'left', on = self.subject_id_col
-                              )
-        return res_df.copy()
+        if n_boots == 0:
+            n_iter = 1
+        else:
+            n_iter = n_boots
+        base_data = self.data.copy()
+        subs = base_data[self.subject_id_col].drop_duplicates().copy()
+        res_dfs = []
+        state_seed = 42
+        for iter in tqdm(range(n_iter)):
+            if n_boots > 0:
+                loop_subs = pd.DataFrame(subs.sample(frac = 1,
+                                                     replace = True,
+                                                     random_state=state_seed+iter 
+                                                     )
+                                         )
+                self.data = loop_subs.merge(base_data, how = 'right', on = 'SUBJID')
+            
+            _ = self.estimate_halflife_elimk(zero_zone_low_frac = zero_zone_low_frac,
+                                    terminal_phase_adj_r2_thresh = terminal_phase_adj_r2_thresh,)
+            _, _ = self.estimate_auc_aumc()
+            _ = self.estimate_apparent_cl()
+            _ = self.estimate_mrt()
+            _ = self.estimate_vss()
+            res_df = self.ks[[self.subject_id_col,self.halflife_result_name, self.elimk_result_name]]
+            res_df = res_df.merge(self.auc[[self.subject_id_col, 'linup_logdown_auc']],
+                                how = 'left', on = self.subject_id_col
+                                )
+            tmp = (self.aumc[[self.subject_id_col, 'linup_logdown_auc']]
+                .rename(columns = {'linup_logdown_auc':'linup_logdown_aumc'})
+                )
+            res_df = res_df.merge(tmp,
+                                how = 'left', on = self.subject_id_col
+                                )
+            res_df = res_df.merge(self.apparent_cl[[self.subject_id_col, self.apparent_cl_result_name]],
+                                how = 'left', on = self.subject_id_col
+                                )
+            res_df = res_df.merge(self.mrt_res[[self.subject_id_col, self.mrt_result_name]],
+                                how = 'left', on = self.subject_id_col)
+            res_df = res_df.merge(self.vss_res[[self.subject_id_col, self.vss_result_name]],
+                                how = 'left', on = self.subject_id_col
+        
+                               )
+            res_df['boot_n'] = iter
+            res_dfs.append(res_df.copy())
+        self.data = base_data.copy()
+        res_df = pd.concat(res_dfs, sort = False, ignore_index = True)
+        return res_df
         
         
