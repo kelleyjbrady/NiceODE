@@ -556,7 +556,7 @@ def estimate_cov_naive_subj(J, y_groups_idx, residuals, sigma2, omega2, model_ob
     return per_sub_direct_neg2_ll
 
 
-@profile
+#@profile
 def estimate_neg_log_likelihood(
     J,
     y_groups_idx,
@@ -602,7 +602,7 @@ def estimate_neg_log_likelihood(
     return neg_ll
 
 
-@profile
+#@profile
 def _estimate_b_i(
     model_obj,
     pop_coeffs,
@@ -749,7 +749,7 @@ def _estimate_b_i(
     return b_i_estimated
 
 
-@profile
+#@profile
 def FOCE_approx_ll_loss(
     pop_coeffs,
     sigma,
@@ -908,7 +908,7 @@ def FOCE_approx_ll_loss(
     return neg2_ll, b_i_estimates, (preds, full_preds)
 
 
-@profile
+#@profile
 def FO_approx_ll_loss(
     pop_coeffs,
     sigma,
@@ -1429,7 +1429,7 @@ def generate_ivp_predictions(
 
 
 class CompartmentalModel(RegressorMixin, BaseEstimator):
-    @profile
+    #@profile
     def __init__(
         self,
         model_name: str = None,
@@ -1446,7 +1446,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             PopulationCoeffcient("k", 0.6),
             PopulationCoeffcient("vd", 2.0),
         ],
-        dep_vars: Dict[str, ObjectiveFunctionColumn] = {
+        dep_vars: Dict[str, List[ObjectiveFunctionColumn]] = {
             "k": [ObjectiveFunctionColumn("mgkg"), ObjectiveFunctionColumn("age")],
             "vd": [ObjectiveFunctionColumn("mgkg"), ObjectiveFunctionColumn("age")],
         },
@@ -1501,11 +1501,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.no_me_loss_needs_sigma = no_me_loss_needs_sigma
         self.me_loss_function = me_loss_function
         # not sure if the section below needs to be in two places
+        
         for coef_obj in population_coeff:
             c = coef_obj.coeff_name
             if c not in (i for i in dep_vars):
                 dep_vars[c] = []
-        assert [i.coeff_name for i in population_coeff] == [i for i in dep_vars]
+        assert sorted([i.coeff_name for i in population_coeff]) == sorted([i for i in dep_vars])
         # END section
         self.population_coeff = population_coeff
         self.dep_vars = dep_vars
@@ -1737,7 +1738,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             data_out["initial_conc"] = deepcopy(initial_conc)
             yield deepcopy(data_out)
 
-    @profile
+    #@profile
     def _homongenize_timepoints(self, ode_data, subject_data, subject_id_c, time_col):
         data = ode_data.copy()
         data["tmp"] = 1
@@ -1792,7 +1793,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         )
         return thetas, theta_data
 
-    @profile
+    #@profile
     def _unpack_prepare_pop_coeffs(self, model_params: pd.DataFrame):
         pop_coeffs = pd.DataFrame()
         subject_level_intercept_sds = pd.DataFrame(dtype=pd.Float64Dtype())
@@ -1852,7 +1853,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             subject_level_intercept_init_vals,
         )
 
-    @profile
+    #@profile
     def _assemble_pred_matrices(self, data):
         subject_id_c = self.groupby_col
         conc_at_time_c = self.conc_at_time_col
@@ -1925,7 +1926,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             theta_data.copy(),
         )
 
-    @profile
+    #@profile
     def _generate_pk_model_coeff_vectorized(
         self, pop_coeffs, thetas, theta_data, expected_len_out=None
     ):
@@ -1934,18 +1935,19 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         )
         model_coeffs = pd.DataFrame(dtype=pd.Float64Dtype())
         for c in pop_coeffs.columns:
-            pop_coeff = pop_coeffs[c].values
+            pop_coeff = pop_coeffs[c].to_numpy(dtype = np.float64)
             theta = (
-                thetas[c].values.flatten()
+                thetas[c].to_numpy(dtype = np.float64).flatten()
                 if c in thetas.columns
                 else np.zeros_like(pop_coeff)
             )
             X = (
-                theta_data[c].values
+                theta_data[c].to_numpy(dtype = np.float64)
                 if c in theta_data.columns
                 else np.zeros_like(pop_coeff)
             )
-            out = np.exp((X @ theta) + pop_coeff)  # + 1e-6
+            data_contribution = (X @ theta)
+            out = np.exp(data_contribution + pop_coeff)  # + 1e-6
             if len(out) != expected_len_out:
                 out = np.repeat(out, expected_len_out)
             if c not in model_coeffs.columns:
@@ -1959,7 +1961,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             )
         return model_coeffs.copy()
 
-    @profile
+    #@profile
     def _solve_ivp_parallel(
         self, y0, args, tspan=None, teval=None, fun=None, method=None
     ):
@@ -1974,7 +1976,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         pred_obj.y[0] = ode_class.mass_to_depvar(pred_obj.y[0], *args)
         return pred_obj
 
-    @profile
+    #@profile
     def _solve_ivp(
         self,
         model_coeffs,
@@ -2040,7 +2042,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     def _unpack_me_params(self, ):
         raise NotImplementedError
         
-    @profile
+    #@profile
     def _objective_function2(
         self,
         params,
@@ -2139,7 +2141,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         with open(save_path, "wb") as f:
             jb.dump(self, f)
 
-    @profile
+    #@profile
     def predict2(
         self,
         data,
@@ -2289,7 +2291,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             raise ValueError(error_str)
         return data
 
-    @profile
+    #@profile
     def fit2(
         self,
         data,
