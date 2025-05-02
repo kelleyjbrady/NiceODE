@@ -1,7 +1,7 @@
 # %%
 import pandas as pd
 from niceode.diffeqs import OneCompartmentAbsorption, TwoCompartmentAbsorption
-from niceode.utils import CompartmentalModel
+from niceode.utils import CompartmentalModel, ObjectiveFunctionColumn
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -42,6 +42,7 @@ df['DOSE_ng'] = df['DOSE_ug'] * 1e3
 df['CONC_ng/L'] = df['CONC_ng/mL'] * 1e3
 df['DV_scale'] = df['CONC_ng/L'] / 1e6
 df['AMT_scale'] = df['DOSE_ng'] / 1e6
+df['sex_cat'] = np.where(df['SEX'] == 'Male', 0, 1)
 #df['DV_scale'] = df['CONC'] / 1000.0 #ng/ml = mg/L, then scale down near
 #df['AMT_scale'] = df['DOSE'] / 1000 #mg, scale down
 #%%
@@ -56,56 +57,53 @@ res_df_all[['SUBJID', 'TIME',  'DV_scale']] = df_allroute[['ID_x', 'TIME_x', 'DV
 piv_cols = ['DV_scale']
 df_nca = df_oral.copy()
 #%%
-
-dfs = []
-work_dfs = []
-for sub in df_oral['SUBJID'].unique():
-    work_df = df_oral.loc[df_oral['SUBJID'] == sub, :]
-    work_dfs.append(work_df.copy())
-    dfs.append(estimate_subject_slope_cv(work_df,
-                                         conc_col='CONC_ng/L', id_col='SUBJID'))
-    
-
-
-
-zero_starts = identify_low_conc_zones(dfs, low_frac=.01, id_col = 'SUBJID')
-ks = estimate_k_halflife(dfs, zero_zone_df=zero_starts, id_col = 'SUBJID')
-ks[['window_halflife_est', 'window_k_est']].describe()
-# %%
-
-auc_calc_df = (df_oral
-               .merge(zero_starts, how = 'left', on = 'SUBJID')
-               .merge(ks, how = 'left', on = 'SUBJID')
-               .copy())
-auc_sections_df, aumc_sections_df = prepare_section_aucs(auc_calc_df, 
-                                                         id_col = 'SUBJID', 
-                                                         conc_col='CONC_ng/L', 
-                                                         time_col = 'TIME'
-                                                         )
-aumcs_res = calculate_auc_from_sections(aumc_sections_df, id_col = 'SUBJID')
-auc_res = calculate_auc_from_sections(auc_sections_df, id_col = 'SUBJID')
-#auc_res.describe()
-
-#%%
-clf_df = df_oral.merge(auc_res, how = 'left', on = 'SUBJID')
-#%%
-clf_df = clf_df.loc[clf_df['TIME'] == 0, :].copy()
-#clf_df['dose_ng'] = clf_df['AMT']*1000 #defaults to ug, dose is known to be 20mg
-clf_df['cl/F_L_per_h'] = (clf_df['DOSE_ng'] #ng
-                   /clf_df['linup_logdown_auc'] #ng*h/L
-                   )
-clf_df['cl/F__L/hr'] = clf_df['cl/F_L_per_h'] #/ 1000
-clf_df['cl/F__L/hr'].describe()
-
-#%%
+run_old_nca_pipe = False
+if run_old_nca_pipe:
+    dfs = []
+    work_dfs = []
+    for sub in df_oral['SUBJID'].unique():
+        work_df = df_oral.loc[df_oral['SUBJID'] == sub, :]
+        work_dfs.append(work_df.copy())
+        dfs.append(estimate_subject_slope_cv(work_df,
+                                            conc_col='CONC_ng/L', id_col='SUBJID'))
+        
 
 
-mrt_res = calculate_mrt(aumcs_res, auc_res, id_col = 'SUBJID')
-vss_res = mrt_res.merge(clf_df, how = 'left', on = 'SUBJID')
-vss_res['vss'] = (vss_res['mrt'] * #hr
-                  vss_res['cl/F__L/hr'] #L/R
-                  )
-vss_res['vss'].describe()
+
+    zero_starts = identify_low_conc_zones(dfs, low_frac=.01, id_col = 'SUBJID')
+    ks = estimate_k_halflife(dfs, zero_zone_df=zero_starts, id_col = 'SUBJID')
+    ks[['window_halflife_est', 'window_k_est']].describe()
+
+    auc_calc_df = (df_oral
+                .merge(zero_starts, how = 'left', on = 'SUBJID')
+                .merge(ks, how = 'left', on = 'SUBJID')
+                .copy())
+    auc_sections_df, aumc_sections_df = prepare_section_aucs(auc_calc_df, 
+                                                            id_col = 'SUBJID', 
+                                                            conc_col='CONC_ng/L', 
+                                                            time_col = 'TIME'
+                                                            )
+    aumcs_res = calculate_auc_from_sections(aumc_sections_df, id_col = 'SUBJID')
+    auc_res = calculate_auc_from_sections(auc_sections_df, id_col = 'SUBJID')
+    #auc_res.describe()
+
+
+    clf_df = df_oral.merge(auc_res, how = 'left', on = 'SUBJID')
+
+    clf_df = clf_df.loc[clf_df['TIME'] == 0, :].copy()
+    #clf_df['dose_ng'] = clf_df['AMT']*1000 #defaults to ug, dose is known to be 20mg
+    clf_df['cl/F_L_per_h'] = (clf_df['DOSE_ng'] #ng
+                    /clf_df['linup_logdown_auc'] #ng*h/L
+                    )
+    clf_df['cl/F__L/hr'] = clf_df['cl/F_L_per_h'] #/ 1000
+    clf_df['cl/F__L/hr'].describe()
+
+    mrt_res = calculate_mrt(aumcs_res, auc_res, id_col = 'SUBJID')
+    vss_res = mrt_res.merge(clf_df, how = 'left', on = 'SUBJID')
+    vss_res['vss'] = (vss_res['mrt'] * #hr
+                    vss_res['cl/F__L/hr'] #L/R
+                    )
+    vss_res['vss'].describe()
 
 #%%
 from niceode.nca import NCA
@@ -116,7 +114,7 @@ nca_obj = NCA(
     dose_col='DOSE_ng',
     data = df_nca
 )
-#%%
+
 noboot_tmp = nca_obj.estimate_all_nca_params(terminal_phase_adj_r2_thresh=0.85)
 #tmp = nca_obj.estimate_all_nca_params(terminal_phase_adj_r2_thresh=0.85, n_boots=10)
 #%%
@@ -177,20 +175,262 @@ piv_cols.append(me_mod_fo.model_name)
 me_mod_fo.save_fitted_model(jb_file_name = me_mod_fo.model_name)
 
 #%%
-
-fits = []
-fit_res_dfs = []
-for sub in df_oral['ID_x'].unique():
-    fit_df = df_oral.loc[df_oral['ID_x'] == sub, :].copy()
-    fit = me_mod_fo.fit2(fit_df,)
-    fit_df['pred_y'] = fit.predict2(fit_df)
-    fits.append(fit.fit_result_)
-    fit_res_dfs.append(fit_df.copy())
-fit_res_df = pd.concat(fit_res_dfs)
-fit_readout = [np.exp(i['x']) for i in fits]
-res_df['indiv_fit_preds'] = fit_res_df['pred_y'].copy()
-piv_cols.append('indiv_fit_preds')
+fit_indiv = True
+if fit_indiv:
+    fits = []
+    fit_res_dfs = []
+    for sub in df_oral['ID_x'].unique():
+        fit_df = df_oral.loc[df_oral['ID_x'] == sub, :].copy()
+        fit = me_mod_fo.fit2(fit_df,)
+        fit_df['pred_y'] = fit.predict2(fit_df)
+        fits.append(fit.fit_result_)
+        fit_res_dfs.append(fit_df.copy())
+    fit_res_df = pd.concat(fit_res_dfs)
+    fit_readout = [np.exp(i['x']) for i in fits]
+    res_df['indiv_fit_preds'] = fit_res_df['pred_y'].copy()
+    piv_cols.append('indiv_fit_preds')
 # %%
+me_mod_fo_dep =  CompartmentalModel(
+    model_name = "debug_cp1805_abs_ka-cl-vd_sse_vdDWEIGHTDsexcat_dermal",
+          ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('AMT_scale'),],
+          conc_at_time_col = 'DV_scale',
+          subject_id_col = 'ID_x', 
+          time_col = 'TIME_x',
+          population_coeff=[
+                            PopulationCoeffcient('ka', 2, 
+                                                 #subject_level_intercept=True,
+                                                 optimization_lower_bound = np.log(1e-6),
+                                                 #optimization_upper_bound = np.log(3),
+                                                 #subject_level_intercept_sd_init_val = 0.2, 
+                                                 #subject_level_intercept_sd_upper_bound = 20,
+                                                #subject_level_intercept_sd_lower_bound=1e-6
+                                                 ),
+                            PopulationCoeffcient('cl',
+                                                 .1,
+                                                  optimization_lower_bound = np.log(1e-4),
+                                                  optimization_upper_bound=np.log(1)
+                                                 #optimization_upper_bound = np.log(.005),
+                                                #subject_level_intercept=True, 
+                                                #subject_level_intercept_sd_init_val = 0.3, 
+                                                #subject_level_intercept_sd_upper_bound = 5,
+                                                #subject_level_intercept_sd_lower_bound=1e-6
+                                                 ),
+                            PopulationCoeffcient('vd', 1.2
+                                                , optimization_lower_bound = np.log(.1)
+                                                ,optimization_upper_bound=np.log(5)
+                                                
+                                                #, optimization_upper_bound = np.log(.05)
+                                                ),
+                         ],
+          dep_vars= {'vd':[ObjectiveFunctionColumn(column_name='WEIGHT', optimization_lower_bound=-5,
+                                                   optimization_upper_bound = 5),
+                           ObjectiveFunctionColumn(column_name='sex_cat', optimization_lower_bound=-5,
+                                                   optimization_upper_bound = 5) ]}, 
+                                   no_me_loss_function=neg2_log_likelihood_loss, 
+                                   no_me_loss_needs_sigma=True,
+                                   optimizer_tol=None, 
+                                   pk_model_class=OneCompartmentAbsorption(), 
+                                   model_error_sigma=PopulationCoeffcient('sigma'
+                                                                          ,log_transform_init_val=False
+                                                                          , optimization_init_val=.5
+                                                                          ,optimization_lower_bound=0.00001
+                                                                          ,optimization_upper_bound=3
+                                                                          ),
+                                   #ode_solver_method='BDF'
+                                   #minimize_method = 'COBYQA'
+                                   )
+fit_model = True
+if fit_model:
+    me_mod_fo_dep = me_mod_fo_dep.fit2(df_oral, )
+else:
+    with open(f"logs/fitted_model_{me_mod_fo_dep.model_name}.jb", 'rb') as f:
+        me_mod_fo_dep = jb.load(f)
+res_df[me_mod_fo_dep.model_name] = me_mod_fo_dep.predict2(df_oral)
+piv_cols.append(me_mod_fo_dep.model_name)
+me_mod_fo_dep.save_fitted_model(jb_file_name = me_mod_fo_dep.model_name)
+#%%
+me_mod_fo_dep =  CompartmentalModel(
+    model_name = "debug_cp1805_abs_ka-cl-vd_sse_vdDsexcat_dermal",
+          ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('AMT_scale'),],
+          conc_at_time_col = 'DV_scale',
+          subject_id_col = 'ID_x', 
+          time_col = 'TIME_x',
+          population_coeff=[
+                            PopulationCoeffcient('ka', 2, 
+                                                 #subject_level_intercept=True,
+                                                 optimization_lower_bound = np.log(1e-6),
+                                                 #optimization_upper_bound = np.log(3),
+                                                 #subject_level_intercept_sd_init_val = 0.2, 
+                                                 #subject_level_intercept_sd_upper_bound = 20,
+                                                #subject_level_intercept_sd_lower_bound=1e-6
+                                                 ),
+                            PopulationCoeffcient('cl',
+                                                 .1,
+                                                  optimization_lower_bound = np.log(1e-4),
+                                                  optimization_upper_bound=np.log(1)
+                                                 #optimization_upper_bound = np.log(.005),
+                                                #subject_level_intercept=True, 
+                                                #subject_level_intercept_sd_init_val = 0.3, 
+                                                #subject_level_intercept_sd_upper_bound = 5,
+                                                #subject_level_intercept_sd_lower_bound=1e-6
+                                                 ),
+                            PopulationCoeffcient('vd', 1.2
+                                                , optimization_lower_bound = np.log(.1)
+                                                ,optimization_upper_bound=np.log(5)
+                                                
+                                                #, optimization_upper_bound = np.log(.05)
+                                                ),
+                         ],
+          dep_vars= {'vd':[
+                           ObjectiveFunctionColumn(column_name='sex_cat', optimization_lower_bound=-5,
+                                                   optimization_upper_bound = 5) ]}, 
+                                   no_me_loss_function=neg2_log_likelihood_loss, 
+                                   no_me_loss_needs_sigma=True,
+                                   optimizer_tol=None, 
+                                   pk_model_class=OneCompartmentAbsorption(), 
+                                   model_error_sigma=PopulationCoeffcient('sigma'
+                                                                          ,log_transform_init_val=False
+                                                                          , optimization_init_val=.5
+                                                                          ,optimization_lower_bound=0.00001
+                                                                          ,optimization_upper_bound=3
+                                                                          ),
+                                   #ode_solver_method='BDF'
+                                   #minimize_method = 'COBYQA'
+                                   )
+fit_model = True
+if fit_model:
+    me_mod_fo_dep = me_mod_fo_dep.fit2(df_oral, )
+else:
+    with open(f"logs/fitted_model_{me_mod_fo_dep.model_name}.jb", 'rb') as f:
+        me_mod_fo_dep = jb.load(f)
+res_df[me_mod_fo_dep.model_name] = me_mod_fo_dep.predict2(df_oral)
+piv_cols.append(me_mod_fo_dep.model_name)
+me_mod_fo_dep.save_fitted_model(jb_file_name = me_mod_fo_dep.model_name)
+
+#%%
+me_mod_fo_dep =  CompartmentalModel(
+    model_name = "debug_cp1805_abs_ka-cl-vd_sse_1depvars-allo_dermal",
+          ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('AMT_scale'),],
+          conc_at_time_col = 'DV_scale',
+          subject_id_col = 'ID_x', 
+          time_col = 'TIME_x',
+          population_coeff=[
+                            PopulationCoeffcient('ka', 2, 
+                                                 #subject_level_intercept=True,
+                                                 optimization_lower_bound = np.log(1e-6),
+                                                 #optimization_upper_bound = np.log(3),
+                                                 #subject_level_intercept_sd_init_val = 0.2, 
+                                                 #subject_level_intercept_sd_upper_bound = 20,
+                                                #subject_level_intercept_sd_lower_bound=1e-6
+                                                 ),
+                            PopulationCoeffcient('cl',
+                                                 .1,
+                                                  optimization_lower_bound = np.log(1e-4),
+                                                  optimization_upper_bound=np.log(1)
+                                                 #optimization_upper_bound = np.log(.005),
+                                                #subject_level_intercept=True, 
+                                                #subject_level_intercept_sd_init_val = 0.3, 
+                                                #subject_level_intercept_sd_upper_bound = 5,
+                                                #subject_level_intercept_sd_lower_bound=1e-6
+                                                 ),
+                            PopulationCoeffcient('vd', 1.2
+                                                , optimization_lower_bound = np.log(.1)
+                                                ,optimization_upper_bound=np.log(5)
+                                                
+                                                #, optimization_upper_bound = np.log(.05)
+                                                ),
+                         ],
+          dep_vars= {'vd':[
+                           ObjectiveFunctionColumn(column_name='WEIGHT',model_method = 'allometric' ,
+                                                   allometric_norm_value = 70,
+                                                   optimization_lower_bound=-5,
+                                                   optimization_upper_bound = 5) ]}, 
+                                   no_me_loss_function=neg2_log_likelihood_loss, 
+                                   no_me_loss_needs_sigma=True,
+                                   optimizer_tol=None, 
+                                   pk_model_class=OneCompartmentAbsorption(), 
+                                   model_error_sigma=PopulationCoeffcient('sigma'
+                                                                          ,log_transform_init_val=False
+                                                                          , optimization_init_val=.5
+                                                                          ,optimization_lower_bound=0.00001
+                                                                          ,optimization_upper_bound=3
+                                                                          ),
+                                   #ode_solver_method='BDF'
+                                   #minimize_method = 'COBYQA'
+                                   )
+fit_model = True
+if fit_model:
+    me_mod_fo_dep = me_mod_fo_dep.fit2(df_oral, )
+else:
+    with open(f"logs/fitted_model_{me_mod_fo_dep.model_name}.jb", 'rb') as f:
+        me_mod_fo_dep = jb.load(f)
+res_df[me_mod_fo_dep.model_name] = me_mod_fo_dep.predict2(df_oral)
+piv_cols.append(me_mod_fo_dep.model_name)
+me_mod_fo_dep.save_fitted_model(jb_file_name = me_mod_fo_dep.model_name)
+
+#%%
+
+
+
+me_mod_fo =  CompartmentalModel(
+    model_name = "debug_cp1805_abs_kaME-clME-vdME_FO_vdDWEIGHT_dermal",
+          ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('AMT_scale'),],
+          conc_at_time_col = 'DV_scale',
+          subject_id_col = 'ID_x', 
+          time_col = 'TIME_x',
+          population_coeff=[
+                            PopulationCoeffcient('ka', .7, 
+                                                 subject_level_intercept=True,
+                                                 optimization_lower_bound = np.log(1e-6),
+                                                 #optimization_upper_bound = np.log(3),
+                                                 subject_level_intercept_sd_init_val = 0.2, 
+                                                 subject_level_intercept_sd_upper_bound = 20,
+                                                subject_level_intercept_sd_lower_bound=1e-6
+                                                 ),
+                            PopulationCoeffcient('cl',
+                                                 .1,
+                                                  optimization_lower_bound = np.log(1e-4),
+                                                  optimization_upper_bound=np.log(1),
+                                                 #optimization_upper_bound = np.log(.005),
+                                                subject_level_intercept=True, 
+                                                subject_level_intercept_sd_init_val = 0.3, 
+                                                subject_level_intercept_sd_upper_bound = 5,
+                                                subject_level_intercept_sd_lower_bound=1e-6
+                                                 ),
+                            PopulationCoeffcient('vd', 1.2
+                                                , optimization_lower_bound = np.log(.1)
+                                                ,optimization_upper_bound=np.log(5),
+                                                subject_level_intercept=True, 
+                                                subject_level_intercept_sd_init_val = 0.3, 
+                                                subject_level_intercept_sd_upper_bound = 5,
+                                                subject_level_intercept_sd_lower_bound=1e-6
+                                                #, optimization_upper_bound = np.log(.05)
+                                                ),
+                         ],
+          dep_vars= {'vd':[ObjectiveFunctionColumn(column_name = 'WEIGHT', allometric_norm_value=70, model_method='allometric')]}, 
+                                   no_me_loss_function=neg2_log_likelihood_loss, 
+                                   no_me_loss_needs_sigma=True,
+                                   optimizer_tol=None, 
+                                   pk_model_class=OneCompartmentAbsorption(), 
+                                   model_error_sigma=PopulationCoeffcient('sigma'
+                                                                          ,log_transform_init_val=False
+                                                                          , optimization_init_val=.2
+                                                                          ,optimization_lower_bound=0.00001
+                                                                          ,optimization_upper_bound=3
+                                                                          ),
+                                   #ode_solver_method='BDF'
+                                   minimize_method = 'COBYQA'
+                                   )
+fit_model = True
+if fit_model:
+    me_mod_fo = me_mod_fo.fit2(df_oral, )
+else:
+    with open(f"logs/fitted_model_{me_mod_fo.model_name}.jb", 'rb') as f:
+        me_mod_fo = jb.load(f)
+res_df[me_mod_fo.model_name] = me_mod_fo.predict2(df_oral)
+piv_cols.append(me_mod_fo.model_name)
+me_mod_fo.save_fitted_model(jb_file_name = me_mod_fo.model_name)
+#%%
 me_mod_fo =  CompartmentalModel(
     model_name = "debug_cp1805_abs_kaME-clME-vdME_FO_nodep_dermal",
           ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('AMT_scale'),],
@@ -249,6 +489,7 @@ else:
 res_df[me_mod_fo.model_name] = me_mod_fo.predict2(df_oral)
 piv_cols.append(me_mod_fo.model_name)
 me_mod_fo.save_fitted_model(jb_file_name = me_mod_fo.model_name)
+
 
 #%%
 b_i_apprx_df = pd.DataFrame( dtype = pd.Float64Dtype())
