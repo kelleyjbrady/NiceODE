@@ -267,7 +267,8 @@ def estimate_fprime_jac(
         model_coeffs_local = model_obj._generate_pk_model_coeff_vectorized(
             pop_coeffs_inner, thetas, theta_data
         )
-        return model_obj._solve_ivp(model_coeffs_local, parallel=False)
+        dep_var_preds, full_preds = model_obj._solve_ivp(model_coeffs_local, parallel=False)
+        return dep_var_preds
 
     # the flatten is causing issues when pop_coeffs is not one row
     if pop_coeffs.shape[0] == 1:
@@ -298,7 +299,7 @@ def estimate_cdiff_jac(
         plus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(
             plus_pop_coeffs, thetas, theta_data
         )
-        plus_preds = model_obj._solve_ivp(
+        plus_preds, full_plus_preds = model_obj._solve_ivp(
             plus_model_coeffs,
             parallel=False,
         )
@@ -307,7 +308,7 @@ def estimate_cdiff_jac(
         minus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(
             minus_pop_coeffs, thetas, theta_data
         )
-        minus_preds = model_obj._solve_ivp(
+        minus_preds, full_minus_preds = model_obj._solve_ivp(
             minus_model_coeffs,
             parallel=False,
         )
@@ -388,14 +389,14 @@ def estimate_cdiff_jac_adaptive(
         plus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(
             perturbed_pop_coeffs, thetas, theta_data
         )
-        plus_preds = model_obj._solve_ivp(plus_model_coeffs, parallel=False)
+        plus_preds, full_plus_preds = model_obj._solve_ivp(plus_model_coeffs, parallel=False)
 
         # --- Backward Perturbation ---
         perturbed_pop_coeffs[c] = original_coeff_val - h_j
         minus_model_coeffs = model_obj._generate_pk_model_coeff_vectorized(
             perturbed_pop_coeffs, thetas, theta_data
         )
-        minus_preds = model_obj._solve_ivp(minus_model_coeffs, parallel=False)
+        minus_preds, full_minus_preds = model_obj._solve_ivp(minus_model_coeffs, parallel=False)
 
         # --- Reset coefficient for the next iteration ---
         perturbed_pop_coeffs[c] = original_coeff_val
@@ -675,7 +676,7 @@ def _estimate_b_i(
         )
         # Solve the ODEs for this individual
 
-        preds_i = model_obj._solve_ivp(
+        preds_i, full_preds_i = model_obj._solve_ivp(
             model_coeffs_i, ode_t0_val, time_mask_i, parallel=False
         )
         # compute residuals
@@ -856,7 +857,7 @@ def FOCE_approx_ll_loss(
     )
     # would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`)
     # prepopulated with partial
-    preds = model_obj._solve_ivp(
+    preds, full_preds = model_obj._solve_ivp(
         model_coeffs,
         parallel=False,
     )
@@ -904,7 +905,7 @@ def FOCE_approx_ll_loss(
     )
     debug_print(f"Loss: {neg2_ll}\n")
     debug_print(f"b_i_estimates: {b_i_estimates}\n")
-    return neg2_ll, b_i_estimates, preds
+    return neg2_ll, b_i_estimates, (preds, full_preds)
 
 
 @profile
@@ -939,7 +940,7 @@ def FO_approx_ll_loss(
     )
     # would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`)
     # prepopulated with partial
-    preds = model_obj._solve_ivp(
+    preds, full_preds = model_obj._solve_ivp(
         model_coeffs,
         parallel=False,
     )
@@ -1026,7 +1027,7 @@ def FO_approx_ll_loss(
             except Exception as e:
                 print(f"Error calculating b_i for subject {sub}: {e}")
 
-    return neg2_ll, b_i_approx, preds
+    return neg2_ll, b_i_approx, (preds, full_preds)
 
 
 # @njit
@@ -1994,28 +1995,31 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             method=self.ode_solver_method,
         )
         if parallel:
-            sol = Parallel(n_jobs=parallel_n_jobs)(
+            sol_full = Parallel(n_jobs=parallel_n_jobs)(
                 delayed(partial_solve_ivp)(ode_inits_idx_row[1], coeff_idx_row[1])
                 for coeff_idx_row, ode_inits_idx_row in iter_obj
-            )
-            sol = [sol_i.y[0] for sol_i in sol]
+            )     
         else:
             list_comp = True
             if list_comp:
-                sol = [
-                    partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1]).y[0]
+                sol_full = [
+                    partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1])
                     for coeff_idx_row, ode_inits_idx_row in iter_obj
                 ]
 
             else:
-                sol = []
+                sol_full = []
                 for coeff_idx_row, ode_inits_idx_row in iter_obj:
                     ode_sol = partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1])
-                    sol.append(ode_sol.y[0])
-        sol = np.concatenate(sol)
+                    sol_full.append(ode_sol)
+                    
+        sol_dep_var = [sol_i.y[0] for sol_i in sol_full]
+        sol_dep_var = np.concatenate(sol_dep_var)
+        sol_full = np.vstack([i.y.T for i in sol_full])
         if timepoints is None:
-            sol = sol[time_mask.flatten()]
-        return sol
+            sol_dep_var = sol_dep_var[time_mask.flatten()]
+            sol_full = sol_full[time_mask.flatten()]
+        return sol_dep_var, sol_full
     
     def _unpack_no_me_params(self, params, beta_data):
         pop_coeffs = pd.DataFrame(
@@ -2062,7 +2066,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             model_coeffs = self._generate_pk_model_coeff_vectorized(
                 pop_coeffs, thetas, beta_data
             )
-            preds = self._solve_ivp(
+            preds, full_preds = self._solve_ivp(
                 model_coeffs, parallel=parallel, parallel_n_jobs=parallel_n_jobs
             )
             error = self.no_me_loss_function(self.y, preds, **self.no_me_loss_params)
@@ -2101,14 +2105,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 model_coeffs = self._generate_pk_model_coeff_vectorized(
                     pop_coeffs, thetas, beta_data
                 )
-                preds = self._solve_ivp(
+                preds, full_preds = self._solve_ivp(
                     model_coeffs, parallel=parallel, parallel_n_jobs=parallel_n_jobs
                 )
                 error = self.no_me_loss_function(
                     self.y, preds, sigma, **self.no_me_loss_params
                 )
             else:
-                error, _, preds = self.me_loss_function(
+                error, _, preds = self.me_loss_function( #preds is a tuple containing the (dep_var_preds, full_preds)
                     pop_coeffs,
                     sigma,
                     omegas,
@@ -2139,6 +2143,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     def predict2(
         self,
         data,
+        predict_all_ode_outputs = False,
         parallel=None,
         parallel_n_jobs=None,
         timepoints=None,
@@ -2170,7 +2175,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             model_coeffs = self._generate_pk_model_coeff_vectorized(
                 pop_coeffs, thetas, beta_data
             )
-            preds = self._solve_ivp(
+            preds, full_preds = self._solve_ivp(
                 model_coeffs,
                 parallel=parallel,
                 parallel_n_jobs=parallel_n_jobs,
@@ -2210,7 +2215,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 model_coeffs = self._generate_pk_model_coeff_vectorized(
                     pop_coeffs, thetas, beta_data
                 )
-                preds = self._solve_ivp(
+                preds, full_preds = self._solve_ivp(
                     model_coeffs, parallel=parallel, parallel_n_jobs=parallel_n_jobs
                 )
                 # error = self.no_me_loss_function(self.y, preds, sigma, **self.no_me_loss_params)
@@ -2246,13 +2251,16 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 model_coeffs = self._generate_pk_model_coeff_vectorized(
                     pop_coeffs_i, thetas, beta_data
                 )
-                preds = self._solve_ivp(model_coeffs)
+                preds, full_preds = self._solve_ivp(model_coeffs)
                 self.b_i_approx = b_i_approx
 
             # CI95% construction
         self.ode_t0_vals_are_subject_y0 = ode_t0_vals_are_subject_y0_init_status
-
-        return preds
+        if predict_all_ode_outputs:
+            preds_out = full_preds
+        else:
+            preds_out = preds
+        return preds_out
 
     def _validate_data_chronology(
         self, data: pd.DataFrame, update_data_chronology: bool = False
