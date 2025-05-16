@@ -29,7 +29,7 @@
           "charliermarsh.ruff", 
           "vscode-icons-team.vscode-icons", 
           "KevinRose.vsc-python-indent", 
-          "ggoogle.geminicodeassist", 
+          "google.geminicodeassist", 
           "tamasfe.even-better-toml", 
           "njpwerner.autodocstring", 
           "REditorSupport.r", 
@@ -49,7 +49,7 @@
     },
   
     // Example: Run a command after the container is created
-    // "postCreateCommand": "poetry install", // If you used poetry
+    "postStartCommand": "cd /workspaces/PK-Analysis && poetry install"
   
     // Forward ports if needed
     // "forwardPorts": [8888],

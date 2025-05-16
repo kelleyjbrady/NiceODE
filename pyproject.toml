@@ -1,6 +1,46 @@
 [tool.poetry]
 name = "niceode"
 version = "0.1.0"
-packages = [
-    { include = "niceode", from = "src" }
-]
+description = "JAX project with CUDA support managed by Poetry"
+authors = ["Kelley Brady <kelleyjbrady@protonmail.com>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.13,<3.14" # Match PYTHON_VERSION in Dockerfile
+# Specify JAX with CUDA 12 extra
+# Check PyPI for the latest compatible JAX version
+jax = { version = "^0.4.28", extras = ["cuda12"] }
+# Find cuda extras at https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+# Example: pip install -U "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+# Poetry needs the source URL specified if the package isn't directly on PyPI with the extra
+# Add other dependencies here
+# Example:
+pandas = "^2.2"
+numpy = "^2.2"
+scipy = "^1.15"
+diffrax = "^0.7"
+numpyro = "^0.18"
+blackjax = "^1.2.5"
+pymc = "^5.21"
+ipykernel = "^6.29"
+matplotlib = "^3.10"
+seaborn = "^0.13"
+#ruff = "^0.11"
+dash = "^3.0.1"
+icomo = { version = "*", extras = ["opt"] }
+joblib = "^1.4"
+scikit-learn = "^1.6"
+numba = "^0.61"
+tqdm = "^4.67"
+numdifftools = "^0.9" 
+statsmodels = "^0.14"
+line-profiler = "^4.2"
+nbformat = "^5.10" 
+rpy2 = "^3.5"
+
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
