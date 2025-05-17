@@ -5,7 +5,7 @@
     //  "dockerfile": "dockerfile", // Or adjust path as needed
     //  "context": ".." // Or adjust build context path
     //},
-    "image": "cuda-py:20250501090532", 
+    "image": "cuda-py:20250516094416", 
     // Add arguments to be passed to 'docker run'
     "runArgs": [
       "--gpus=all"
@@ -49,7 +49,7 @@
     },
   
     // Example: Run a command after the container is created
-    "postStartCommand": "cd /workspaces/PK-Analysis && poetry install"
+    "postStartCommand": "cd /workspaces/PK-Analysis && poetry install",
   
     // Forward ports if needed
     // "forwardPorts": [8888],

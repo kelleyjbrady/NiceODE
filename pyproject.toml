@@ -1,10 +1,12 @@
 [tool.poetry]
 name = "niceode"
 version = "0.1.0"
+packages = [
+    { include = "niceode", from = "src" }
+]
 description = "JAX project with CUDA support managed by Poetry"
 authors = ["Kelley Brady <kelleyjbrady@protonmail.com>"]
-readme = "README.md"
-package-mode = false
+#readme = "README.md"
 
 [tool.poetry.dependencies]
 python = ">=3.13,<3.14" # Match PYTHON_VERSION in Dockerfile
