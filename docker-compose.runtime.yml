@@ -1,0 +1,68 @@
+#version: '3.8'
+
+services:
+  db:
+    image: postgres:15 # Or your preferred version
+    container_name: pk_analysis_mlflow_db # Unique name
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mlflow_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-yoursecurepassword}
+      POSTGRES_DB: ${POSTGRES_DB:-mlflow_db}
+    restart: unless-stopped
+
+  mlflow-server:
+    image: ${MLFLOW_IMAGE_TAG:-your-registry/mlflow-postgres:latest} # Reads from .env
+    container_name: pk_analysis_mlflow_server # Unique name
+    depends_on:
+      - db
+    ports:
+      - "5001:5000" # Host:Container for MLflow UI
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mlflow_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-yoursecurepassword}
+      POSTGRES_DB: ${POSTGRES_DB:-mlflow_db}
+      DB_HOST: db
+      DB_PORT: 5432
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${DB_HOST}:${DB_PORT}/${POSTGRES_DB}
+      --default-artifact-root file:/mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+    restart: unless-stopped
+
+  dev:
+    image: ${DEV_IMAGE_TAG:-your-registry/cuda-py:latest} # Reads from .env
+    container_name: pk_analysis_dev_env # Unique name
+    depends_on:
+      - mlflow-server
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+      # Set user-specific ENV vars here that were previously in the Dockerfile's USER section
+      - R_LIBS_USER=/home/vscode/R/library # For user R packages
+      - PATH=/home/vscode/.local/bin:$PATH # If user installs tools
+    volumes:
+      # Mount the PK-Analysis project root to /workspaces/PK-Analysis
+      - .:/workspaces/PK-Analysis:cached
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+    # Ensure the user from the Dockerfile is used (vscode UID 1000)
+    # user: "1000:1000" # Usually not needed if Dockerfile's USER instruction is last
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  postgres_data:
+    driver: local
+  mlflow_artifacts:
+    driver: local

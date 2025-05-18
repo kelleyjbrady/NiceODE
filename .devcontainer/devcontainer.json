@@ -1,59 +1,47 @@
 {
-    "name": "Python GPU Dev Container",
-    // Reference your Dockerfile
-    //"build": {
-    //  "dockerfile": "dockerfile", // Or adjust path as needed
-    //  "context": ".." // Or adjust build context path
-    //},
-    "image": "cuda-py:20250516094416", 
-    // Add arguments to be passed to 'docker run'
-    "runArgs": [
-      "--gpus=all"
-      // You can add other 'docker run' arguments here too, e.g.
-      // "-e", "MY_ENV_VAR=some_value"
-    ],
-  
-    // --- Other devcontainer configurations ---
-  
-    // Example: Specify VS Code extensions to install inside the container
-    "customizations": {
-      "vscode": {
-        "extensions": [
-          "ms-python.python",
-          "ms-toolsai.jupyter",
-          "ms-azuretools.vscode-docker", 
-          "ms-toolsai.datawrangler", 
-          "mhutchie.git-graph", 
-          "donjayamanne.githistory", 
-          "eamodio.gitlens", 
-          "charliermarsh.ruff", 
-          "vscode-icons-team.vscode-icons", 
-          "KevinRose.vsc-python-indent", 
-          "google.geminicodeassist", 
-          "tamasfe.even-better-toml", 
-          "njpwerner.autodocstring", 
-          "REditorSupport.r", 
-          "RDebugger.r-debugger", 
-          "julialang.language-julia",
-          "0h7z.vscode-julia-format", 
-          "quarto.quarto"
+  "name": "PK Analysis Dev Environment w/ MLflow",
+  "dockerComposeFile": [
+      "../docker-compose.runtime.yml" // Path relative to this devcontainer.json file
+  ],
+  "service": "dev", // The name of your development service in the compose file
+  "workspaceFolder": "/workspaces/PK-Analysis", // Target folder inside the container
 
-          // Add other extensions
-        ],
+  // Installs PK-Analysis project dependencies into its own venv after container starts
+  "postStartCommand": "cd /workspaces/PK-Analysis && poetry install",
+
+  "customizations": {
+      "vscode": {
+          "extensions": [
+              "ms-python.python",
+              "ms-toolsai.jupyter",
+              "ms-azuretools.vscode-docker",
+              "ms-toolsai.datawrangler",
+              "mhutchie.git-graph",
+              "donjayamanne.githistory",
+              "eamodio.gitlens",
+              "charliermarsh.ruff",
+              "vscode-icons-team.vscode-icons",
+              "KevinRose.vsc-python-indent",
+              "google.geminicodeassist",
+              "tamasfe.even-better-toml",
+              "njpwerner.autodocstring",
+              "REditorSupport.r",
+              "RDebugger.r-debugger",
+              "julialang.language-julia",
+              "0h7z.vscode-julia-format",
+              "quarto.quarto"
+          ],
           "settings": {
-            // Settings to help VS Code find the interpreter correctly
-            "python.defaultInterpreterPath": "", // OPTIONAL: You could try to find this path, but often auto-detect works
-            "python.terminal.activateEnvironment": false // Good practice with Poetry
-                }
+              // Let VS Code discover the Python interpreter from Poetry's venv
+              "python.defaultInterpreterPath": "",
+              "python.terminal.activateEnvironment": false, // Good with Poetry
+              "terminal.integrated.defaultProfile.linux": "bash",
+              "[python]": {
+                  "editor.defaultFormatter": "charliermarsh.ruff"
+              }
+          }
       }
-    },
-  
-    // Example: Run a command after the container is created
-    "postStartCommand": "cd /workspaces/PK-Analysis && poetry install",
-  
-    // Forward ports if needed
-    // "forwardPorts": [8888],
-  
-    // Set the remote user (if your Dockerfile creates one)
-    "remoteUser": "vscode" // Or whatever user you configured
-  }
+  },
+  "remoteUser": "vscode", // Should match the user configured in your dev Dockerfile
+  "shutdownAction": "stopCompose" // Stops all compose services on window close
+}
