@@ -1,6 +1,7 @@
 import inspect
 import ast
 import sys
+import hashlib
 
 class _DocstringRemover(ast.NodeTransformer):
     """
@@ -101,3 +102,13 @@ def get_class_source_without_docstrings(cls_obj: type) -> str | None:
     except Exception as e:
         # Catch any other unexpected errors during AST processing or unparsing.
         return f"Error: An unexpected error occurred while processing class '{cls_obj.__name__}': {e}"
+
+def generate_class_contents_hash(class_str:str):
+    
+    ode_bytes = class_str.encode('utf-8')
+    #    b. Create a hash object (SHA256 is recommended)
+    hasher = hashlib.sha256()
+    #    c. Update the hasher with the bytes
+    hasher.update(ode_bytes)
+    #    d. Get the hexadecimal representation of the hash
+    return hasher.hexdigest()
