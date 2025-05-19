@@ -1,3 +1,4 @@
+import mlflow.data.pandas_dataset
 from scipy.integrate import solve_ivp
 import numpy as np
 from tqdm import tqdm
@@ -27,7 +28,9 @@ import joblib as jb
 from typing import Self
 from .diffeqs import PKBaseODE
 import uuid
-
+import mlflow
+from mlflow.data.pandas_dataset import from_pandas
+from niceode.mlflow_utils import get_class_source_without_docstrings, generate_class_contents_hash
 
 def debug_print(print_obj, debug=False):
     if debug:
@@ -1518,6 +1521,18 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         # helper attributes possibly defined later
         self.fit_result_ = None
 
+    def _initalize_mlflow_experiment(self, ):
+        #this seems very brittle . . .
+        try:
+            experiment_id = mlflow.create_experiment(self.batch_id)
+        except mlflow.exceptions.MlflowException as e:
+            if "RESOURCE_ALREADY_EXISTS" in str(e):
+                experiment_id = mlflow.get_experiment_by_name(self.batch_id).experiment_id
+        else:
+            raise
+        mlflow.set_experiment(experiment_name=self.batch_id)
+        self.mlf_experiment_id = experiment_id
+    
     def _validate_ode_t0_vals_size(self, ode_t0_vals):
         size_tmp = len(ode_t0_vals)
         if size_tmp != self.ode_output_size:
@@ -2385,30 +2400,43 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         id_str = self._generate_fitted_model_name(ignore_fit_status=True)
         checkpoint_filename = f"{id_str}.jb"
         # checkpoint_filepath = os.path.join('logs', checkpoint_filename)
-        self.fit_result_ = optimize_with_checkpoint_joblib(
-            objective_function,
-            init_params,
-            n_checkpoint=n_iters_per_checkpoint,
-            checkpoint_filename=checkpoint_filename,
-            args=(theta_data,),
-            warm_start=warm_start,
-            minimize_method=self.minimize_method,
-            tol=self.optimzer_tol,
-            bounds=self.bounds,
-        )
-        # hess_fun = nd.Hessian()
-        fit_result_summary = pd.DataFrame(
-            param_names,
-        )
-        fit_result_summary["best_fit_param_val"] = pd.NA
-        fit_result_summary["best_fit_param_val"] = fit_result_summary[
-            "best_fit_param_val"
-        ].astype(pd.Float64Dtype())
-        fit_result_summary["best_fit_param_val"] = self.fit_result_.x
-        self.fit_result_summary_ = fit_result_summary.copy()
-        # after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
-        if len(omegas.values) > 0:
-            _ = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs)
+        #initalize mlflow
+        self._initalize_mlflow_experiment()
+        
+        with mlflow.start_run(run_name=id_str) as run:
+            ds = from_pandas(df = data)
+            mlflow.log_input(dataset=ds, context = 'training')
+            ode_class_str = get_class_source_without_docstrings(self.pk_model_class)
+            mlflow.log_text(ode_class_str, 'ode_definition.py')
+            mlflow.log_param('ode_definition_hash',
+                             generate_class_contents_hash(ode_class_str))
+            mlflow.log_param('ode_class_name', self.pk_model_class.__name__)
+            
+            
+            self.fit_result_ = optimize_with_checkpoint_joblib(
+                objective_function,
+                init_params,
+                n_checkpoint=n_iters_per_checkpoint,
+                checkpoint_filename=checkpoint_filename,
+                args=(theta_data,),
+                warm_start=warm_start,
+                minimize_method=self.minimize_method,
+                tol=self.optimzer_tol,
+                bounds=self.bounds,
+            )
+            # hess_fun = nd.Hessian()
+            fit_result_summary = pd.DataFrame(
+                param_names,
+            )
+            fit_result_summary["best_fit_param_val"] = pd.NA
+            fit_result_summary["best_fit_param_val"] = fit_result_summary[
+                "best_fit_param_val"
+            ].astype(pd.Float64Dtype())
+            fit_result_summary["best_fit_param_val"] = self.fit_result_.x
+            self.fit_result_summary_ = fit_result_summary.copy()
+            # after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
+            if len(omegas.values) > 0:
+                _ = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs)
         return deepcopy(self)
 
     def _generate_fitted_model_name(self, ignore_fit_status=False):
