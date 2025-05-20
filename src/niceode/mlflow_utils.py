@@ -112,3 +112,107 @@ def generate_class_contents_hash(class_str:str):
     hasher.update(ode_bytes)
     #    d. Get the hexadecimal representation of the hash
     return hasher.hexdigest()
+
+
+class _DocstringRemover(ast.NodeTransformer):
+    """
+    An AST transformer that removes docstrings from ClassDef, FunctionDef,
+    and AsyncFunctionDef nodes.
+    Docstrings are string literals that appear as the first statement in
+    a definition's body.
+    """
+
+    def _process_node_with_docstring(self, node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+        """
+        Helper to remove docstring from a node's body if ast.get_docstring confirms its presence.
+        """
+        # ast.get_docstring correctly identifies the docstring based on Python's rules.
+        # 'clean=False' ensures we are just checking for existence, not processing it.
+        if ast.get_docstring(node, clean=False) is not None:
+            # If a docstring exists, the first element in the node's body
+            # is expected to be an ast.Expr node containing the docstring.
+            if node.body and isinstance(node.body[0], ast.Expr):
+                node.body = node.body[1:]
+            # If the body becomes empty (e.g., function with only a docstring),
+            # ast.unparse or astor will typically insert 'pass' automatically.
+        self.generic_visit(node)  # Continue to visit children of the node
+        return node
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
+        # Though the request is for functions, making the remover general
+        # doesn't hurt if it's reused.
+        return self._process_node_with_docstring(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
+        return self._process_node_with_docstring(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AsyncFunctionDef:
+        return self._process_node_with_docstring(node)
+
+def get_function_source_without_docstrings_or_comments(func_obj) -> str | None:
+    """
+    Retrieves the source code text of a Python function, excluding its
+    docstring and most comments.
+
+    Comments are typically removed as a side effect of parsing the code
+    into an Abstract Syntax Tree (AST) and then unparsing it. Standard
+    comments are not part of the AST structure that ast.unparse rebuilds.
+
+    The formatting of the output code is determined by `ast.unparse`
+    (Python 3.9+) or `astor` if used as a fallback.
+
+    Args:
+        func_obj: The function or method object to inspect.
+
+    Returns:
+        A string containing the source code of the function without its
+        docstring and comments.
+        Returns an error message string if the source cannot be retrieved,
+        parsed, or if `ast.unparse` (or a fallback) is unavailable.
+    """
+    # inspect.isroutine checks for user-defined or built-in functions or methods.
+    if not inspect.isroutine(func_obj):
+        return f"Error: Expected a function or method, but got {type(func_obj).__name__}."
+
+    try:
+        source_text = inspect.getsource(func_obj)
+    except (TypeError, OSError) as e:
+        func_name = getattr(func_obj, '__name__', 'the provided object')
+        return f"Error: Could not retrieve source for '{func_name}'. Reason: {e}"
+
+    try:
+        # Parse the source text into an Abstract Syntax Tree (AST)
+        parsed_tree = ast.parse(source_text)
+
+        # Apply the transformation to remove docstrings
+        transformer = _DocstringRemover()
+        transformed_tree = transformer.visit(parsed_tree)
+
+        # Ensure line numbers and column offsets are correct after transformation.
+        ast.fix_missing_locations(transformed_tree)
+
+        # Convert the modified AST back to source code.
+        # ast.unparse (Python 3.9+) and astor.to_source inherently omit
+        # comments that are not part of the AST's structural representation.
+        if sys.version_info >= (3, 9):
+            return ast.unparse(transformed_tree)
+        else:
+            try:
+                import astor
+                # astor.to_source might add an extra newline at the end, strip it.
+                return astor.to_source(transformed_tree).strip()
+            except ImportError:
+                func_name = getattr(func_obj, '__name__', 'the function')
+                return (
+                    f"Error: For '{func_name}', AST processing complete, but `ast.unparse` "
+                    f"(Python 3.9+) or the 'astor' library (for Python < 3.9) is required to generate source code. "
+                    f"Your Python version is {sys.version_info.major}.{sys.version_info.minor}. "
+                    "Please install 'astor' (`pip install astor`) if using an older Python version."
+                )
+
+    except SyntaxError as e:
+        func_name = getattr(func_obj, '__name__', 'the function')
+        return f"Error: Could not parse the source code for '{func_name}'. Reason: {e}"
+    except Exception as e:
+        func_name = getattr(func_obj, '__name__', 'the function')
+        return f"Error: An unexpected error occurred while processing '{func_name}': {e}"

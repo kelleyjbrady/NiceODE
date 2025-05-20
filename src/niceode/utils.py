@@ -30,7 +30,9 @@ from .diffeqs import PKBaseODE
 import uuid
 import mlflow
 from mlflow.data.pandas_dataset import from_pandas
-from niceode.mlflow_utils import get_class_source_without_docstrings, generate_class_contents_hash
+from niceode.mlflow_utils import (get_class_source_without_docstrings,
+                                  generate_class_contents_hash, 
+                                  get_function_source_without_docstrings_or_comments)
 
 def debug_print(print_obj, debug=False):
     if debug:
@@ -2356,6 +2358,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     for c in sigma.columns
                 ]
             )
+            mlflow_loss = self.me_loss_function
+        else:
+            mlflow_loss = self.no_me_loss_function
         if len(omegas.values) > 0:
             init_params.append(omegas.values)
             param_names.extend(
@@ -2388,7 +2393,13 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     for c_tuple in thetas.columns.to_list()
                 ]
             )
+        fit_result_summary = pd.DataFrame(
+                param_names,
+            )
         init_params = np.concatenate(init_params, axis=1, dtype=np.float64).flatten()
+        fit_result_summary['init_val'] = init_params
+        fit_result_summary['lower_bound'] = [i[0] for i in self.bounds]
+        fit_result_summary['upper_bound'] = [i[1] for i in self.bounds]
         self.preds_opt_ = []
         objective_function = partial(
             self._objective_function2,
@@ -2404,13 +2415,29 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self._initalize_mlflow_experiment()
         
         with mlflow.start_run(run_name=id_str) as run:
-            ds = from_pandas(df = data)
+            ds = from_pandas(df = theta_data)
             mlflow.log_input(dataset=ds, context = 'training')
+            
+            init_mlf = from_pandas(df = fit_result_summary)
+            mlflow.log_input(dataset=init_mlf, context = 'init_parms')
+            
+            init_mlf_alt = from_pandas(df = fit_result_summary)
+            mlflow.log_input(dataset=init_mlf_alt, context = 'init_parms_alt')
+            
+            
+            
             ode_class_str = get_class_source_without_docstrings(self.pk_model_class)
             mlflow.log_text(ode_class_str, 'ode_definition.py')
             mlflow.log_param('ode_definition_hash',
                              generate_class_contents_hash(ode_class_str))
             mlflow.log_param('ode_class_name', self.pk_model_class.__name__)
+            
+            loss_str = get_function_source_without_docstrings_or_comments(mlflow_loss)
+            mlflow.log_text(loss_str, 'loss_definition.py')
+            mlflow.log_param('loss_definition_hash',
+                             generate_class_contents_hash(loss_str))
+            mlflow.log_param('ode_class_name', mlflow_loss.__name__)
+
             
             
             self.fit_result_ = optimize_with_checkpoint_joblib(
@@ -2425,9 +2452,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 bounds=self.bounds,
             )
             # hess_fun = nd.Hessian()
-            fit_result_summary = pd.DataFrame(
-                param_names,
-            )
+            
             fit_result_summary["best_fit_param_val"] = pd.NA
             fit_result_summary["best_fit_param_val"] = fit_result_summary[
                 "best_fit_param_val"
