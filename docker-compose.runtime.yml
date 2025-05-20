@@ -13,7 +13,7 @@ services:
     restart: unless-stopped
 
   mlflow-server:
-    image: ${MLFLOW_IMAGE_TAG:-your-registry/mlflow-postgres:latest} # Reads from .env
+    image: ${MLFLOW_IMAGE_TAG:-kelleyjbrady/mlflow-postgres:latest} # Reads from .env
     container_name: pk_analysis_mlflow_server # Unique name
     depends_on:
       - db
@@ -36,7 +36,7 @@ services:
     restart: unless-stopped
 
   dev:
-    image: ${DEV_IMAGE_TAG:-your-registry/cuda-py:latest} # Reads from .env
+    image: ${DEV_IMAGE_TAG:-kelleyjbrady/cuda-py:latest} # Reads from .env
     container_name: pk_analysis_dev_env # Unique name
     depends_on:
       - mlflow-server
@@ -48,6 +48,8 @@ services:
     volumes:
       # Mount the PK-Analysis project root to /workspaces/PK-Analysis
       - .:/workspaces/PK-Analysis:cached
+      #This is required when the artifacts storage for the server is a local volume
+      - mlflow_artifacts:/mlflow/artifacts
     tty: true
     stdin_open: true
     restart: unless-stopped
