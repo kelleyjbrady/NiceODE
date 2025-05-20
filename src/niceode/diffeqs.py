@@ -220,7 +220,7 @@ class OneCompartmentConc(PKBaseODE):
         return pred_mass
 
 class OneCompartmentAbsorption(PKBaseODE):
-    f"""
+    """
     One-compartment model with first-order absorption (Gut -> Central).
     Parameterized by Ka, Apparent Clearance (CL/F), Apparent Volume (Vd/F).
 
@@ -353,7 +353,7 @@ class OneCompartmentAbsorption(PKBaseODE):
         - Increasing `cl_f`: Lower AUC, lower Cmax, faster decline (shorter t1/2).
         - Increasing `vd_f`: Lower Cmax, slower decline (longer t1/2), no change to AUC.
     
-    {nca_docstring}
+    
     """
     def __init__(self, ):
         pass
@@ -388,7 +388,7 @@ def one_compartment_absorption2(t, y, ka, ke):
     return [dCdt, dAdt]
 
 class OneCompartmentAbsorption2(PKBaseODE):
-    f"""
+    """
     One-compartment model with first-order absorption (Gut -> Central).
     Parameterized by Ka, Elimination Rate Constant (Ke), Apparent Volume (Vd/F).
 
@@ -514,7 +514,7 @@ class OneCompartmentAbsorption2(PKBaseODE):
             eliminate a given mass but t1/2 depends only on Ke in this param. Increases apparent
             CL (CL/F = ke * Vd/F) leading to lower AUC.
         
-    {nca_docstring}
+    
     """
     def __init__(self, ):
         pass
@@ -531,7 +531,7 @@ class OneCompartmentAbsorption2(PKBaseODE):
         return depvar_unit_result
 
 class OneCompartmentBolus_CL(PKBaseODE):
-    f"""
+    """
     One-compartment IV Bolus model. Parameterized by Clearance (CL) and Volume (Vd).
 
     Simplest model for IV bolus injection, assuming instantaneous distribution
@@ -633,7 +633,7 @@ class OneCompartmentBolus_CL(PKBaseODE):
         - Increasing `cl`: Faster decline (shorter t1/2), lower AUC.
         - Increasing `vd`: Slower decline (longer t1/2), lower C0/initial concentrations, no change to AUC.
     
-    {nca_docstring}
+    
     """
     def __init__(self, ):
         pass
@@ -652,7 +652,7 @@ class OneCompartmentBolus_CL(PKBaseODE):
         return depvar_unit_result
 
 class OneCompartmentBolus_Ke(PKBaseODE):
-    f"""
+    """
     One-compartment IV Bolus model. Parameterized by Elimination Rate Constant (Ke) and Volume (Vd).
 
     Alternative parameterization for IV bolus, assuming instantaneous distribution
@@ -758,7 +758,7 @@ class OneCompartmentBolus_Ke(PKBaseODE):
         - Increasing `ke`: Faster decline (shorter t1/2), lower AUC (assuming fixed Vd).
         - Increasing `vd`: Lower C0/initial concentrations, no change to t1/2 (fixed Ke), lower AUC (as CL = Ke*Vd increases).
     
-    {nca_docstring}
+    
     """
     def __init__(self, ):
         pass
@@ -775,7 +775,7 @@ class OneCompartmentBolus_Ke(PKBaseODE):
         return depvar_unit_result
 
 class TwoCompartmentBolus(PKBaseODE):
-    f"""
+    """
     Two-compartment IV Bolus model (Central, Peripheral).
     Parameterized by Clearance (cl), Volume Central (v1),
     Inter-compartmental Clearance (q), Volume Peripheral (v2).
@@ -918,7 +918,7 @@ class TwoCompartmentBolus(PKBaseODE):
         - Increasing `v2`: Slower distribution (smaller alpha), slower terminal phase (smaller beta, longer t1/2,beta), larger Vdss.
             Less impact on initial concentration.
     
-    {nca_docstring}
+    
     """
     def __init__(self, ):
         pass
@@ -938,7 +938,7 @@ class TwoCompartmentBolus(PKBaseODE):
         return depvar_unit_result
 
 class TwoCompartmentAbsorption(PKBaseODE):
-    f"""
+    """
     Two-compartment model with first-order absorption (Gut -> Central -> Peripheral).
     Parameterized by Absorption Rate Const (ka), Clearance (cl), Volume Central (v1),
     Inter-compartmental Clearance (q), Volume Peripheral (v2).
@@ -1086,7 +1086,7 @@ class TwoCompartmentAbsorption(PKBaseODE):
         - Increasing `q_f`: Faster distribution phase, potentially lower peak concentration (Cmax).
         - Increasing `v2_f`: Slower distribution, slower terminal decline (longer t1/2,beta), larger Vdss/F.
     
-    {nca_docstring}
+    
     """
     def __init__(self, ):
         pass
@@ -1129,7 +1129,7 @@ class TwoCompartmentAbsorption(PKBaseODE):
         return depvar_unit_result
 
 class OneCompartmentInfusion(PKBaseODE):
-    f"""
+    """
     One-compartment model with zero-order infusion.
     Parameterized by Infusion Rate (R0), Clearance (cl), Volume (vd).
 
@@ -1239,7 +1239,7 @@ class OneCompartmentInfusion(PKBaseODE):
         - Increasing `vd`: Slower approach to Css, lower concentrations for a given mass, slower
             decline post-infusion (longer t1/2), no change to Css.
     
-    {nca_docstring}
+    
     """
     def __init__(self, ):
         pass
@@ -1262,7 +1262,7 @@ class OneCompartmentInfusion(PKBaseODE):
         return self._ode
 
 class OneCompartmentBolusMM(PKBaseODE):
-    f"""
+    """
     One-compartment IV Bolus model with Michaelis-Menten (saturable) elimination.
     Parameterized by Max Elimination Rate (vmax), Michaelis Constant (km),
     and Volume of Distribution (vd).
@@ -1386,7 +1386,7 @@ class OneCompartmentBolusMM(PKBaseODE):
         - Increasing `vd`: Lower concentrations overall (C=Mass/Vd), which indirectly slows elimination rate (Vmax*C/(Km+C)).
             Prolongs elimination time.
     
-    {nca_docstring}
+    
     """
     def __init__(self, ):
         pass
