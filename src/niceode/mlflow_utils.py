@@ -2,6 +2,8 @@ import inspect
 import ast
 import sys
 import hashlib
+import mlflow
+from scipy.optimize import OptimizeResult
 
 class _DocstringRemover(ast.NodeTransformer):
     """
@@ -216,3 +218,22 @@ def get_function_source_without_docstrings_or_comments(func_obj) -> str | None:
     except Exception as e:
         func_name = getattr(func_obj, '__name__', 'the function')
         return f"Error: An unexpected error occurred while processing '{func_name}': {e}"
+
+class MLflowCallback:
+    def __init__(self, objective_name:str, parameter_names):
+        self.iteration = 0
+        self.objective_name = objective_name
+        self.parameter_names = parameter_names
+    def __call__(self, intermediate_result:OptimizeResult):
+        """
+        Callback function to log metrics at each iteration.
+        'xk' is the current parameter vector.
+        'intermediate_result' is an OptimizeResult object (for some methods like 'trust-constr').
+        """
+        self.iteration += 1
+        current_fun_val = intermediate_result.fun
+        mlflow.log_metric(self.objective_name,current_fun_val , step=self.iteration)
+        [mlflow.log_metric(f'param_{self.parameter_names[idx]}_value', val, step = self.iteration)
+         for idx, val in enumerate(intermediate_result.x)]
+
+
