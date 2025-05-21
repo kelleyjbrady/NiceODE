@@ -23,6 +23,7 @@ from scipy.linalg import block_diag, cho_factor, cho_solve
 from scipy.optimize import approx_fprime
 from line_profiler import profile
 from typing import Literal, Tuple
+import scipy
 from scipy.optimize._minimize import MINIMIZE_METHODS_NEW_CB
 import joblib as jb
 from typing import Self
@@ -2424,10 +2425,50 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             init_mlf = from_pandas(df = fit_result_summary)
             mlflow.log_input(dataset=init_mlf, context = 'init_parms')
             
-            init_mlf_alt = from_pandas(df = fit_result_summary)
+            init_mlf_alt = from_pandas(df = self.init_vals_pd)
             mlflow.log_input(dataset=init_mlf_alt, context = 'init_parms_alt')
-            
-            
+            mlflow.log_table(data = self.init_vals_pd, artifact_file='init_vals_pd.json')
+            non_subj_cols = ['init_val',
+                             'model_coeff_lower_bound',
+                             'model_coeff_upper_bound', 
+                             
+                             ]
+            dep_var_cols = ['allometric', 
+                             'allometric_norm_value']
+            subj_eff_cols = [
+                'subject_level_intercept_name', 
+                'subject_level_intercept_sd_init_val', 
+                'subject_level_intercept_init_vals_column_name', 
+                'subject_level_intercect_sd_lower_bound', 
+                'subject_level_intercect_sd_upper_bound'
+            ]
+            subj_eff_cols = [i.replace('intercept', 'effect').replace('intercect', 'effect') 
+                             for i in subj_eff_cols]
+            for idx, row in self.init_vals_pd.iterrows():
+                mlflow.log_param(f'opt_param_full_{idx}', row.to_dict())
+                #logging if the row corresponds to a dependant variable for a ODE coeff 
+                if row['model_coeff_dep_var'] is not None:
+                    param_name = row['model_coeff'] + "__" + row["model_coeff_dep_var"]
+                    mlflow.log_param(f'{param_name}__idx', idx)
+                    loggables = non_subj_cols + dep_var_cols
+                    [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables]          
+                if row['population_coeff']:
+                    param_name = row['model_coeff'] + "_pop"
+                    mlflow.log_param(f'{param_name}__idx', idx)
+                    loggables = non_subj_cols
+                    [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables] 
+                if row['model_error']:
+                    param_name = row['model_coeff'] + "_const"
+                    mlflow.log_param(f'{param_name}__idx', idx)
+                    loggables = non_subj_cols
+                    [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables]
+                if row['subject_level_intercept']:
+                    param_name = row['model_coeff'] + "__subj_effect"
+                    mlflow.log_param(f'{param_name}__idx', idx)
+                    loggables = subj_eff_cols
+                    [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables]
+                    
+
             
             ode_class_str = get_class_source_without_docstrings(self._pk_model_class)
             mlflow.log_text(ode_class_str, 'ode_definition.py')
@@ -2439,8 +2480,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             mlflow.log_text(loss_str, 'loss_definition.py')
             mlflow.log_param('loss_definition_hash',
                              generate_class_contents_hash(loss_str))
-            mlflow.log_param('ode_class_name', mlflow_loss.__name__)
+            mlflow.log_param('loss_definition_name', mlflow_loss.__name__)
 
+            mlflow.log_param('scipy_version', scipy.__version__)
+            mlflow.log_param('scipy_minimize_method', self.minimize_method)
             
             
             self.fit_result_ = optimize_with_checkpoint_joblib(
