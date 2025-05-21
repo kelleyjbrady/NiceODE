@@ -1,6 +1,7 @@
 import mlflow.data.pandas_dataset
 from scipy.integrate import solve_ivp
 import numpy as np
+import scipy.optimize
 from tqdm import tqdm
 from scipy.optimize import minimize
 from joblib import dump, load
@@ -31,9 +32,10 @@ from .diffeqs import PKBaseODE
 import uuid
 import mlflow
 from mlflow.data.pandas_dataset import from_pandas
-from niceode.mlflow_utils import (get_class_source_without_docstrings,
+from .mlflow_utils import (get_class_source_without_docstrings,
                                   generate_class_contents_hash, 
-                                  get_function_source_without_docstrings_or_comments)
+                                  get_function_source_without_docstrings_or_comments, 
+                                  MLflowCallback)
 from typing import Type
 
 
@@ -1561,6 +1563,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             init_vals_pd.append(
                 {
                     "model_coeff": pop_coeff.coeff_name,
+                    "log_name":pop_coeff.coeff_name + "_pop",
                     "model_coeff_dep_var": None,
                     "population_coeff": True,
                     "model_error": False,
@@ -1581,6 +1584,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             init_vals_pd.append(
                 {
                     "model_coeff": self.model_error_sigma.coeff_name,
+                    "log_name":self.model_error_sigma.coeff_name + "_const",
                     "model_coeff_dep_var": None,
                     "population_coeff": False,
                     "model_error": True,
@@ -1611,6 +1615,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 init_vals_pd.append(
                     {
                         "model_coeff": model_coeff,
+                        "log_name": model_coeff + "__" + coeff_dep_var.column_name,
                         "model_coeff_dep_var": coeff_dep_var.column_name,
                         "population_coeff": False,
                         "model_error": False,
@@ -1829,7 +1834,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             pop_coeffs[coeff_name] = [row["init_val"]]
 
             if row["subject_level_intercept"]:
-                omega_name = f"omega2_{coeff_name}"
+                omega_name = f"omega2_{coeff_name}" #should get this from the table instead
                 col = (coeff_name, omega_name)
                 if col not in subject_level_intercept_sds.columns:
                     subject_level_intercept_sds[col] = [np.nan]
@@ -2337,6 +2342,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         param_names = [
             {
                 "model_coeff": c,
+                "log_name":c + "_pop",
                 "population_coeff": True,
                 "model_error": False,
                 "subject_level_intercept": False,
@@ -2352,6 +2358,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 [
                     {
                         "model_coeff": c,
+                        "log_name":c + "_const",
                         "population_coeff": False,
                         "model_error": True,
                         "subject_level_intercept": False,
@@ -2362,15 +2369,18 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     for c in sigma.columns
                 ]
             )
+            model_has_subj_level_effects = True
             mlflow_loss = self.me_loss_function
         else:
             mlflow_loss = self.no_me_loss_function
+            model_has_subj_level_effects = False
         if len(omegas.values) > 0:
             init_params.append(omegas.values)
             param_names.extend(
                 [
                     {
                         "model_coeff": c_tuple[0],
+                        "log_name": c_tuple[1],
                         "population_coeff": False,
                         "model_error": False,
                         "subject_level_intercept": True,
@@ -2387,6 +2397,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 [
                     {
                         "model_coeff": c_tuple[0],
+                        "log_name": c_tuple[0] + "__" + c_tuple[1],
                         "population_coeff": False,
                         "model_error": False,
                         "subject_level_intercept": False,
@@ -2424,6 +2435,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             
             init_mlf = from_pandas(df = fit_result_summary)
             mlflow.log_input(dataset=init_mlf, context = 'init_parms')
+            for idx, row in fit_result_summary.iterrows():
+                param_name = row['log_name']
+                mlflow.log_param(f'{param_name}__idx', idx)
+            
             
             init_mlf_alt = from_pandas(df = self.init_vals_pd)
             mlflow.log_input(dataset=init_mlf_alt, context = 'init_parms_alt')
@@ -2444,27 +2459,29 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             ]
             subj_eff_cols = [i.replace('intercept', 'effect').replace('intercect', 'effect') 
                              for i in subj_eff_cols]
+            tmp = self.init_vals_pd
+            pop_coeffs_df = tmp.loc[tmp['population_coeff'], :]
+            sigmas_df = tmp.loc[tmp['model_error'], :]
+            dep_vars_df = tmp.loc[tmp['model_coeff_dep_var'].isnull() == False, :]
+            subject_level_effect_df = tmp.loc[tmp['subject_level_intercept'], :]
+            
             for idx, row in self.init_vals_pd.iterrows():
                 mlflow.log_param(f'opt_param_full_{idx}', row.to_dict())
                 #logging if the row corresponds to a dependant variable for a ODE coeff 
                 if row['model_coeff_dep_var'] is not None:
-                    param_name = row['model_coeff'] + "__" + row["model_coeff_dep_var"]
-                    mlflow.log_param(f'{param_name}__idx', idx)
+                    param_name = row['log_name']
                     loggables = non_subj_cols + dep_var_cols
-                    [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables]          
+                    [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables]     
                 if row['population_coeff']:
-                    param_name = row['model_coeff'] + "_pop"
-                    mlflow.log_param(f'{param_name}__idx', idx)
+                    param_name = row['log_name']
                     loggables = non_subj_cols
-                    [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables] 
+                    [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables]
                 if row['model_error']:
-                    param_name = row['model_coeff'] + "_const"
-                    mlflow.log_param(f'{param_name}__idx', idx)
+                    param_name = row['log_name']
                     loggables = non_subj_cols
                     [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables]
                 if row['subject_level_intercept']:
-                    param_name = row['model_coeff'] + "__subj_effect"
-                    mlflow.log_param(f'{param_name}__idx', idx)
+                    param_name = row['subject_level_intercept_name']
                     loggables = subj_eff_cols
                     [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables]
                     
@@ -2484,8 +2501,15 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
 
             mlflow.log_param('scipy_version', scipy.__version__)
             mlflow.log_param('scipy_minimize_method', self.minimize_method)
+            mlflow.log_text(scipy.optimize.show_options('minimize', self.minimize_method, False), 'minimize_options.txt')
             
+            mlflow.log_param('minimize_tol', self.optimzer_tol)
+            mlflow.log_param('n_optimized_params', self.n_optimized_coeff)
             
+            mlflow.log_param('model_has_subj_effects', model_has_subj_level_effects)
+            
+            mlf_callback = MLflowCallback(objective_name=mlflow_loss.__name__, 
+                                          parameter_names=fit_result_summary['log_name'].values)
             self.fit_result_ = optimize_with_checkpoint_joblib(
                 objective_function,
                 init_params,
@@ -2496,8 +2520,15 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 minimize_method=self.minimize_method,
                 tol=self.optimzer_tol,
                 bounds=self.bounds,
+                callback = mlf_callback
+                
             )
             # hess_fun = nd.Hessian()
+            mlflow.log_metric(f"final_{mlflow_loss.__name__}", self.fit_result_.fun)
+            mlflow.log_metric('final_nfev', self.fit_result_.nfev)
+            mlflow.log_metric('final_nit', self.fit_result_.nit)
+            mlflow.log_metric('final_success', bool(self.fit_result_.success))
+            mlflow.log_text(str(self.fit_result_), 'OptimizeResult.txt')
             
             fit_result_summary["best_fit_param_val"] = pd.NA
             fit_result_summary["best_fit_param_val"] = fit_result_summary[
@@ -2505,9 +2536,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             ].astype(pd.Float64Dtype())
             fit_result_summary["best_fit_param_val"] = self.fit_result_.x
             self.fit_result_summary_ = fit_result_summary.copy()
+            mlflow.log_table(self.fit_result_summary_, 'fit_result_summary.json')
             # after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
             if len(omegas.values) > 0:
                 _ = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs)
+                mlflow.log_table(self.b_i_approx, 'subject_level_effects.json')
         return deepcopy(self)
 
     def _generate_fitted_model_name(self, ignore_fit_status=False):
