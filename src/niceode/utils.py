@@ -33,6 +33,8 @@ from mlflow.data.pandas_dataset import from_pandas
 from niceode.mlflow_utils import (get_class_source_without_docstrings,
                                   generate_class_contents_hash, 
                                   get_function_source_without_docstrings_or_comments)
+from typing import Type
+
 
 def debug_print(print_obj, debug=False):
     if debug:
@@ -1444,7 +1446,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         dose_col: str = None,
         time_col="TIME",
         solve_ode_at_time_col: str = None,
-        pk_model_class: PKBaseODE = None,
+        pk_model_class: Type[PKBaseODE] = None,
         ode_t0_cols: List[ODEInitVals] = None,
         ode_t0_time_val: int | float = 0,
         population_coeff: List[PopulationCoeffcient] = [
@@ -1476,7 +1478,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.batch_id = uuid.uuid4() if batch_id is None else batch_id
         self.model_id = uuid.uuid4() if model_id is None else model_id
         self.model_name = model_name
-        self.pk_model_class = pk_model_class
+        self._pk_model_class = pk_model_class
+        self.pk_model_class = pk_model_class()
         self.pk_model_function = self.pk_model_class.ode
         dep_vars = {} if dep_vars is None else dep_vars
         population_coeff = [] if population_coeff is None else population_coeff
@@ -2426,11 +2429,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             
             
             
-            ode_class_str = get_class_source_without_docstrings(self.pk_model_class)
+            ode_class_str = get_class_source_without_docstrings(self._pk_model_class)
             mlflow.log_text(ode_class_str, 'ode_definition.py')
             mlflow.log_param('ode_definition_hash',
                              generate_class_contents_hash(ode_class_str))
-            mlflow.log_param('ode_class_name', self.pk_model_class.__name__)
+            mlflow.log_param('ode_class_name', self._pk_model_class.__name__)
             
             loss_str = get_function_source_without_docstrings_or_comments(mlflow_loss)
             mlflow.log_text(loss_str, 'loss_definition.py')

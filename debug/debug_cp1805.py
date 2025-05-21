@@ -154,7 +154,7 @@ me_mod_fo =  CompartmentalModel(
                                    no_me_loss_function=neg2_log_likelihood_loss, 
                                    no_me_loss_needs_sigma=True,
                                    optimizer_tol=None, 
-                                   pk_model_class=OneCompartmentAbsorption(), 
+                                   pk_model_class=OneCompartmentAbsorption, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
                                                                           , optimization_init_val=.5
@@ -165,6 +165,7 @@ me_mod_fo =  CompartmentalModel(
                                    batch_id='mlflow_test_batch',
                                    minimize_method = 'COBYQA'
                                    )
+#%%
 fit_model = True
 if fit_model:
     me_mod_fo = me_mod_fo.fit2(df_oral, )
