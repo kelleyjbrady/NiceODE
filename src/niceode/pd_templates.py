@@ -24,7 +24,7 @@ class InitValsPd:
     
 
     def df(self):
-        df = pd.DataFrame({c:self.data for c in self.__dataclass_fields__ })
+        df = pd.DataFrame({c:self.__dict__[c] for c in self.__dataclass_fields__ })
         return df.copy()
     
 
