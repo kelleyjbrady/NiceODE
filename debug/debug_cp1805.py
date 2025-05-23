@@ -166,7 +166,7 @@ me_mod_fo =  CompartmentalModel(
                                    minimize_method = 'COBYQA'
                                    )
 #%%
-fit_model = True
+fit_model = False
 if fit_model:
     me_mod_fo = me_mod_fo.fit2(df_oral, )
 else:
@@ -177,7 +177,7 @@ piv_cols.append(me_mod_fo.model_name)
 me_mod_fo.save_fitted_model(jb_file_name = me_mod_fo.model_name)
 
 #%%
-fit_indiv = True
+fit_indiv = False
 if fit_indiv:
     fits = []
     fit_res_dfs = []
@@ -231,7 +231,7 @@ me_mod_fo_dep =  CompartmentalModel(
                                    no_me_loss_function=neg2_log_likelihood_loss, 
                                    no_me_loss_needs_sigma=True,
                                    optimizer_tol=None, 
-                                   pk_model_class=OneCompartmentAbsorption(), 
+                                   pk_model_class=OneCompartmentAbsorption, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
                                                                           , optimization_init_val=.5
