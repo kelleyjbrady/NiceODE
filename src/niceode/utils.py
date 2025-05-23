@@ -1795,21 +1795,22 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     ):
         thetas = pd.DataFrame()
         theta_data = pd.DataFrame()
+        ivc = self.init_vals_pd_cols
         for idx, row in model_param_dep_vars.iterrows():
-            coeff_name = row["model_coeff"]
-            theta_name = row["model_coeff_dep_var"]
-            theta_is_allometric = row["allometric"]
+            coeff_name = row[ivc.model_coeff]
+            theta_name = row[ivc.model_coeff_dep_var]
+            theta_is_allometric = row[ivc.allometric]
             col = (coeff_name, theta_name)
             if col not in thetas.columns:
                 thetas[col] = [np.nan]
                 thetas[col] = thetas[col].astype(pd.Float64Dtype())
-            thetas[col] = [row["init_val"]]
+            thetas[col] = [row[ivc.init_val]]
             if col not in theta_data.columns:
                 theta_data[col] = np.repeat(np.nan, len(subject_data))
                 theta_data[col] = thetas[col].astype(pd.Float64Dtype())
             if theta_is_allometric:
                 theta_data_col = safe_signed_log(
-                    subject_data[theta_name].values / row["allometric_norm_value"]
+                    subject_data[theta_name].values / row[ivc.allometric_norm_value]
                 )
             else:
                 theta_data_col = subject_data[theta_name].values
@@ -1826,42 +1827,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         )
         return thetas, theta_data
 
-    def _unpack_prepare_thetas2(
-        self, model_param_dep_vars: pd.DataFrame, subject_data: pd.DataFrame
-    ):
-        #required_cols = 
-        thetas = pd.DataFrame()
-        theta_data = pd.DataFrame()
-        for idx, row in model_param_dep_vars.iterrows():
-            coeff_name = row["model_coeff"]
-            theta_name = row["model_coeff_dep_var"]
-            theta_is_allometric = row["allometric"]
-            col = (coeff_name, theta_name)
-            if col not in thetas.columns:
-                thetas[col] = [np.nan]
-                thetas[col] = thetas[col].astype(pd.Float64Dtype())
-            thetas[col] = [row["init_val"]]
-            if col not in theta_data.columns:
-                theta_data[col] = np.repeat(np.nan, len(subject_data))
-                theta_data[col] = thetas[col].astype(pd.Float64Dtype())
-            if theta_is_allometric:
-                theta_data_col = safe_signed_log(
-                    subject_data[theta_name].values / row["allometric_norm_value"]
-                )
-            else:
-                theta_data_col = subject_data[theta_name].values
-            theta_data[col] = theta_data_col
-        thetas.columns = (
-            pd.MultiIndex.from_tuples(thetas.columns)
-            if len(thetas.columns) > 0
-            else thetas.columns
-        )
-        theta_data.columns = (
-            pd.MultiIndex.from_tuples(theta_data.columns)
-            if len(theta_data.columns) > 0
-            else theta_data.columns
-        )
-        return thetas, theta_data
     
     #@profile
     def _unpack_prepare_pop_coeffs(self, model_params: pd.DataFrame):
@@ -1960,12 +1925,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         )
         # n_subs = len(subs)
         init_vals = self.init_vals_pd.copy()
-        init_vals["init_val"] = init_vals["init_val"].fillna(0.0)
-        model_params = init_vals.loc[init_vals["population_coeff"], :]
+        ivc = self.init_vals_pd_cols
+        #init_val should never be null, but just to be safe
+        init_vals[ivc.init_val] = init_vals[ivc.init_val].fillna(0.0)
+        model_params = init_vals.loc[init_vals[ivc.population_coeff], :]
         self.n_population_coeff = len(model_params)
         model_param_dep_vars = init_vals.loc[
-            (init_vals["population_coeff"] == False)
-            & (init_vals["model_error"] == False),
+            (init_vals[ivc.population_coeff] == False)
+            & (init_vals[ivc.model_error] == False),
             :,
         ]
 
@@ -1996,78 +1963,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             theta_data.copy(),
         )
     
-    def _assemble_pred_matrices2(self, data):
-        subject_id_c = self.groupby_col
-        conc_at_time_c = self.conc_at_time_col
-        time_col = deepcopy(self.time_col)
-        data = data.reset_index(drop=True).copy()
-        self.data = data.copy()
-        subject_data = data.drop_duplicates(subset=subject_id_c, keep="first").copy()
-        self.subject_data = subject_data.copy()
-        if self.solve_ode_at_time_col is None:
-            ode_data = data.copy()
-        else:
-            ode_data = data.loc[data[self.solve_ode_at_time_col], :]
-        # ode data is 'fixed' from here forward
-        self.ode_data = ode_data.copy()
-        verbose = self.verbose
-
-        self.unique_groups = subject_data[
-            subject_id_c
-        ].unique()  # list of unique subjects in order
-        self.y_groups = ode_data[
-            subject_id_c
-        ].to_numpy()  # subjects in order, repeated n timepoints time per subject
-        self.y = ode_data[conc_at_time_c].to_numpy(dtype=np.float64)
-
-        # y0 is the fist y where ODE solutions are generated, this may or may not be the solution to the ODE at t0
-        # In the case of a model without absorption if all timepoints before
-        first_pred_t_df = ode_data.drop_duplicates(subset=subject_id_c, keep="first")
-        self.subject_y0 = first_pred_t_df[conc_at_time_c].to_numpy(dtype=np.float64)
-        self.subject_y0_idx = np.array(first_pred_t_df.index.values, dtype=np.int64)
-        ode_init_val_cols = [i.column_name for i in self.ode_t0_cols]
-        self.ode_t0_vals = subject_data[ode_init_val_cols].reset_index(drop=True).copy()
-        self.ode_t0_vals_are_subject_y0 = np.all(
-            self.subject_y0 == self.ode_t0_vals.iloc[:, 0]
-        )
-        # n_subs = len(subs)
-        init_vals = self.init_vals_pd2.df().copy()
-        alt_init = deepcopy(self.init_vals_pd2)
-        model_params = init_vals.loc[self.init_vals_pd2.population_coeff, :]
-        self.n_population_coeff = len(model_params)
-        model_param_dep_vars = init_vals.loc[
-            (self.init_vals_pd2.population_coeff == False)
-            & (self.init_vals_pd2.model_error == False),
-            :,
-        ]
-        
-
-        self._homongenize_timepoints(ode_data, subject_data, subject_id_c, time_col)
-        thetas, theta_data = self._unpack_prepare_thetas(
-            model_param_dep_vars, subject_data
-        )
-        pop_coeffs, subject_level_intercept_info = self._unpack_prepare_pop_coeffs(
-            model_params
-        )
-        subject_level_intercept_sds = subject_level_intercept_info[0]
-        subject_level_intercept_init_vals = subject_level_intercept_info[
-            1
-        ]  # this is so bad, fast tho
-        self.subject_level_intercept_init_vals = (
-            subject_level_intercept_init_vals.copy()
-        )
-        self.n_subject_level_intercept_sds = len(subject_level_intercept_sds.columns)
-
-        self.subject_level_intercept_sds = deepcopy(subject_level_intercept_sds)
-        self.init_pop_coeffs = deepcopy(pop_coeffs)
-        self.init_thetas = deepcopy(thetas)
-        # this is too many things to return in this manner
-        return (
-            pop_coeffs.copy(),
-            subject_level_intercept_sds.copy(),
-            thetas.copy(),
-            theta_data.copy(),
-        )
 
     #@profile
     def _generate_pk_model_coeff_vectorized(
