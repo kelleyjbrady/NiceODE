@@ -37,6 +37,7 @@ from .mlflow_utils import (get_class_source_without_docstrings,
                                   get_function_source_without_docstrings_or_comments, 
                                   MLflowCallback)
 from typing import Type
+from .pd_templates import InitValsPdCols
 
 
 def debug_print(print_obj, debug=False):
@@ -1529,6 +1530,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
 
         # helper attributes possibly defined later
         self.fit_result_ = None
+        self.init_vals_pd_cols = InitValsPdCols()
 
     def _initalize_mlflow_experiment(self, ):
         #this seems very brittle . . .
@@ -1554,116 +1556,57 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     def _unpack_init_vals2(
         self,
     ):
-        from .pd_templates import InitValsPd
+        
 
         init_vals = [obj.optimization_init_val for obj in self.population_coeff]
-        init_vals_pd = InitValsPd()
+        init_vals_pd = []
+        cols = self.init_vals_pd_cols
         subject_intercept_detected = False
         for pop_coeff in self.population_coeff:
             if pop_coeff.subject_level_intercept:
                 subject_intercept_detected = True
-            init_vals_pd.model_coeff = np.append(
-                init_vals_pd.model_coeff, pop_coeff.coeff_name
-            )
-            init_vals_pd.log_name = np.append(
-                init_vals_pd.log_name, pop_coeff.coeff_name + "_pop"
-            )
-            init_vals_pd.model_coeff_dep_var = np.append(
-                init_vals_pd.model_coeff_dep_var, None
-            )
-            init_vals_pd.population_coeff = np.append(
-                init_vals_pd.population_coeff, True
-            )
-            init_vals_pd.model_error = np.append(init_vals_pd.model_error, False)
-            init_vals_pd.init_val = np.append(
-                init_vals_pd.init_val, pop_coeff.optimization_init_val
-            )
-            init_vals_pd.model_coeff_lower_bound = np.append(
-                init_vals_pd.model_coeff_lower_bound, pop_coeff.optimization_lower_bound
-            )
-            init_vals_pd.model_coeff_upper_bound = np.append(
-                init_vals_pd.model_coeff_upper_bound, pop_coeff.optimization_upper_bound
-            )
-            init_vals_pd.allometric = np.append(init_vals_pd.allometric, False)
-            init_vals_pd.allometric_norm_value = np.append(
-                init_vals_pd.allometric_norm_value, None
-            )
-            init_vals_pd.subject_level_intercept = np.append(
-                init_vals_pd.subject_level_intercept, pop_coeff.subject_level_intercept
-            )
-            init_vals_pd.subject_level_intercept_name = np.append(
-                init_vals_pd.subject_level_intercept_name,
-                pop_coeff.subject_level_intercept_sd_name,
-            )
-            init_vals_pd.subject_level_intercept_sd_init_val = np.append(
-                init_vals_pd.subject_level_intercept_sd_init_val,
-                pop_coeff.subject_level_intercept_sd_init_val,
-            )
-            init_vals_pd.subject_level_intercept_init_vals_column_name = np.append(
-                init_vals_pd.subject_level_intercept_init_vals_column_name,
-                pop_coeff.subject_level_intercept_init_vals_column_name,
-            )
-            init_vals_pd.subject_level_intercect_sd_lower_bound = np.append(
-                init_vals_pd.subject_level_intercect_sd_lower_bound,
-                pop_coeff.subject_level_intercept_sd_lower_bound,
-            )
-            init_vals_pd.subject_level_intercect_sd_upper_bound = np.append(
-                init_vals_pd.subject_level_intercect_sd_upper_bound,
-                pop_coeff.subject_level_intercept_sd_upper_bound,
+            init_vals_pd.append(
+                {
+                    cols.model_coeff: pop_coeff.coeff_name,
+                    cols.log_name:pop_coeff.coeff_name + "_pop",
+                    cols.model_coeff_dep_var: None,
+                    cols.population_coeff: True,
+                    cols.model_error: False,
+                    cols.init_val: pop_coeff.optimization_init_val,
+                    cols.model_coeff_lower_bound: pop_coeff.optimization_lower_bound,
+                    cols.model_coeff_upper_bound: pop_coeff.optimization_upper_bound,
+                    cols.allometric: False,
+                    cols.allometric_norm_value: None,
+                    cols.subject_level_intercept: pop_coeff.subject_level_intercept,
+                    cols.subject_level_intercept_name: pop_coeff.subject_level_intercept_sd_name,
+                    cols.subject_level_intercept_sd_init_val: pop_coeff.subject_level_intercept_sd_init_val,
+                    cols.subject_level_intercept_init_vals_column_name: pop_coeff.subject_level_intercept_init_vals_column_name,
+                    cols.subject_level_intercect_sd_lower_bound: pop_coeff.subject_level_intercept_sd_lower_bound,
+                    cols.subject_level_intercect_sd_upper_bound: pop_coeff.subject_level_intercept_sd_upper_bound,
+                }
             )
         if subject_intercept_detected or self.no_me_loss_needs_sigma:
-            init_vals_pd.model_coeff = np.append(
-                init_vals_pd.model_coeff, self.model_error_sigma.coeff_name
+            init_vals_pd.append(
+                {
+                    cols.model_coeff: self.model_error_sigma.coeff_name,
+                    cols.log_name:self.model_error_sigma.coeff_name + '_const',
+                    cols.model_coeff_dep_var: None,
+                    cols.population_coeff: False,
+                    cols.model_error: True,
+                    cols.init_val: self.model_error_sigma.optimization_init_val,
+                    cols.model_coeff_lower_bound: self.model_error_sigma.optimization_lower_bound,
+                    cols.model_coeff_upper_bound: self.model_error_sigma.optimization_upper_bound,
+                    cols.allometric: False,
+                    cols.allometric_norm_value: None,
+                    cols.subject_level_intercept: self.model_error_sigma.subject_level_intercept,
+                    cols.subject_level_intercept_name: self.model_error_sigma.subject_level_intercept_sd_name,
+                    cols.subject_level_intercept_sd_init_val: self.model_error_sigma.subject_level_intercept_sd_init_val,
+                    cols.subject_level_intercept_init_vals_column_name: self.model_error_sigma.subject_level_intercept_init_vals_column_name,
+                    cols.subject_level_intercect_sd_lower_bound: self.model_error_sigma.subject_level_intercept_sd_lower_bound,
+                    cols.subject_level_intercect_sd_upper_bound: self.model_error_sigma.subject_level_intercept_sd_upper_bound,
+                }
             )
-            init_vals_pd.log_name = np.append(
-                init_vals_pd.log_name, self.model_error_sigma.coeff_name + "_const"
-            )
-            init_vals_pd.model_coeff_dep_var = np.append(
-                init_vals_pd.model_coeff_dep_var, None
-            )
-            init_vals_pd.population_coeff = np.append(
-                init_vals_pd.population_coeff, False
-            )
-            init_vals_pd.model_error = np.append(init_vals_pd.model_error, True)
-            init_vals_pd.init_val = np.append(
-                init_vals_pd.init_val, self.model_error_sigma.optimization_init_val
-            )
-            init_vals_pd.model_coeff_lower_bound = np.append(
-                init_vals_pd.model_coeff_lower_bound,
-                self.model_error_sigma.optimization_lower_bound,
-            )
-            init_vals_pd.model_coeff_upper_bound = np.append(
-                init_vals_pd.model_coeff_upper_bound,
-                self.model_error_sigma.optimization_upper_bound,
-            )
-            init_vals_pd.allometric = np.append(init_vals_pd.allometric, False)
-            init_vals_pd.allometric_norm_value = np.append(
-                init_vals_pd.allometric_norm_value, None
-            )
-            init_vals_pd.subject_level_intercept = np.append(
-                init_vals_pd.subject_level_intercept,
-                self.model_error_sigma.subject_level_intercept,
-            )
-            init_vals_pd.subject_level_intercept_name = np.append(
-                init_vals_pd.subject_level_intercept_name,
-                self.model_error_sigma.subject_level_intercept_sd_name,
-            )
-            init_vals_pd.subject_level_intercept_sd_init_val = np.append(
-                init_vals_pd.subject_level_intercept_sd_init_val,
-                self.model_error_sigma.subject_level_intercept_sd_init_val,
-            )
-            init_vals_pd.subject_level_intercept_init_vals_column_name = np.append(
-                init_vals_pd.subject_level_intercept_init_vals_column_name,
-                self.model_error_sigma.subject_level_intercept_init_vals_column_name,
-            )
-            init_vals_pd.subject_level_intercect_sd_lower_bound = np.append(
-                init_vals_pd.subject_level_intercect_sd_lower_bound,
-                self.model_error_sigma.subject_level_intercept_sd_lower_bound,
-            )
-            init_vals_pd.subject_level_intercect_sd_upper_bound = np.append(
-                init_vals_pd.subject_level_intercect_sd_upper_bound,
-                self.model_error_sigma.subject_level_intercept_sd_upper_bound,
-            )
+        # unpack the dep vars for the population coeffs
         for model_coeff in self.dep_vars:
             coeff_dep_vars = self.dep_vars[model_coeff]
             init_vals.extend(
@@ -1674,59 +1617,30 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 ]
             )
             for coeff_dep_var in coeff_dep_vars:
-                init_vals_pd.model_coeff = np.append(
-                    init_vals_pd.model_coeff, model_coeff
+                init_vals_pd.append(
+                    {
+                        cols.model_coeff: model_coeff,
+                        cols.log_name: model_coeff + '__' + coeff_dep_var.column_name,
+                        cols.model_coeff_dep_var: coeff_dep_var.column_name,
+                        cols.population_coeff: False,
+                        cols.model_error: False,
+                        cols.init_val: coeff_dep_var.optimization_init_val,
+                        cols.model_coeff_lower_bound: coeff_dep_var.optimization_lower_bound,
+                        cols.model_coeff_upper_bound: coeff_dep_var.optimization_upper_bound,
+                        cols.allometric: True
+                        if coeff_dep_var.model_method == 'allometric'
+                        else False,
+                        cols.allometric_norm_value: coeff_dep_var.allometric_norm_value,
+                        cols.subject_level_intercept: False,
+                        cols.subject_level_intercept_name: None,
+                        cols.subject_level_intercept_sd_init_val: False,
+                        cols.subject_level_intercept_init_vals_column_name: None,
+                        cols.subject_level_intercect_var_lower_bound: None,
+                        cols.subject_level_intercect_var_upper_bound: None,
+                    }
                 )
-                init_vals_pd.log_name = np.append(
-                    init_vals_pd.log_name,
-                    model_coeff + "__" + coeff_dep_var.column_name,
-                )
-                init_vals_pd.model_coeff_dep_var = np.append(
-                    init_vals_pd.model_coeff_dep_var, coeff_dep_var.column_name
-                )
-                init_vals_pd.population_coeff = np.append(
-                    init_vals_pd.population_coeff, False
-                )
-                init_vals_pd.model_error = np.append(init_vals_pd.model_error, False)
-                init_vals_pd.init_val = np.append(
-                    init_vals_pd.init_val, coeff_dep_var.optimization_init_val
-                )
-                init_vals_pd.model_coeff_lower_bound = np.append(
-                    init_vals_pd.model_coeff_lower_bound,
-                    coeff_dep_var.optimization_lower_bound,
-                )
-                init_vals_pd.model_coeff_upper_bound = np.append(
-                    init_vals_pd.model_coeff_upper_bound,
-                    coeff_dep_var.optimization_upper_bound,
-                )
-                init_vals_pd.allometric = np.append(
-                    init_vals_pd.allometric,
-                    True if coeff_dep_var.model_method == "allometric" else False,
-                )
-                init_vals_pd.allometric_norm_value = np.append(
-                    init_vals_pd.allometric_norm_value,
-                    coeff_dep_var.allometric_norm_value,
-                )
-                init_vals_pd.subject_level_intercept = np.append(
-                    init_vals_pd.subject_level_intercept, False
-                )
-                init_vals_pd.subject_level_intercept_name = np.append(
-                    init_vals_pd.subject_level_intercept_name, None
-                )
-                init_vals_pd.subject_level_intercept_sd_init_val = np.append(
-                    init_vals_pd.subject_level_intercept_sd_init_val, False
-                )
-                init_vals_pd.subject_level_intercept_init_vals_column_name = np.append(
-                    init_vals_pd.subject_level_intercept_init_vals_column_name, None
-                )
-                init_vals_pd.subject_level_intercect_var_lower_bound = np.append(
-                    init_vals_pd.subject_level_intercect_var_lower_bound, None
-                )
-                init_vals_pd.subject_level_intercect_var_upper_bound = np.append(
-                    init_vals_pd.subject_level_intercect_var_upper_bound, None
-                )
-        self.init_vals_pd2 = deepcopy(init_vals_pd)
-        self.n_optimized_coeff2 = len(init_vals)
+        self.init_vals_pd = pd.DataFrame(init_vals_pd)
+        self.n_optimized_coeff = len(init_vals)
         return np.array(init_vals, dtype=np.float64)
 
     def _unpack_init_vals(
@@ -1998,6 +1912,43 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         )
         return thetas, theta_data
 
+    def _unpack_prepare_thetas2(
+        self, model_param_dep_vars: pd.DataFrame, subject_data: pd.DataFrame
+    ):
+        required_cols = 
+        thetas = pd.DataFrame()
+        theta_data = pd.DataFrame()
+        for idx, row in model_param_dep_vars.iterrows():
+            coeff_name = row["model_coeff"]
+            theta_name = row["model_coeff_dep_var"]
+            theta_is_allometric = row["allometric"]
+            col = (coeff_name, theta_name)
+            if col not in thetas.columns:
+                thetas[col] = [np.nan]
+                thetas[col] = thetas[col].astype(pd.Float64Dtype())
+            thetas[col] = [row["init_val"]]
+            if col not in theta_data.columns:
+                theta_data[col] = np.repeat(np.nan, len(subject_data))
+                theta_data[col] = thetas[col].astype(pd.Float64Dtype())
+            if theta_is_allometric:
+                theta_data_col = safe_signed_log(
+                    subject_data[theta_name].values / row["allometric_norm_value"]
+                )
+            else:
+                theta_data_col = subject_data[theta_name].values
+            theta_data[col] = theta_data_col
+        thetas.columns = (
+            pd.MultiIndex.from_tuples(thetas.columns)
+            if len(thetas.columns) > 0
+            else thetas.columns
+        )
+        theta_data.columns = (
+            pd.MultiIndex.from_tuples(theta_data.columns)
+            if len(theta_data.columns) > 0
+            else theta_data.columns
+        )
+        return thetas, theta_data
+    
     #@profile
     def _unpack_prepare_pop_coeffs(self, model_params: pd.DataFrame):
         pop_coeffs = pd.DataFrame()
@@ -2166,15 +2117,16 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             self.subject_y0 == self.ode_t0_vals.iloc[:, 0]
         )
         # n_subs = len(subs)
-        init_vals = self.init_vals_pd.df().copy()
-        init_vals["init_val"] = init_vals["init_val"].fillna(0.0)
-        model_params = init_vals.loc[init_vals["population_coeff"], :]
+        init_vals = self.init_vals_pd2.df().copy()
+        alt_init = deepcopy(self.init_vals_pd2)
+        model_params = init_vals.loc[self.init_vals_pd2.population_coeff, :]
         self.n_population_coeff = len(model_params)
         model_param_dep_vars = init_vals.loc[
-            (init_vals["population_coeff"] == False)
-            & (init_vals["model_error"] == False),
+            (self.init_vals_pd2.population_coeff == False)
+            & (self.init_vals_pd2.model_error == False),
             :,
         ]
+        
 
         self._homongenize_timepoints(ode_data, subject_data, subject_id_c, time_col)
         thetas, theta_data = self._unpack_prepare_thetas(

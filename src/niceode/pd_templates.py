@@ -26,7 +26,27 @@ class InitValsPd:
     def df(self):
         df = pd.DataFrame({c:self.__dict__[c] for c in self.__dataclass_fields__ })
         return df.copy()
-    
+
+@dataclass
+class InitValsPdCols:
+
+    model_coeff:str = "model_coeff" 
+    log_name:str = "log_name" 
+    model_coeff_dep_var:str = "model_coeff_dep_var" 
+    population_coeff:str = "population_coeff" 
+    model_error:str = "model_error" 
+    init_val:str = "init_val" 
+    model_coeff_lower_bound:str = "model_coeff_lower_bound" 
+    model_coeff_upper_bound:str = "model_coeff_upper_bound" 
+    allometric:str = "allometric" 
+    allometric_norm_value:str = "allometric_norm_value" 
+    subject_level_intercept:str = "subject_level_intercept" 
+    subject_level_intercept_name:str = "subject_level_intercept_name" 
+    subject_level_intercept_sd_init_val:str = "subject_level_intercept_sd_init_val" 
+    subject_level_intercept_init_vals_column_name:str = "subject_level_intercept_init_vals_column_name" 
+    subject_level_intercect_sd_lower_bound:str = "subject_level_intercect_sd_lower_bound" 
+    subject_level_intercect_sd_upper_bound:str = "subject_level_intercect_sd_upper_bound" 
+
 
         
 
