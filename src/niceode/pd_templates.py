@@ -46,6 +46,10 @@ class InitValsPdCols:
     subject_level_intercept_init_vals_column_name:str = "subject_level_intercept_init_vals_column_name" 
     subject_level_intercect_sd_lower_bound:str = "subject_level_intercect_sd_lower_bound" 
     subject_level_intercect_sd_upper_bound:str = "subject_level_intercect_sd_upper_bound" 
+    
+    def validate_df_row(self,df_row_dict:dict):
+        
+        np.all([i for i in df_row_dict], [i for i in self.__dataclass_fields__])
 
 
         
