@@ -1650,7 +1650,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.population_coeff = population_coeff
         self.dep_vars = dep_vars
         self.init_vals = self._unpack_init_vals()
-        init_vals_pd_alt = self._unpack_init_vals2()
+        self.init_vals_pd_alt = self._unpack_init_vals2()
+        self.result_template = self._initialize_result_template(self.init_vals_pd_alt)
+        
         self.bounds = self._unpack_upper_lower_bounds(self.model_error_sigma)
         self.no_me_loss_params = no_me_loss_params
         self.optimzer_tol = optimizer_tol
@@ -1658,6 +1660,90 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         # helper attributes possibly defined later
         self.fit_result_ = None
 
+    def _initialize_result_template(self, init_vals_pd):
+        #pop_coeffs
+        cols = self.init_vals_pd_cols
+        pop_coeff_rows = init_vals_pd.loc[init_vals_pd[cols.population_coeff]]
+        result_rows = []
+        for idx, row in pop_coeff_rows.iterrows():
+            result_rows.append(
+                {
+                "model_coeff": row[cols.model_coeff],
+                "log_name":row[cols.log_name],
+                "population_coeff": True,
+                "model_error": False,
+                "subject_level_intercept": False,
+                "coeff_dep_var": False,
+                "model_coeff_dep_var": None,
+                "subject_level_intercept_name": None,
+                "init_val":row[cols.init_val],
+                "lower_bound":row[cols.model_coeff_lower_bound],
+                "upper_bound":row[cols.model_coeff_upper_bound]
+                }
+            )
+            
+        c1 = self.no_me_loss_needs_sigma
+        c2 = self._subject_intercept_detected
+        model_error_rows = init_vals_pd.loc[init_vals_pd[cols.model_error]]
+        if c1 or c2 or len(model_error_rows) > 0:
+            for idx, row in model_error_rows.iterrows():
+                result_rows.append(
+                    {
+                    "model_coeff": row[cols.model_coeff],
+                    "log_name":row[cols.log_name],
+                    "population_coeff": False,
+                    "model_error": True,
+                    "subject_level_intercept": False,
+                    "coeff_dep_var": False,
+                    "model_coeff_dep_var": None,
+                    "subject_level_intercept_name": None,
+                    "init_val":row[cols.init_val],
+                    "lower_bound":row[cols.model_coeff_lower_bound],
+                    "upper_bound":row[cols.model_coeff_upper_bound]
+                    }
+                )
+        
+        omega_rows = init_vals_pd.loc[init_vals_pd[cols.subject_level_intercept]]
+        for idx, row in omega_rows.iterrows():
+            result_rows.append(
+                {
+                        "model_coeff": row[cols.model_coeff],
+                        "log_name": row[cols.subject_level_intercept_name],
+                        "population_coeff": False,
+                        "model_error": False,
+                        "subject_level_intercept": True,
+                        "coeff_dep_var": False,
+                        "model_coeff_dep_var": None,
+                        "subject_level_intercept_name": row[cols.subject_level_intercept_name],
+                        "init_val":row[cols.subject_level_intercept_sd_init_val],
+                        "lower_bound":row[cols.subject_level_intercect_sd_lower_bound],
+                        "upper_bound":row[cols.subject_level_intercect_sd_upper_bound]
+                    }
+                
+            )
+        theta_rows = (init_vals_pd.loc[
+            init_vals_pd[cols.model_coeff_dep_var].isnull() == False
+        ])
+        for idx, row in theta_rows.iterrows():
+            result_rows.append(
+                 {
+                        "model_coeff": row[cols.model_coeff],
+                        "log_name": row[cols.log_name],
+                        "population_coeff": False,
+                        "model_error": False,
+                        "subject_level_intercept": False,
+                        "coeff_dep_var": True,
+                        "model_coeff_dep_var": row[cols.model_coeff_dep_var],
+                        "subject_level_intercept_name": None,
+                        "init_val":row[cols.init_val], 
+                        "lower_bound":row[cols.model_coeff_lower_bound],
+                        "upper_bound":row[cols.model_coeff_upper_bound]
+                        
+                    }
+            )
+        return pd.DataFrame(result_rows)
+        
+             
 
     def _initalize_mlflow_experiment(self, ):
         #this seems very brittle . . .
@@ -1712,6 +1798,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             except AttributeError:
                 c = init_vals_pd.columns[c_idx]
                 init_vals_pd.loc[:, [c]] = init_vals_pd.loc[:, [c]].astype(target_dtype)
+        self._subject_intercept_detected  = subject_intercept_detected
         return init_vals_pd.reset_index(drop = True)
     
     def _unpack_init_vals(
