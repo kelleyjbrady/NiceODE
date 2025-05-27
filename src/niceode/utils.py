@@ -166,7 +166,9 @@ class ObjectiveFunctionColumn:
                         cols.subject_level_intercect_sd_lower_bound: None,
                         cols.subject_level_intercect_sd_upper_bound: None,
                     }
-        np.isin([i for i in row_data], ini)
+        row_data = cols.validate_df_row(row_data)
+        pd_row = (pd.DataFrame([row_data], ))
+        return pd_row.copy()
 
 
 @dataclass
@@ -230,7 +232,8 @@ class PopulationCoeffcient:
                 cols.subject_level_intercect_sd_lower_bound: self.subject_level_intercept_sd_lower_bound,
                 cols.subject_level_intercect_sd_upper_bound: self.subject_level_intercept_sd_upper_bound,
                 }
-        pd_row = pd.DataFrame(row_data, dtypes = [type(row_data[r]) for r in row_data])
+        row_data = cols.validate_df_row(row_data)
+        pd_row = (pd.DataFrame([row_data], ))
         return pd_row.copy()
 
 
@@ -298,7 +301,8 @@ class ModelError:
                     cols.subject_level_intercect_sd_lower_bound: self.subject_level_intercept_sd_lower_bound,
                     cols.subject_level_intercect_sd_upper_bound: self.subject_level_intercept_sd_upper_bound,
                 }
-        pd_row = pd.DataFrame(row_data, dtypes = [type(row_data[r]) for r in row_data])
+        row_data = cols.validate_df_row(row_data)
+        pd_row = (pd.DataFrame([row_data], ))
         return pd_row.copy()
 
 @dataclass
@@ -1194,10 +1198,7 @@ def arbitrary_objective_function(
     conc_at_time_c="DV",
     time_c="TIME",
     population_coeff=["k", "vd"],
-    dep_vars={
-        "k": [ObjectiveFunctionColumn("mgkg"), ObjectiveFunctionColumn("age")],
-        "vd": [ObjectiveFunctionColumn("mgkg"), ObjectiveFunctionColumn("age")],
-    },
+    dep_vars=None,
     verbose=False,
     parallel=False,
 ):
@@ -1582,10 +1583,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             PopulationCoeffcient("k", 0.6),
             PopulationCoeffcient("vd", 2.0),
         ],
-        dep_vars: Dict[str, List[ObjectiveFunctionColumn]] = {
-            "k": [ObjectiveFunctionColumn("mgkg"), ObjectiveFunctionColumn("age")],
-            "vd": [ObjectiveFunctionColumn("mgkg"), ObjectiveFunctionColumn("age")],
-        },
+        dep_vars: Dict[str, List[ObjectiveFunctionColumn]] = None,
+        dep_vars2: List[ObjectiveFunctionColumn] = None,
         no_me_loss_function=neg2_log_likelihood_loss,
         no_me_loss_params={},
         no_me_loss_needs_sigma=True,
@@ -1596,6 +1595,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             optimization_lower_bound=1e-6,
             optimization_upper_bound=20,
         ),
+        model_error2:ModelError = None,
         optimizer_tol=None,
         verbose=False,
         ode_solver_method="RK45",
@@ -1639,7 +1639,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.no_me_loss_needs_sigma = no_me_loss_needs_sigma
         self.me_loss_function = me_loss_function
         # not sure if the section below needs to be in two places
-        
+        self.model_error2 = model_error2
+        self.dep_vars2 = dep_vars2
         for coef_obj in population_coeff:
             c = coef_obj.coeff_name
             if c not in (i for i in dep_vars):
@@ -1649,6 +1650,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.population_coeff = population_coeff
         self.dep_vars = dep_vars
         self.init_vals = self._unpack_init_vals()
+        init_vals_pd_alt = self._unpack_init_vals2()
         self.bounds = self._unpack_upper_lower_bounds(self.model_error_sigma)
         self.no_me_loss_params = no_me_loss_params
         self.optimzer_tol = optimizer_tol
@@ -1678,6 +1680,40 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         else:
             return ode_t0_vals
 
+    def _unpack_init_vals2(self, ):
+        init_vals_pd = []
+        init_vals_pop = []
+        init_vals_sigma = []
+        init_vals_theta = []
+        cols = self.init_vals_pd_cols
+        subject_intercept_detected = False
+        #pop_coeffs
+        for pop_coeff in self.population_coeff:
+            if pop_coeff.subject_level_intercept:
+                subject_intercept_detected = True
+            init_vals_pop.append(pop_coeff.to_pandas())
+        #then sigma
+        if subject_intercept_detected or self.no_me_loss_needs_sigma:
+            init_vals_sigma.append(self.model_error2.to_pandas())
+        #then thetas
+        for theta in self.dep_vars2:
+            init_vals_theta.append(theta.to_pandas())
+        init_vals_pd = init_vals_pop + init_vals_sigma + init_vals_theta
+        col_order = init_vals_pop[0].columns
+        init_vals_pd = pd.concat(init_vals_pd)[col_order].copy()
+        #self.n_optimized_coeff = len(init_vals)
+        init_vals_pd = init_vals_pd.fillna(pd.NA)
+        for c_idx, c in enumerate(cols.__dataclass_fields__):
+            target_dtype = cols.pd_dtypes[c_idx]
+            #this try except really seems to be a bug in pandas, iloc just
+            #doesnt work
+            try:
+                init_vals_pd.iloc[:, [c_idx]] = init_vals_pd.iloc[:, [c_idx]].astype(target_dtype)
+            except AttributeError:
+                c = init_vals_pd.columns[c_idx]
+                init_vals_pd.loc[:, [c]] = init_vals_pd.loc[:, [c]].astype(target_dtype)
+        return init_vals_pd.reset_index(drop = True)
+    
     def _unpack_init_vals(
         self,
     ):
@@ -1761,7 +1797,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         cols.allometric_norm_value: coeff_dep_var.allometric_norm_value,
                         cols.subject_level_intercept: False,
                         cols.subject_level_intercept_name: None,
-                        cols.subject_level_intercept_sd_init_val: False,
+                        cols.subject_level_intercept_sd_init_val: None,
                         cols.subject_level_intercept_init_vals_column_name: None,
                         cols.subject_level_intercect_sd_lower_bound: None,
                         cols.subject_level_intercect_sd_upper_bound: None,

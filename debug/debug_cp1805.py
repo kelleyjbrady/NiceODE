@@ -162,7 +162,7 @@ me_mod_fo =  CompartmentalModel(
                                                                           ,optimization_upper_bound=3
                                                                           ),
                                    #ode_solver_method='BDF'
-                                   batch_id='mlflow_test_batch3',
+                                   batch_id='>lflow_test_batch3',
                                    minimize_method = 'COBYQA'
                                    )
 #%%
