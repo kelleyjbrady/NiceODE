@@ -64,6 +64,8 @@ df["CONC_ng/L"] = df["CONC_ng/mL"] * 1e3
 df["DV_scale"] = df["CONC_ng/L"] / 1e6
 df["AMT_scale"] = df["DOSE_ng"] / 1e6
 df["sex_cat"] = np.where(df["SEX"] == "Male", 0, 1)
+df['sex_cat_tmp'] = df['sex_cat']
+df['WEIGHT_tmp'] = df['WEIGHT']
 # df['DV_scale'] = df['CONC'] / 1000.0 #ng/ml = mg/L, then scale down near
 # df['AMT_scale'] = df['DOSE'] / 1000 #mg, scale down
 # %%
@@ -131,8 +133,27 @@ me_mod_fo = CompartmentalModel(
                 column_name="WEIGHT",
                 allometric_norm_value=70,
                 model_method="allometric",
+            ),
+            ObjectiveFunctionColumn(
+                coeff_name = 'tmp',
+                column_name="sex_cat",
+                allometric_norm_value=70,
+                model_method="allometric",
             )
-        ]
+        ], 
+        "cl": [
+            ObjectiveFunctionColumn(
+                coeff_name = 'tmp',
+                column_name="WEIGHT_tmp",
+                allometric_norm_value=70,
+                model_method="allometric",
+            ),
+            ObjectiveFunctionColumn(
+                coeff_name = 'tmp',
+                column_name="sex_cat_tmp",
+            )
+        ],
+        
     },
     dep_vars2=[
         ObjectiveFunctionColumn(

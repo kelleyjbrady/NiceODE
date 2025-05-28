@@ -460,7 +460,7 @@ def estimate_cdiff_jac(
         )  # the central difference
     return J_cd
 
-
+#@profile
 def estimate_cdiff_jac_adaptive(
     pop_coeffs, thetas, theta_data, n_random_effects, omegas_names, y, model_obj
 ):
@@ -583,24 +583,26 @@ def estimate_jacobian(
     ]
     J_afp = None
     J_cd = None
+    J_cd_adap = None
+    use_nonadaptive = False
     if use_fprime:  # this method currently only works when there is only one pop_coeffs
         J_afp = estimate_fprime_jac(
             pop_coeffs, thetas, theta_data, apprx_fprime_j_cols_filt, y, model_obj
         )
     if use_cdiff:
-        # if use_adaptive:
-        J_cd_adap = estimate_cdiff_jac_adaptive(
-            pop_coeffs, thetas, theta_data, n_random_effects, omega_names, y, model_obj
-        )
-        # else:
-        J_cd = estimate_cdiff_jac(
-            pop_coeffs, thetas, theta_data, n_random_effects, omega_names, y, model_obj
-        )
-        if np.any(np.abs((J_cd_adap - J_cd)) > 1e-6):
-            debug_this = True
-        else:
-            J_cd = J_cd_adap
-    J = [i for i in [J_afp, J_cd] if i is not None][0]
+        if use_adaptive:
+            J_cd_adap = estimate_cdiff_jac_adaptive(
+                pop_coeffs, thetas, theta_data, n_random_effects, omega_names, y, model_obj
+            )
+        if use_nonadaptive: #for debugging
+            J_cd = estimate_cdiff_jac(
+                pop_coeffs, thetas, theta_data, n_random_effects, omega_names, y, model_obj
+            )
+        if use_adaptive and use_nonadaptive:
+            if np.any(np.abs((J_cd_adap - J_cd)) > 1e-6):
+                debug_this = True
+                
+    J = [i for i in [J_cd_adap,J_afp, J_cd] if i is not None][0]
     return J
 
 
@@ -1591,6 +1593,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         no_me_loss_params={},
         no_me_loss_needs_sigma=True,
         me_loss_function=FO_approx_ll_loss,
+        loss_summary_name = "neg2_loglikelihood",
         model_error_sigma: PopulationCoeffcient = PopulationCoeffcient(
             "sigma",
             optimization_init_val=0.2,
@@ -1605,6 +1608,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         batch_id: uuid.UUID = None,
         model_id: uuid.UUID = None,
     ):
+        self.loss_summary_name = loss_summary_name
         self.jax_ivp_solver_compiled = False 
         self.init_vals_pd_cols = InitValsPdCols()
         self.b_i_approx = None
@@ -1653,8 +1657,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.population_coeff = population_coeff
         self.dep_vars = dep_vars
         self.init_vals = self._unpack_init_vals()
-        self.init_vals_pd_alt = self._unpack_init_vals2()
-        self.result_template = self._initialize_result_template(self.init_vals_pd_alt)
+        #self.init_vals_pd_alt = self._unpack_init_vals2()
+        #self.result_template = self._initialize_result_template(self.init_vals_pd_alt)
         
         self.bounds = self._unpack_upper_lower_bounds(self.model_error_sigma)
         self.no_me_loss_params = no_me_loss_params
@@ -2223,35 +2227,46 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     def _generate_pk_model_coeff_vectorized(
         self, pop_coeffs, thetas, theta_data, expected_len_out=None
     ):
+        use_jax = False
         expected_len_out = (
-            len(self.subject_y0) if expected_len_out is None else expected_len_out
-        )
-        model_coeffs = pd.DataFrame(dtype=pd.Float64Dtype())
-        for c in pop_coeffs.columns:
-            pop_coeff = pop_coeffs[c].to_numpy(dtype = np.float64)
-            theta = (
-                thetas[c].to_numpy(dtype = np.float64).flatten()
-                if c in thetas.columns
-                else np.zeros_like(pop_coeff)
+                len(self.subject_y0) if expected_len_out is None else expected_len_out
             )
-            X = (
-                theta_data[c].to_numpy(dtype = np.float64)
-                if c in theta_data.columns
-                else np.zeros_like(pop_coeff)
-            )
-            data_contribution = (X @ theta)
-            out = np.exp(data_contribution + pop_coeff)  # + 1e-6
-            if len(out) != expected_len_out:
-                out = np.repeat(out, expected_len_out)
-            if c not in model_coeffs.columns:
-                model_coeffs[c] = np.repeat(np.nan, expected_len_out)
-                model_coeffs[c] = model_coeffs[c].astype(pd.Float64Dtype())
-            model_coeffs[c] = out
-        if len(model_coeffs) != expected_len_out:
-            tmp_coeff = np.tile(model_coeffs.values, (expected_len_out, 1))
-            model_coeffs = pd.DataFrame(
-                tmp_coeff, columns=model_coeffs.columns, dtype=pd.Float64Dtype()
-            )
+        pop_coeff_cols = pop_coeffs.columns
+        if not use_jax:
+            
+            model_coeffs = pd.DataFrame(dtype=pd.Float64Dtype())
+            for c in pop_coeff_cols:
+                pop_coeff = pop_coeffs[c].to_numpy(dtype = np.float64)
+                theta = (
+                    thetas[c].to_numpy(dtype = np.float64).flatten()
+                    if c in thetas.columns
+                    else np.zeros_like(pop_coeff)
+                )
+                X = (
+                    theta_data[c].to_numpy(dtype = np.float64)
+                    if c in theta_data.columns
+                    else np.zeros_like(pop_coeff)
+                )
+                data_contribution = (X @ theta)
+                out = np.exp(data_contribution + pop_coeff)  # + 1e-6
+                if len(out) != expected_len_out:
+                    out = np.repeat(out, expected_len_out)
+                if c not in model_coeffs.columns:
+                    model_coeffs[c] = np.repeat(np.nan, expected_len_out)
+                    model_coeffs[c] = model_coeffs[c].astype(pd.Float64Dtype())
+                model_coeffs[c] = out
+            if len(model_coeffs) != expected_len_out:
+                tmp_coeff = np.tile(model_coeffs.values, (expected_len_out, 1))
+                model_coeffs = pd.DataFrame(
+                    tmp_coeff, columns=model_coeffs.columns, dtype=pd.Float64Dtype()
+                )
+        if use_jax:
+            #wrap a version of above in a function
+            #jit that function
+            #store the func if this is the first time this code is run
+            #use the stored or just-constructed jitted f to do the matrix multiplication
+            raise NotImplementedError
+            
         return model_coeffs.copy()
 
     #@profile
@@ -2362,6 +2377,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if use_jax:
             masses, concs = self._solve_ivp_jax(
                 model_coeffs = model_coeffs,
+                ode_t0_vals = ode_t0_vals
             )
             sol_full = np.array(masses, dtype = np.float64)
             sol_full[:,:,0] = concs
@@ -2511,9 +2527,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     def save_fitted_model(self, jb_file_name: str = None):
         
         unpickable_attr = ["_jit_vmapped_solve"]
-        for a in unpickable_attr:
-            self.__dict__[a] = None
-        if self.fit_result_ is None:
+        dump_obj = deepcopy(self)
+
+        dump_obj._jit_vmapped_solve = None
+        dump_obj.jax_ivp_solver_compiled = False
+        
+        if dump_obj.fit_result_ is None:
             raise ValueError("The Model must be fit before saving a fitted model")
         save_dir = "logs/"
         if not os.path.exists("logs"):
@@ -2521,11 +2540,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         id_str = (
             jb_file_name
             if jb_file_name is not None
-            else self._generate_fitted_model_name()
+            else dump_obj._generate_fitted_model_name()
         )
         save_path = os.path.join(save_dir, f"fitted_model_{id_str}.jb")
         with open(save_path, "wb") as f:
-            jb.dump(self, f)
+            jb.dump(dump_obj, f)
+        del(dump_obj)
 
     #@profile
     def predict2(
@@ -2827,17 +2847,22 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             dep_vars_df = tmp.loc[tmp['model_coeff_dep_var'].isnull() == False, :]
             subject_level_effect_df = tmp.loc[tmp['subject_level_intercept'], :]
             
+            ode_coeffs = []
+            dep_vars = []
+            subject_level_eff = []
             for idx, row in self.init_vals_pd.iterrows():
                 mlflow.log_param(f'opt_param_full_{idx}', row.to_dict())
                 #logging if the row corresponds to a dependant variable for a ODE coeff 
                 if row['model_coeff_dep_var'] is not None:
                     param_name = row['log_name']
                     loggables = non_subj_cols + dep_var_cols
-                    [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables]     
+                    [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables]
+                    dep_vars.append(param_name)     
                 if row['population_coeff']:
                     param_name = row['log_name']
                     loggables = non_subj_cols
                     [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables]
+                    ode_coeffs.append(param_name)
                 if row['model_error']:
                     param_name = row['log_name']
                     loggables = non_subj_cols
@@ -2846,7 +2871,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     param_name = row['subject_level_intercept_name']
                     loggables = subj_eff_cols
                     [mlflow.log_param(f"{param_name}__{c}", row[c]) for c in loggables]
-                    
+                    subject_level_eff.append(param_name)
+            
+            mlflow.log_param('ode_parameters', ode_coeffs)
+            mlflow.log_param('fixed_effects', dep_vars)
+            mlflow.log_param('mixed_effects', subject_level_eff)   
 
             
             ode_class_str = get_class_source_without_docstrings(self._pk_model_class)
@@ -2887,6 +2916,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             )
             # hess_fun = nd.Hessian()
             mlflow.log_metric(f"final_{mlflow_loss.__name__}", self.fit_result_.fun)
+            mlflow.log_metric(f"final_{self.loss_summary_name}", self.fit_result_.fun)
             mlflow.log_metric('final_nfev', self.fit_result_.nfev)
             mlflow.log_metric('final_nit', self.fit_result_.nit)
             mlflow.log_metric('final_success', bool(self.fit_result_.success))

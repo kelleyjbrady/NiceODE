@@ -1,4 +1,6 @@
 # %%
+import os
+os.environ['JAX_PLATFORMS'] = 'cpu'
 import pandas as pd
 from niceode.diffeqs import OneCompartmentAbsorption, TwoCompartmentAbsorption
 from niceode.utils import CompartmentalModel, ObjectiveFunctionColumn
@@ -125,7 +127,8 @@ me_mod_fo =  CompartmentalModel(
           subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
-                            PopulationCoeffcient('ka', 2, 
+                            PopulationCoeffcient('ka', 
+                                                 optimization_init_val=2, 
                                                  #subject_level_intercept=True,
                                                  optimization_lower_bound = np.log(1e-6),
                                                  #optimization_upper_bound = np.log(3),
@@ -134,7 +137,7 @@ me_mod_fo =  CompartmentalModel(
                                                 #subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
                             PopulationCoeffcient('cl',
-                                                 .1,
+                                                 optimization_init_val = .1,
                                                   optimization_lower_bound = np.log(1e-4),
                                                   optimization_upper_bound=np.log(1)
                                                  #optimization_upper_bound = np.log(.005),
@@ -143,7 +146,7 @@ me_mod_fo =  CompartmentalModel(
                                                 #subject_level_intercept_sd_upper_bound = 5,
                                                 #subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('vd', 1.2
+                            PopulationCoeffcient('vd', optimization_init_val = 1.2
                                                 , optimization_lower_bound = np.log(.1)
                                                 ,optimization_upper_bound=np.log(5)
                                                 
@@ -162,7 +165,7 @@ me_mod_fo =  CompartmentalModel(
                                                                           ,optimization_upper_bound=3
                                                                           ),
                                    #ode_solver_method='BDF'
-                                   batch_id='mlflow_test_batch3',
+                                   batch_id='mlflow_test_batch4',
                                    minimize_method = 'COBYQA'
                                    )
 #%%
@@ -199,7 +202,7 @@ me_mod_fo_dep =  CompartmentalModel(
           subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
-                            PopulationCoeffcient('ka', 2, 
+                            PopulationCoeffcient('ka', optimization_init_val = 2, 
                                                  #subject_level_intercept=True,
                                                  optimization_lower_bound = np.log(1e-6),
                                                  #optimization_upper_bound = np.log(3),
@@ -208,7 +211,7 @@ me_mod_fo_dep =  CompartmentalModel(
                                                 #subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
                             PopulationCoeffcient('cl',
-                                                 .1,
+                                                 optimization_init_val = .1,
                                                   optimization_lower_bound = np.log(1e-4),
                                                   optimization_upper_bound=np.log(1)
                                                  #optimization_upper_bound = np.log(.005),
@@ -217,16 +220,16 @@ me_mod_fo_dep =  CompartmentalModel(
                                                 #subject_level_intercept_sd_upper_bound = 5,
                                                 #subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('vd', 1.2
+                            PopulationCoeffcient('vd', optimization_init_val = 1.2
                                                 , optimization_lower_bound = np.log(.1)
                                                 ,optimization_upper_bound=np.log(5)
                                                 
                                                 #, optimization_upper_bound = np.log(.05)
                                                 ),
                          ],
-          dep_vars= {'vd':[ObjectiveFunctionColumn(column_name='WEIGHT', optimization_lower_bound=-5,
+          dep_vars= {'vd':[ObjectiveFunctionColumn(coeff_name = 'vd',column_name='WEIGHT', optimization_lower_bound=-5,
                                                    optimization_upper_bound = 5),
-                           ObjectiveFunctionColumn(column_name='sex_cat', optimization_lower_bound=-5,
+                           ObjectiveFunctionColumn(coeff_name = 'vd',column_name='sex_cat', optimization_lower_bound=-5,
                                                    optimization_upper_bound = 5) ]}, 
                                    no_me_loss_function=neg2_log_likelihood_loss, 
                                    no_me_loss_needs_sigma=True,
@@ -238,7 +241,7 @@ me_mod_fo_dep =  CompartmentalModel(
                                                                           ,optimization_lower_bound=0.00001
                                                                           ,optimization_upper_bound=3
                                                                           ),
-                                   batch_id='mlflow_test_batch3',
+                                   batch_id='mlflow_test_batch4',
                                    #ode_solver_method='BDF'
                                    #minimize_method = 'COBYQA'
                                    )
@@ -259,7 +262,7 @@ me_mod_fo_dep =  CompartmentalModel(
           subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
-                            PopulationCoeffcient('ka', 2, 
+                            PopulationCoeffcient('ka', optimization_init_val = 2, 
                                                  #subject_level_intercept=True,
                                                  optimization_lower_bound = np.log(1e-6),
                                                  #optimization_upper_bound = np.log(3),
@@ -268,7 +271,7 @@ me_mod_fo_dep =  CompartmentalModel(
                                                 #subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
                             PopulationCoeffcient('cl',
-                                                 .1,
+                                                 optimization_init_val = .1,
                                                   optimization_lower_bound = np.log(1e-4),
                                                   optimization_upper_bound=np.log(1)
                                                  #optimization_upper_bound = np.log(.005),
@@ -277,7 +280,7 @@ me_mod_fo_dep =  CompartmentalModel(
                                                 #subject_level_intercept_sd_upper_bound = 5,
                                                 #subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('vd', 1.2
+                            PopulationCoeffcient('vd', optimization_init_val = 1.2
                                                 , optimization_lower_bound = np.log(.1)
                                                 ,optimization_upper_bound=np.log(5)
                                                 
@@ -285,7 +288,7 @@ me_mod_fo_dep =  CompartmentalModel(
                                                 ),
                          ],
           dep_vars= {'vd':[
-                           ObjectiveFunctionColumn(column_name='sex_cat', optimization_lower_bound=-5,
+                           ObjectiveFunctionColumn(coeff_name = 'vd',column_name='sex_cat', optimization_lower_bound=-5,
                                                    optimization_upper_bound = 5) ]}, 
                                    no_me_loss_function=neg2_log_likelihood_loss, 
                                    no_me_loss_needs_sigma=True,
@@ -297,9 +300,9 @@ me_mod_fo_dep =  CompartmentalModel(
                                                                           ,optimization_lower_bound=0.00001
                                                                           ,optimization_upper_bound=3
                                                                           ),
-                                   batch_id='mlflow_test_batch3',
+                                   batch_id='mlflow_test_batch4',
                                    #ode_solver_method='BDF'
-                                   #minimize_method = 'COBYQA'
+                                   minimize_method = 'COBYQA'
                                    )
 fit_model = True
 if fit_model:
@@ -319,7 +322,7 @@ me_mod_fo_dep =  CompartmentalModel(
           subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
-                            PopulationCoeffcient('ka', 2, 
+                            PopulationCoeffcient('ka', optimization_init_val = 2, 
                                                  #subject_level_intercept=True,
                                                  optimization_lower_bound = np.log(1e-6),
                                                  #optimization_upper_bound = np.log(3),
@@ -328,7 +331,7 @@ me_mod_fo_dep =  CompartmentalModel(
                                                 #subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
                             PopulationCoeffcient('cl',
-                                                 .1,
+                                                 optimization_init_val = .1,
                                                   optimization_lower_bound = np.log(1e-4),
                                                   optimization_upper_bound=np.log(1)
                                                  #optimization_upper_bound = np.log(.005),
@@ -337,7 +340,7 @@ me_mod_fo_dep =  CompartmentalModel(
                                                 #subject_level_intercept_sd_upper_bound = 5,
                                                 #subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('vd', 1.2
+                            PopulationCoeffcient('vd', optimization_init_val = 1.2
                                                 , optimization_lower_bound = np.log(.1)
                                                 ,optimization_upper_bound=np.log(5)
                                                 
@@ -345,7 +348,7 @@ me_mod_fo_dep =  CompartmentalModel(
                                                 ),
                          ],
           dep_vars= {'vd':[
-                           ObjectiveFunctionColumn(column_name='WEIGHT',model_method = 'allometric' ,
+                           ObjectiveFunctionColumn(coeff_name = 'vd',column_name='WEIGHT',model_method = 'allometric' ,
                                                    allometric_norm_value = 70,
                                                    optimization_lower_bound=-5,
                                                    optimization_upper_bound = 5) ]}, 
@@ -359,9 +362,9 @@ me_mod_fo_dep =  CompartmentalModel(
                                                                           ,optimization_lower_bound=0.00001
                                                                           ,optimization_upper_bound=3
                                                                           ),
-                                   batch_id='mlflow_test_batch3',
+                                   batch_id='mlflow_test_batch4',
                                    #ode_solver_method='BDF'
-                                   #minimize_method = 'COBYQA'
+                                   minimize_method = 'COBYQA'
                                    )
 fit_model = True
 if fit_model:
@@ -384,7 +387,7 @@ me_mod_fo =  CompartmentalModel(
           subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
-                            PopulationCoeffcient('ka', .7, 
+                            PopulationCoeffcient('ka', optimization_init_val = .7, 
                                                  subject_level_intercept=True,
                                                  optimization_lower_bound = np.log(1e-6),
                                                  #optimization_upper_bound = np.log(3),
@@ -393,7 +396,7 @@ me_mod_fo =  CompartmentalModel(
                                                 subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
                             PopulationCoeffcient('cl',
-                                                 .1,
+                                                 optimization_init_val = .1,
                                                   optimization_lower_bound = np.log(1e-4),
                                                   optimization_upper_bound=np.log(1),
                                                  #optimization_upper_bound = np.log(.005),
@@ -402,7 +405,7 @@ me_mod_fo =  CompartmentalModel(
                                                 subject_level_intercept_sd_upper_bound = 5,
                                                 subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('vd', 1.2
+                            PopulationCoeffcient('vd', optimization_init_val = 1.2
                                                 , optimization_lower_bound = np.log(.1)
                                                 ,optimization_upper_bound=np.log(5),
                                                 subject_level_intercept=True, 
@@ -412,7 +415,7 @@ me_mod_fo =  CompartmentalModel(
                                                 #, optimization_upper_bound = np.log(.05)
                                                 ),
                          ],
-          dep_vars= {'vd':[ObjectiveFunctionColumn(column_name = 'WEIGHT', allometric_norm_value=70, model_method='allometric')]}, 
+          dep_vars= {'vd':[ObjectiveFunctionColumn(coeff_name = 'vd', column_name = 'WEIGHT', allometric_norm_value=70, model_method='allometric')]}, 
                                    no_me_loss_function=neg2_log_likelihood_loss, 
                                    no_me_loss_needs_sigma=True,
                                    optimizer_tol=None, 
@@ -424,7 +427,7 @@ me_mod_fo =  CompartmentalModel(
                                                                           ,optimization_upper_bound=3
                                                                           ),
                                    #ode_solver_method='BDF'
-                                   batch_id='mlflow_test_batch3',
+                                   batch_id='mlflow_test_batch4',
                                    minimize_method = 'COBYQA'
                                    )
 fit_model = True
@@ -444,7 +447,7 @@ me_mod_fo =  CompartmentalModel(
           subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
-                            PopulationCoeffcient('ka', .7, 
+                            PopulationCoeffcient('ka', optimization_init_val = .7, 
                                                  subject_level_intercept=True,
                                                  optimization_lower_bound = np.log(1e-6),
                                                  #optimization_upper_bound = np.log(3),
@@ -453,7 +456,7 @@ me_mod_fo =  CompartmentalModel(
                                                 subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
                             PopulationCoeffcient('cl',
-                                                 .1,
+                                                 optimization_init_val = .1,
                                                   optimization_lower_bound = np.log(1e-4),
                                                   optimization_upper_bound=np.log(1),
                                                  #optimization_upper_bound = np.log(.005),
@@ -462,7 +465,7 @@ me_mod_fo =  CompartmentalModel(
                                                 subject_level_intercept_sd_upper_bound = 5,
                                                 subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('vd', 1.2
+                            PopulationCoeffcient('vd', optimization_init_val = 1.2
                                                 , optimization_lower_bound = np.log(.1)
                                                 ,optimization_upper_bound=np.log(5),
                                                 subject_level_intercept=True, 
@@ -484,7 +487,7 @@ me_mod_fo =  CompartmentalModel(
                                                                           ,optimization_upper_bound=3
                                                                           ),
                                    #ode_solver_method='BDF'
-                                   batch_id='mlflow_test_batch3',
+                                   batch_id='mlflow_test_batch4',
                                    minimize_method = 'COBYQA'
                                    )
 fit_model = True
@@ -514,7 +517,7 @@ me_mod_foce =  CompartmentalModel(
           subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
-                            PopulationCoeffcient('ka', .7, 
+                            PopulationCoeffcient('ka', optimization_init_val = .7, 
                                                  subject_level_intercept=True,
                                                  optimization_lower_bound = np.log(1e-6),
                                                  #optimization_upper_bound = np.log(3),
@@ -524,7 +527,7 @@ me_mod_foce =  CompartmentalModel(
                                                 subject_level_intercept_init_vals_column_name='b_i_fo_ka'
                                                  ),
                             PopulationCoeffcient('cl',
-                                                 .1,
+                                                 optimization_init_val = .1,
                                                   optimization_lower_bound = np.log(1e-4),
                                                   optimization_upper_bound=np.log(1),
                                                  #optimization_upper_bound = np.log(.005),
@@ -535,7 +538,7 @@ me_mod_foce =  CompartmentalModel(
                                                 #subject_level_intercept_init_vals_column_name='b_i_fo_cl'
                                                 
                                                  ),
-                            PopulationCoeffcient('vd', 1.2
+                            PopulationCoeffcient('vd', optimization_init_val = 1.2
                                                 , optimization_lower_bound = np.log(.1)
                                                 ,optimization_upper_bound=np.log(5),
                                                 subject_level_intercept=True, 
@@ -560,7 +563,7 @@ me_mod_foce =  CompartmentalModel(
                                                                           ,optimization_upper_bound=1.5
                                                                           ),
                                    #ode_solver_method='BDF'
-                                   batch_id='mlflow_test_batch3',
+                                   batch_id='mlflow_test_batch4',
                                    minimize_method = 'COBYQA'
                                    )
 fit_model = True
@@ -583,7 +586,7 @@ me_mod_fo =  CompartmentalModel(
           subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
-                            PopulationCoeffcient('ka', 1, 
+                            PopulationCoeffcient('ka',optimization_init_val =  1, 
                                                  #subject_level_intercept=True,
                                                  optimization_lower_bound = np.log(.1),
                                                  optimization_upper_bound = np.log(3),
@@ -592,7 +595,7 @@ me_mod_fo =  CompartmentalModel(
                                                # subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
                             PopulationCoeffcient('cl',
-                                                 .08,
+                                                 optimization_init_val = .08,
                                                   optimization_lower_bound = np.log(.01),
                                                  optimization_upper_bound = np.log(1),
                                                 #subject_level_intercept=True, 
@@ -600,7 +603,7 @@ me_mod_fo =  CompartmentalModel(
                                                 #subject_level_intercept_sd_upper_bound = 5,
                                                 #subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('v1', .85
+                            PopulationCoeffcient('v1', optimization_init_val = .85
                                                 , optimization_lower_bound = np.log(1e-3)
                                                 , optimization_upper_bound = np.log(5)
                                                 #,subject_level_intercept=True, 
@@ -629,7 +632,7 @@ me_mod_fo =  CompartmentalModel(
                                                                           ,optimization_upper_bound=3
                                                                           ),
                                    #ode_solver_method='BDF'
-                                   batch_id='mlflow_test_batch3',
+                                   batch_id='mlflow_test_batch4',
                                    minimize_method = 'COBYQA'
                                    )
 
@@ -656,7 +659,7 @@ me_mod_fo =  CompartmentalModel(
           subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
-                            PopulationCoeffcient('ka', 1, 
+                            PopulationCoeffcient('ka', optimization_init_val = 1, 
                                                  subject_level_intercept=True,
                                                  optimization_lower_bound = np.log(.1),
                                                  optimization_upper_bound = np.log(3),
@@ -665,7 +668,7 @@ me_mod_fo =  CompartmentalModel(
                                                 subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
                             PopulationCoeffcient('cl',
-                                                 .08,
+                                                 optimization_init_val = .08,
                                                   optimization_lower_bound = np.log(.01),
                                                  optimization_upper_bound = np.log(1),
                                                 subject_level_intercept=True, 
@@ -673,7 +676,7 @@ me_mod_fo =  CompartmentalModel(
                                                 subject_level_intercept_sd_upper_bound = 5,
                                                 subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('v1', .15
+                            PopulationCoeffcient('v1', optimization_init_val = .15
                                                 , optimization_lower_bound = np.log(1e-2)
                                                 , optimization_upper_bound = np.log(1)
                                                 ,subject_level_intercept=True, 
@@ -681,7 +684,7 @@ me_mod_fo =  CompartmentalModel(
                                                 subject_level_intercept_sd_upper_bound = 5,
                                                 subject_level_intercept_sd_lower_bound=1e-6
                                                 ),
-                            PopulationCoeffcient('q', 1
+                            PopulationCoeffcient('q', optimization_init_val = 1
                                                 , optimization_lower_bound = np.log(.1)
                                                 , optimization_upper_bound = np.log(4)
                                                 ,subject_level_intercept=True, 
@@ -689,7 +692,7 @@ me_mod_fo =  CompartmentalModel(
                                                 subject_level_intercept_sd_upper_bound = 5,
                                                 subject_level_intercept_sd_lower_bound=1e-6
                                                 ),
-                            PopulationCoeffcient('v2', .5
+                            PopulationCoeffcient('v2', optimization_init_val = .5
                                                 , optimization_lower_bound = np.log(1e-2)
                                                 , optimization_upper_bound = np.log(5)
                                                 ,subject_level_intercept=True, 
@@ -710,7 +713,7 @@ me_mod_fo =  CompartmentalModel(
                                                                           ,optimization_upper_bound=3
                                                                           ),
                                    #ode_solver_method='BDF'
-                                   batch_id='mlflow_test_batch3',
+                                   batch_id='mlflow_test_batch4',
                                    minimize_method = 'COBYQA'
                                    )
 
