@@ -2083,17 +2083,18 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         pop_coeffs = pd.DataFrame()
         subject_level_intercept_sds = pd.DataFrame(dtype=pd.Float64Dtype())
         subject_level_intercept_init_vals = pd.DataFrame(dtype=pd.Float64Dtype())
+        ivc = self.init_vals_pd_cols
         for idx, row in model_params.iterrows():
-            coeff_name = row["model_coeff"]
+            coeff_name = row[ivc.model_coeff]
             if coeff_name not in pop_coeffs.columns:
                 pop_coeffs[coeff_name] = [np.nan]
                 pop_coeffs[coeff_name] = pop_coeffs[coeff_name].astype(
                     pd.Float64Dtype()
                 )
-            pop_coeffs[coeff_name] = [row["init_val"]]
+            pop_coeffs[coeff_name] = [row[ivc.init_val]]
 
-            if row["subject_level_intercept"]:
-                omega_name = f"omega2_{coeff_name}" #should get this from the table instead
+            if row[ivc.subject_level_intercept]: 
+                omega_name = row[ivc.subject_level_intercept_name]
                 col = (coeff_name, omega_name)
                 if col not in subject_level_intercept_sds.columns:
                     subject_level_intercept_sds[col] = [np.nan]
@@ -2101,9 +2102,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         col
                     ].astype(pd.Float64Dtype())
                 subject_level_intercept_sds[col] = [
-                    row["subject_level_intercept_sd_init_val"]
+                    row[ivc.subject_level_intercept_sd_init_val] 
                 ]  # this is terrible, referencing the names like this
-                init_vals_col = row["subject_level_intercept_init_vals_column_name"]
+                
+                init_vals_col = row[ivc.subject_level_intercept_init_vals_column_name]
                 if init_vals_col in self.subject_data.columns:
                     subject_level_intercept_init_vals[col] = (
                         self.subject_data[init_vals_col]
