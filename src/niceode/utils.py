@@ -39,6 +39,8 @@ from .mlflow_utils import (get_class_source_without_docstrings,
 from typing import Type
 from .pd_templates import InitValsPdCols
 from warnings import warn
+import diffrax
+import jax
 
 
 def debug_print(print_obj, debug=False):
@@ -2265,7 +2267,77 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         )
         pred_obj.y[0] = ode_class.mass_to_depvar(pred_obj.y[0], *args)
         return pred_obj
-
+    
+    @staticmethod
+    def _solve_ivp_jax_worker(y0, args,
+                       tspan=None,
+                       teval=None,
+                       dt0 = None,
+                       ode_class: PKBaseODE = None,
+                       diffrax_solver=None, 
+                       diffrax_step_ctrl = None
+                       ):
+        
+        ode_term = diffrax.ODETerm(ode_class.diffrax_ode)
+        
+        solution = diffrax.diffeqsolve(
+        terms = ode_term,
+        solver = diffrax_solver,
+        t0 = tspan[0],
+        t1 = tspan[1],
+        dt0 = dt0,
+        y0 = y0,
+        args=args,
+        saveat=diffrax.SaveAt(ts=teval), # Specify time points for output
+        stepsize_controller=diffrax_step_ctrl
+        )
+        
+        central_mass_trajectory = solution.ys[:, 0]
+        concentrations = ode_class.diffrax_mass_to_depvar(
+        central_mass_trajectory, 
+        args # Pass the same parameter tuple
+    )
+        return solution.ys, concentrations
+        
+    def _solve_ivp_jax(self,
+        model_coeffs,
+        ode_t0_vals=None,
+        time_mask=None,
+        timepoints=None,
+        **kwargs):
+        
+        ode_t0_vals = self.ode_t0_vals if ode_t0_vals is None else ode_t0_vals
+        time_mask = self.time_mask if time_mask is None else time_mask
+        model_coeffs, ode_t0_vals = model_coeffs.to_numpy(), ode_t0_vals.to_numpy()
+        
+        diffrax_solver = diffrax.Tsit5()
+        diffrax_step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-8)
+        dt0 = 0.01
+        
+        partial_solve_ivp = partial(
+            self._solve_ivp_jax_worker,
+            ode_class=self.pk_model_class,
+            tspan=self.global_tspan_init,
+            teval=self.global_tp_eval if timepoints is None else timepoints,
+            diffrax_solver=diffrax_solver,
+            diffrax_step_ctrl = diffrax_step_ctrl,
+            dt0 = dt0
+            
+        )
+        
+        vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+        jit_vmapped_solve = jax.jit(vmapped_solve)
+        
+        all_solutions_masses, all_concentrations = jit_vmapped_solve(
+                ode_t0_vals,
+                model_coeffs
+            )
+        
+        return all_solutions_masses, all_concentrations
+        
+        # . . .
+        
+    
     #@profile
     def _solve_ivp(
         self,
@@ -2278,36 +2350,48 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     ):
         ode_t0_vals = self.ode_t0_vals if ode_t0_vals is None else ode_t0_vals
         time_mask = self.time_mask if time_mask is None else time_mask
-        iter_obj = zip(model_coeffs.iterrows(), ode_t0_vals.iterrows())
-        partial_solve_ivp = partial(
-            self._solve_ivp_parallel2,
-            ode_class=self.pk_model_class,
-            tspan=self.global_tspan_init,
-            teval=self.global_tp_eval if timepoints is None else timepoints,
-            method=self.ode_solver_method,
-        )
-        if parallel:
-            sol_full = Parallel(n_jobs=parallel_n_jobs)(
-                delayed(partial_solve_ivp)(ode_inits_idx_row[1], coeff_idx_row[1])
-                for coeff_idx_row, ode_inits_idx_row in iter_obj
-            )     
+        
+        use_jax = True
+        if use_jax:
+            masses, concs = self._solve_ivp_jax(
+                model_coeffs = model_coeffs
+            )
+            masses[:,:,0] = concs
+            
+            sol_dep_var = concs
+            sol_dep_var = np.concatenate(sol_dep_var)
+            sol_full = np.vstack(masses)
         else:
-            list_comp = True
-            if list_comp:
-                sol_full = [
-                    partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1])
+            iter_obj = zip(model_coeffs.iterrows(), ode_t0_vals.iterrows())
+            partial_solve_ivp = partial(
+                self._solve_ivp_parallel2,
+                ode_class=self.pk_model_class,
+                tspan=self.global_tspan_init,
+                teval=self.global_tp_eval if timepoints is None else timepoints,
+                method=self.ode_solver_method,
+            )
+            if parallel:
+                sol_full = Parallel(n_jobs=parallel_n_jobs)(
+                    delayed(partial_solve_ivp)(ode_inits_idx_row[1], coeff_idx_row[1])
                     for coeff_idx_row, ode_inits_idx_row in iter_obj
-                ]
-
+                )     
             else:
-                sol_full = []
-                for coeff_idx_row, ode_inits_idx_row in iter_obj:
-                    ode_sol = partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1])
-                    sol_full.append(ode_sol)
-                    
-        sol_dep_var = [sol_i.y[0] for sol_i in sol_full]
-        sol_dep_var = np.concatenate(sol_dep_var)
-        sol_full = np.vstack([i.y.T for i in sol_full])
+                list_comp = True
+                if list_comp:
+                    sol_full = [
+                        partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1])
+                        for coeff_idx_row, ode_inits_idx_row in iter_obj
+                    ]
+
+                else:
+                    sol_full = []
+                    for coeff_idx_row, ode_inits_idx_row in iter_obj:
+                        ode_sol = partial_solve_ivp(ode_inits_idx_row[1], coeff_idx_row[1])
+                        sol_full.append(ode_sol)
+                        
+            sol_dep_var = [sol_i.y[0] for sol_i in sol_full]
+            sol_dep_var = np.concatenate(sol_dep_var)
+            sol_full = np.vstack([i.y.T for i in sol_full])
         if timepoints is None:
             sol_dep_var = sol_dep_var[time_mask.flatten()]
             sol_full = sol_full[time_mask.flatten()]

@@ -193,7 +193,7 @@ class PKBaseODE(abc.ABC):
         pass
     @staticmethod
     @abc.abstractmethod
-    def ode_for_diffrax(t, y, *params):
+    def diffrax_ode(t, y, *params):
         """
         Defines the system of ordinary differential equations.
 
@@ -212,7 +212,7 @@ class PKBaseODE(abc.ABC):
         pass
     @staticmethod
     @abc.abstractmethod
-    def convert_state_to_depvar( pred_mass_central, *params):
+    def diffrax_mass_to_depvar( pred_mass_central, *params):
         """
         Converts the predicted mass in the central/observed compartment
         to the dependent variable (usually concentration).
@@ -261,7 +261,7 @@ class OneCompartmentConc(PKBaseODE):
         return pred_mass
     
     @staticmethod
-    def ode_for_diffrax(t, y, args_tuple):
+    def diffrax_ode(t, y, args_tuple):
         """
         JAX-compatible ODE function for Diffrax.
         y[0] is Concentration (C).
@@ -275,7 +275,7 @@ class OneCompartmentConc(PKBaseODE):
         return jnp.array([dCdt])
 
     @staticmethod
-    def convert_state_to_depvar(pred_y_state0, args_tuple):
+    def diffrax_mass_to_depvar(pred_y_state0, args_tuple):
         """
         JAX-compatible conversion. For this model, y[0] is already concentration.
         pred_y_state0: Predicted concentration trajectory (C).
@@ -437,7 +437,7 @@ class OneCompartmentAbsorption(PKBaseODE):
         return depvar_unit_result
     
     @staticmethod
-    def ode_for_diffrax(t, y, args_tuple):
+    def diffrax_ode(t, y, args_tuple):
         """
         JAX-compatible ODE function for Diffrax.
         y = [central_mass, gut_mass]
@@ -451,7 +451,7 @@ class OneCompartmentAbsorption(PKBaseODE):
         return jnp.array([dCMdt, dGdt])
 
     @staticmethod
-    def convert_state_to_depvar(pred_y_state0, args_tuple):
+    def diffrax_mass_to_depvar(pred_y_state0, args_tuple):
         """
         JAX-compatible conversion from central mass to concentration.
         pred_y_state0: Predicted central_mass trajectory.
@@ -622,7 +622,7 @@ class OneCompartmentAbsorption2(PKBaseODE):
         return depvar_unit_result
     
     @staticmethod
-    def ode_for_diffrax(t, y, args_tuple):
+    def diffrax_ode(t, y, args_tuple):
         """
         JAX-compatible ODE function for Diffrax.
         y = [central_mass, gut_mass]
@@ -635,7 +635,7 @@ class OneCompartmentAbsorption2(PKBaseODE):
         return jnp.array([dCMdt, dGdt])
 
     @staticmethod
-    def convert_state_to_depvar(pred_y_state0, args_tuple):
+    def diffrax_mass_to_depvar(pred_y_state0, args_tuple):
         """
         JAX-compatible conversion from central mass to concentration.
         pred_y_state0: Predicted central_mass trajectory.
@@ -768,7 +768,7 @@ class OneCompartmentBolus_CL(PKBaseODE):
         return depvar_unit_result
     
     @staticmethod
-    def ode_for_diffrax(t, y, args_tuple):
+    def diffrax_ode(t, y, args_tuple):
         """
         JAX-compatible ODE function for Diffrax.
         y[0] is central_mass.
@@ -781,7 +781,7 @@ class OneCompartmentBolus_CL(PKBaseODE):
         return jnp.array([dCMdt])
 
     @staticmethod
-    def convert_state_to_depvar(pred_y_state0, args_tuple):
+    def diffrax_mass_to_depvar(pred_y_state0, args_tuple):
         """
         JAX-compatible conversion from central mass to concentration.
         pred_y_state0: Predicted central_mass trajectory.
@@ -916,7 +916,7 @@ class OneCompartmentBolus_Ke(PKBaseODE):
         return depvar_unit_result
     
     @staticmethod
-    def ode_for_diffrax(t, y, args_tuple):
+    def diffrax_ode(t, y, args_tuple):
         """
         JAX-compatible ODE function for Diffrax.
         y[0] is central_mass.
@@ -928,7 +928,7 @@ class OneCompartmentBolus_Ke(PKBaseODE):
         return jnp.array([dCMdt])
 
     @staticmethod
-    def convert_state_to_depvar(pred_y_state0, args_tuple):
+    def diffrax_mass_to_depvar(pred_y_state0, args_tuple):
         """
         JAX-compatible conversion from central mass to concentration.
         pred_y_state0: Predicted central_mass trajectory.
@@ -1103,7 +1103,7 @@ class TwoCompartmentBolus(PKBaseODE):
         return depvar_unit_result
     
     @staticmethod
-    def ode_for_diffrax(t, y, args_tuple):
+    def diffrax_ode(t, y, args_tuple):
         """
         JAX-compatible ODE function for Diffrax.
         y = [central_mass, peripheral_mass]
@@ -1128,7 +1128,7 @@ class TwoCompartmentBolus(PKBaseODE):
         return jnp.array([dCMdt, dPMdt])
 
     @staticmethod
-    def convert_state_to_depvar(pred_y_state0, args_tuple):
+    def diffrax_mass_to_depvar(pred_y_state0, args_tuple):
         """
         JAX-compatible conversion from central mass to concentration.
         pred_y_state0: Predicted central_mass trajectory.
@@ -1331,7 +1331,7 @@ class TwoCompartmentAbsorption(PKBaseODE):
         return depvar_unit_result
     
     @staticmethod
-    def ode_for_diffrax(t, y, args_tuple):
+    def diffrax_ode(t, y, args_tuple):
         """
         JAX-compatible ODE function for Diffrax.
         y = [central_mass, peripheral_mass, gut_mass]
@@ -1355,7 +1355,7 @@ class TwoCompartmentAbsorption(PKBaseODE):
         return jnp.array([dCMdt, dPMdt, dGdt])
 
     @staticmethod
-    def convert_state_to_depvar(pred_y_state0, args_tuple):
+    def diffrax_mass_to_depvar(pred_y_state0, args_tuple):
         """
         JAX-compatible conversion from central mass to concentration.
         pred_y_state0: Predicted central_mass trajectory.
@@ -1498,7 +1498,7 @@ class OneCompartmentInfusion(PKBaseODE):
         return depvar_unit_result
     
     @staticmethod
-    def ode_for_diffrax(t, y, args_tuple):
+    def diffrax_ode(t, y, args_tuple):
         """
         JAX-compatible ODE function for Diffrax.
         y[0] is central_mass.
@@ -1511,7 +1511,7 @@ class OneCompartmentInfusion(PKBaseODE):
         return jnp.array([dCMdt])
 
     @staticmethod
-    def convert_state_to_depvar(pred_y_state0, args_tuple):
+    def diffrax_mass_to_depvar(pred_y_state0, args_tuple):
         """
         JAX-compatible conversion from central mass to concentration.
         pred_y_state0: Predicted central_mass trajectory.
@@ -1685,7 +1685,7 @@ class OneCompartmentBolusMM(PKBaseODE):
         return depvar_unit_result
     
     @staticmethod
-    def ode_for_diffrax(t, y, args_tuple):
+    def diffrax_ode(t, y, args_tuple):
         """
         JAX-compatible ODE function for Diffrax (Michaelis-Menten).
         y[0] is central_mass.
@@ -1711,7 +1711,7 @@ class OneCompartmentBolusMM(PKBaseODE):
         return jnp.array([dCMdt])
 
     @staticmethod
-    def convert_state_to_depvar(pred_y_state0, args_tuple):
+    def diffrax_mass_to_depvar(pred_y_state0, args_tuple):
         """
         JAX-compatible conversion from central mass to concentration.
         pred_y_state0: Predicted central_mass trajectory.

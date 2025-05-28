@@ -1,4 +1,8 @@
 # %%
+import os
+os.environ['JAX_PLATFORMS'] = 'cpu'
+import jax
+
 import pandas as pd
 from niceode.diffeqs import OneCompartmentAbsorption, TwoCompartmentAbsorption
 from niceode.utils import CompartmentalModel, ObjectiveFunctionColumn
@@ -29,6 +33,9 @@ from niceode.nca import estimate_subject_slope_cv
 from niceode.nca import identify_low_conc_zones, estimate_k_halflife
 from niceode.nca import calculate_mrt
 from niceode.nca import prepare_section_aucs, calculate_auc_from_sections
+
+# Your JAX code will now reliably use the CPU
+print(f"JAX default backend: {jax.default_backend()}")
 # %%
 
 df_c = pd.read_csv("/workspaces/PK-Analysis/data/CP1805/CP1805_conc.csv")
