@@ -2,6 +2,8 @@ from numba import njit
 import abc
 import numba
 import warnings
+import jax.numpy as jnp
+import numpy as np
 
 nca_docstring = """
     Relevant NCA Estimated Parameters:
@@ -189,6 +191,45 @@ class PKBaseODE(abc.ABC):
                 (e.g., concentration = mass / volume).
         """
         pass
+    @staticmethod
+    @abc.abstractmethod
+    def ode_for_diffrax(t, y, *params):
+        """
+        Defines the system of ordinary differential equations.
+
+        Args:
+            t (float): Current time point.
+            y (list or np.ndarray): Array of current state variables
+                (masses or amounts in compartments). The order depends
+                on the specific model implementation.
+            *params: Sequence of model parameters required by the ODEs
+                (e.g., ka, cl, vd). Order must match subclass definition.
+
+        Returns:
+            list or np.ndarray: List of derivatives [dy/dt] corresponding
+                to the order of state variables in `y`.
+        """
+        pass
+    @staticmethod
+    @abc.abstractmethod
+    def convert_state_to_depvar( pred_mass_central, *params):
+        """
+        Converts the predicted mass in the central/observed compartment
+        to the dependent variable (usually concentration).
+
+        Args:
+            pred_mass_central (float or np.ndarray): Predicted mass or amount
+                in the central (or observed) compartment, typically the output
+                from an ODE solver corresponding to the first state variable.
+            *params: Sequence of model parameters required for conversion,
+                typically including the volume of the observed compartment
+                (e.g., vd or v1). Order must match subclass definition.
+
+        Returns:
+            float or np.ndarray: The corresponding dependent variable value(s)
+                (e.g., concentration = mass / volume).
+        """
+        pass
 
     
 class OneCompartmentConc(PKBaseODE):
@@ -218,6 +259,30 @@ class OneCompartmentConc(PKBaseODE):
         return [dCdt]
     def mass_to_depvar(self, pred_mass, cl, vd):
         return pred_mass
+    
+    @staticmethod
+    def ode_for_diffrax(t, y, args_tuple):
+        """
+        JAX-compatible ODE function for Diffrax.
+        y[0] is Concentration (C).
+        args_tuple: (cl, vd)
+        """
+        cl, vd = args_tuple
+        C = y[0]
+        # Add epsilon for numerical stability if vd can be very close to zero
+        # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd) 
+        dCdt = -(cl / vd) * C
+        return jnp.array([dCdt])
+
+    @staticmethod
+    def convert_state_to_depvar(pred_y_state0, args_tuple):
+        """
+        JAX-compatible conversion. For this model, y[0] is already concentration.
+        pred_y_state0: Predicted concentration trajectory (C).
+        args_tuple: (cl, vd) - not used in this specific conversion but kept for signature consistency.
+        """
+        # _cl, _vd = args_tuple # Unpack if needed, not in this case
+        return pred_y_state0
 
 class OneCompartmentAbsorption(PKBaseODE):
     """
@@ -369,6 +434,32 @@ class OneCompartmentAbsorption(PKBaseODE):
         """Converts central compartment mass to concentration."""
         # Concentration = Mass / Volume
         depvar_unit_result = pred_mass_central / vd
+        return depvar_unit_result
+    
+    @staticmethod
+    def ode_for_diffrax(t, y, args_tuple):
+        """
+        JAX-compatible ODE function for Diffrax.
+        y = [central_mass, gut_mass]
+        args_tuple: (ka, cl, vd)
+        """
+        ka, cl, vd = args_tuple
+        central_mass, gut_mass = y
+        # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
+        dCMdt = ka * gut_mass - (cl / vd) * central_mass
+        dGdt = -ka * gut_mass
+        return jnp.array([dCMdt, dGdt])
+
+    @staticmethod
+    def convert_state_to_depvar(pred_y_state0, args_tuple):
+        """
+        JAX-compatible conversion from central mass to concentration.
+        pred_y_state0: Predicted central_mass trajectory.
+        args_tuple: (ka, cl, vd)
+        """
+        _ka, _cl, vd = args_tuple
+        # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
+        depvar_unit_result = pred_y_state0 / vd
         return depvar_unit_result
         
 
@@ -529,6 +620,31 @@ class OneCompartmentAbsorption2(PKBaseODE):
         """Converts central compartment mass to concentration."""
         depvar_unit_result = pred_mass_central / vd
         return depvar_unit_result
+    
+    @staticmethod
+    def ode_for_diffrax(t, y, args_tuple):
+        """
+        JAX-compatible ODE function for Diffrax.
+        y = [central_mass, gut_mass]
+        args_tuple: (ka, ke, vd) - assuming ke = cl/vd from context
+        """
+        ka, ke, _vd = args_tuple # vd is not directly used if ke is cl/vd
+        central_mass, gut_mass = y
+        dCMdt = ka * gut_mass - ke * central_mass
+        dGdt = -ka * gut_mass
+        return jnp.array([dCMdt, dGdt])
+
+    @staticmethod
+    def convert_state_to_depvar(pred_y_state0, args_tuple):
+        """
+        JAX-compatible conversion from central mass to concentration.
+        pred_y_state0: Predicted central_mass trajectory.
+        args_tuple: (ka, ke, vd)
+        """
+        _ka, _ke, vd = args_tuple
+        # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
+        depvar_unit_result = pred_y_state0 / vd
+        return depvar_unit_result
 
 class OneCompartmentBolus_CL(PKBaseODE):
     """
@@ -649,6 +765,31 @@ class OneCompartmentBolus_CL(PKBaseODE):
         """Converts central compartment mass to concentration."""
         # Concentration = Mass / Volume
         depvar_unit_result = pred_mass_central / vd
+        return depvar_unit_result
+    
+    @staticmethod
+    def ode_for_diffrax(t, y, args_tuple):
+        """
+        JAX-compatible ODE function for Diffrax.
+        y[0] is central_mass.
+        args_tuple: (cl, vd)
+        """
+        cl, vd = args_tuple
+        central_mass = y[0]
+        # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
+        dCMdt = -(cl / vd) * central_mass
+        return jnp.array([dCMdt])
+
+    @staticmethod
+    def convert_state_to_depvar(pred_y_state0, args_tuple):
+        """
+        JAX-compatible conversion from central mass to concentration.
+        pred_y_state0: Predicted central_mass trajectory.
+        args_tuple: (cl, vd)
+        """
+        _cl, vd = args_tuple
+        # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
+        depvar_unit_result = pred_y_state0 / vd
         return depvar_unit_result
 
 class OneCompartmentBolus_Ke(PKBaseODE):
@@ -772,6 +913,30 @@ class OneCompartmentBolus_Ke(PKBaseODE):
     def mass_to_depvar(self, pred_mass_central, ke, vd):
         """Converts central compartment mass to concentration."""
         depvar_unit_result = pred_mass_central / vd
+        return depvar_unit_result
+    
+    @staticmethod
+    def ode_for_diffrax(t, y, args_tuple):
+        """
+        JAX-compatible ODE function for Diffrax.
+        y[0] is central_mass.
+        args_tuple: (ke, vd) - vd not used in ODE if ke is the rate constant
+        """
+        ke, _vd = args_tuple 
+        central_mass = y[0]
+        dCMdt = -ke * central_mass
+        return jnp.array([dCMdt])
+
+    @staticmethod
+    def convert_state_to_depvar(pred_y_state0, args_tuple):
+        """
+        JAX-compatible conversion from central mass to concentration.
+        pred_y_state0: Predicted central_mass trajectory.
+        args_tuple: (ke, vd)
+        """
+        _ke, vd = args_tuple
+        # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
+        depvar_unit_result = pred_y_state0 / vd
         return depvar_unit_result
 
 class TwoCompartmentBolus(PKBaseODE):
@@ -935,6 +1100,43 @@ class TwoCompartmentBolus(PKBaseODE):
         """Converts central compartment mass to concentration."""
         # Concentration = Central Mass / Central Volume
         depvar_unit_result = pred_mass_central / v1
+        return depvar_unit_result
+    
+    @staticmethod
+    def ode_for_diffrax(t, y, args_tuple):
+        """
+        JAX-compatible ODE function for Diffrax.
+        y = [central_mass, peripheral_mass]
+        args_tuple: (cl, v1, q, v2)
+        """
+        cl, v1, q, v2 = args_tuple
+        central_mass, peripheral_mass = y
+
+        # It's good practice to ensure v1 and v2 are not zero before division.
+        # This can be done by adding a small epsilon or using jnp.where,
+        # or by ensuring valid parameters are passed.
+        # For simplicity, direct division is used here, assuming valid v1, v2 > 0.
+        # v1_safe = jnp.where(jnp.abs(v1) < 1e-9, 1e-9, v1)
+        # v2_safe = jnp.where(jnp.abs(v2) < 1e-9, 1e-9, v2)
+
+        k10 = cl / v1
+        k12 = q / v1
+        k21 = q / v2
+
+        dCMdt = k21 * peripheral_mass - k12 * central_mass - k10 * central_mass
+        dPMdt = k12 * central_mass - k21 * peripheral_mass
+        return jnp.array([dCMdt, dPMdt])
+
+    @staticmethod
+    def convert_state_to_depvar(pred_y_state0, args_tuple):
+        """
+        JAX-compatible conversion from central mass to concentration.
+        pred_y_state0: Predicted central_mass trajectory.
+        args_tuple: (cl, v1, q, v2)
+        """
+        _cl, v1, _q, _v2 = args_tuple
+        # v1_safe = jnp.where(jnp.abs(v1) < 1e-9, 1e-9, v1)
+        depvar_unit_result = pred_y_state0 / v1
         return depvar_unit_result
 
 class TwoCompartmentAbsorption(PKBaseODE):
@@ -1127,6 +1329,43 @@ class TwoCompartmentAbsorption(PKBaseODE):
         # Concentration = Central Mass / Central Volume
         depvar_unit_result = pred_mass_central / v1
         return depvar_unit_result
+    
+    @staticmethod
+    def ode_for_diffrax(t, y, args_tuple):
+        """
+        JAX-compatible ODE function for Diffrax.
+        y = [central_mass, peripheral_mass, gut_mass]
+        args_tuple: (ka, cl, v1, q, v2)
+        Note: Original ValueError checks for v1, v2 <= 0 are omitted
+              as they are not JIT-friendly. Assumes valid positive volumes.
+        """
+        ka, cl, v1, q, v2 = args_tuple
+        central_mass, peripheral_mass, gut_mass = y
+
+        # v1_safe = jnp.where(jnp.abs(v1) < 1e-9, 1e-9, v1)
+        # v2_safe = jnp.where(jnp.abs(v2) < 1e-9, 1e-9, v2)
+        
+        k10 = cl / v1
+        k12 = q / v1
+        k21 = q / v2
+
+        dCMdt = ka * gut_mass + k21 * peripheral_mass - k12 * central_mass - k10 * central_mass
+        dPMdt = k12 * central_mass - k21 * peripheral_mass
+        dGdt = -ka * gut_mass
+        return jnp.array([dCMdt, dPMdt, dGdt])
+
+    @staticmethod
+    def convert_state_to_depvar(pred_y_state0, args_tuple):
+        """
+        JAX-compatible conversion from central mass to concentration.
+        pred_y_state0: Predicted central_mass trajectory.
+        args_tuple: (ka, cl, v1, q, v2)
+        Note: Original ValueError check for v1 <= 0 omitted.
+        """
+        _ka, _cl, v1, _q, _v2 = args_tuple
+        # v1_safe = jnp.where(jnp.abs(v1) < 1e-9, 1e-9, v1)
+        depvar_unit_result = pred_y_state0 / v1
+        return depvar_unit_result
 
 class OneCompartmentInfusion(PKBaseODE):
     """
@@ -1258,8 +1497,30 @@ class OneCompartmentInfusion(PKBaseODE):
         depvar_unit_result = pred_mass_central / vd
         return depvar_unit_result
     
-    def get_ode(self):
-        return self._ode
+    @staticmethod
+    def ode_for_diffrax(t, y, args_tuple):
+        """
+        JAX-compatible ODE function for Diffrax.
+        y[0] is central_mass.
+        args_tuple: (R0, cl, vd)
+        """
+        R0, cl, vd = args_tuple
+        central_mass = y[0]
+        # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
+        dCMdt = R0 - (cl / vd) * central_mass
+        return jnp.array([dCMdt])
+
+    @staticmethod
+    def convert_state_to_depvar(pred_y_state0, args_tuple):
+        """
+        JAX-compatible conversion from central mass to concentration.
+        pred_y_state0: Predicted central_mass trajectory.
+        args_tuple: (R0, cl, vd)
+        """
+        _R0, _cl, vd = args_tuple
+        # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
+        depvar_unit_result = pred_y_state0 / vd
+        return depvar_unit_result
 
 class OneCompartmentBolusMM(PKBaseODE):
     """
@@ -1421,6 +1682,49 @@ class OneCompartmentBolusMM(PKBaseODE):
         if abs(vd) < 1e-12:
             return np.zeros_like(pred_mass_central) if isinstance(pred_mass_central, np.ndarray) else 0.0
         depvar_unit_result = pred_mass_central / vd
+        return depvar_unit_result
+    
+    @staticmethod
+    def ode_for_diffrax(t, y, args_tuple):
+        """
+        JAX-compatible ODE function for Diffrax (Michaelis-Menten).
+        y[0] is central_mass.
+        args_tuple: (vmax, km, vd)
+        """
+        vmax, km, vd = args_tuple
+        central_mass = y[0]
+
+        # Avoid division by zero using jnp.where for vd if it's used to calculate concentration
+        # concentration = jnp.where(jnp.abs(vd) < 1e-12, 0.0, central_mass / vd) 
+        # The elimination term is directly formulated with central_mass and vd in denominator:
+        
+        denominator = km * vd + central_mass # Denominator for the elimination rate
+        
+        # Avoid division by zero for the elimination rate calculation
+        elimination_rate = jnp.where(
+            jnp.abs(denominator) < 1e-12, 
+            0.0, 
+            vmax * central_mass / denominator
+        )
+        
+        dCMdt = -elimination_rate
+        return jnp.array([dCMdt])
+
+    @staticmethod
+    def convert_state_to_depvar(pred_y_state0, args_tuple):
+        """
+        JAX-compatible conversion from central mass to concentration.
+        pred_y_state0: Predicted central_mass trajectory.
+        args_tuple: (vmax, km, vd)
+        """
+        _vmax, _km, vd = args_tuple
+        
+        # Handle potential division by zero for vd
+        depvar_unit_result = jnp.where(
+            jnp.abs(vd) < 1e-12,
+            jnp.zeros_like(pred_y_state0), # Handles scalar or array pred_y_state0
+            pred_y_state0 / vd
+        )
         return depvar_unit_result
     
 
