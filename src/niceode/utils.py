@@ -37,6 +37,8 @@ from .mlflow_utils import (get_class_source_without_docstrings,
                                   get_function_source_without_docstrings_or_comments, 
                                   MLflowCallback)
 from typing import Type
+from .pd_templates import InitValsPdCols
+from warnings import warn
 
 
 def debug_print(print_obj, debug=False):
@@ -110,17 +112,20 @@ def one_compartment_model(t, y, k, Vd, dose):
 
 @dataclass
 class ObjectiveFunctionColumn:
+    coeff_name:str
     column_name: str
+    log_name:str = None
     allometric_norm_value: float = None
-    model_method: str = "linear"
+    model_method: Literal['linear', 'allometric'] = "linear"
     optimization_init_val: np.float64 = 0.0
     optimization_history: list[np.float64] = field(default_factory=list)
     optimization_lower_bound: np.float64 = None
     optimization_upper_bound: np.float64 = None
 
     def __post_init__(self):
-        # Define the allowed methods. Using a dictionary for better lookup performance
-        # if the list becomes very large. You can also use a set.
+        log_name = self.coeff_name + '__' + self.column_name
+        self.log_name = log_name if self.log_name is None else log_name
+        # Define the allowed methods.
         allowed_methods = ["linear", "allometric"]
 
         if self.model_method not in allowed_methods:
@@ -137,11 +142,39 @@ class ObjectiveFunctionColumn:
                     self.model_method.__name__
                 }' is not allowed without providing the `allometric_norm_value`"""
             )
+        self.allometric = (True
+                        if self.model_method == 'allometric'
+                        else False)
+    
+    def to_pandas(self) -> pd.DataFrame:
+        cols = InitValsPdCols()
+        row_data = {
+                        cols.model_coeff: self.coeff_name,
+                        cols.log_name: self.log_name,
+                        cols.model_coeff_dep_var: self.column_name,
+                        cols.population_coeff: False,
+                        cols.model_error: False,
+                        cols.init_val: self.optimization_init_val,
+                        cols.model_coeff_lower_bound: self.optimization_lower_bound,
+                        cols.model_coeff_upper_bound: self.optimization_upper_bound,
+                        cols.allometric: self.allometric,
+                        cols.allometric_norm_value: self.allometric_norm_value,
+                        cols.subject_level_intercept: False,
+                        cols.subject_level_intercept_name: None,
+                        cols.subject_level_intercept_sd_init_val: False,
+                        cols.subject_level_intercept_init_vals_column_name: None,
+                        cols.subject_level_intercect_sd_lower_bound: None,
+                        cols.subject_level_intercect_sd_upper_bound: None,
+                    }
+        row_data = cols.validate_df_row(row_data)
+        pd_row = (pd.DataFrame([row_data], ))
+        return pd_row.copy()
 
 
 @dataclass
 class PopulationCoeffcient:
     coeff_name: str
+    log_name:str = None 
     optimization_init_val: np.float64 = None
     log_transform_init_val: bool = True
     optimization_history: list[np.float64] = field(default_factory=list)
@@ -158,6 +191,9 @@ class PopulationCoeffcient:
     subject_level_intercept_init_vals_column_name: str = None
 
     def __post_init__(self):
+        self.log_name = (self.coeff_name + "_pop" 
+                         if self.log_name is None 
+                         else self.log_name)
         if self.optimization_init_val is None:
             self.optimization_init_val = np.random.rand() + 1e-6
         self.optimization_init_val = (
@@ -174,13 +210,107 @@ class PopulationCoeffcient:
         if c1 and c2:
             self.subject_level_intercept_sd_init_val = np.random.rand() + 1e-6
 
+    def to_pandas(self):
+        cols = InitValsPdCols()
+        row_data = {   
+                #the name of the ODE parameter
+                cols.model_coeff: self.coeff_name,
+                #the name of the population component of the parameter's variance
+                cols.log_name:self.log_name,
+                cols.model_coeff_dep_var: None,
+                cols.population_coeff: True,
+                cols.model_error: False,
+                cols.init_val: self.optimization_init_val,
+                cols.model_coeff_lower_bound: self.optimization_lower_bound,
+                cols.model_coeff_upper_bound: self.optimization_upper_bound,
+                cols.allometric: None,
+                cols.allometric_norm_value: None,
+                cols.subject_level_intercept: self.subject_level_intercept,
+                cols.subject_level_intercept_name: self.subject_level_intercept_sd_name,
+                cols.subject_level_intercept_sd_init_val: self.subject_level_intercept_sd_init_val,
+                cols.subject_level_intercept_init_vals_column_name: self.subject_level_intercept_init_vals_column_name,
+                cols.subject_level_intercect_sd_lower_bound: self.subject_level_intercept_sd_lower_bound,
+                cols.subject_level_intercect_sd_upper_bound: self.subject_level_intercept_sd_upper_bound,
+                }
+        row_data = cols.validate_df_row(row_data)
+        pd_row = (pd.DataFrame([row_data], ))
+        return pd_row.copy()
+
+
+@dataclass
+class ModelError:
+    coeff_name: str
+    model_method: Literal['constant', 'proportional', 'combined'] = 'constant'
+    optimization_init_val: np.float64 = None
+    log_transform_init_val: bool = True
+    optimization_history: list[np.float64] = field(default_factory=list)
+    optimization_lower_bound: np.float64 = None
+    optimization_upper_bound: np.float64 = None
+    subject_level_intercept: bool = False
+    subject_level_intercept_sd_name: str = None
+    subject_level_intercept_sd_init_val: np.float64 = (
+        None  # this is on the log scale, but the opt inti val is not, confusing
+    )
+    subject_level_intercept_sd_lower_bound: np.float64 = None
+    subject_level_intercept_sd_upper_bound: np.float64 = None
+    subject_level_intercept_opt_step_size: np.float64 = None
+    subject_level_intercept_init_vals_column_name: str = None
+
+    def __post_init__(self):
+        self.log_name = self.coeff_name + "_const"
+        if self.model_method != 'constant':
+            warn(f"Error model {self.model_method} is not currently implemented, defaulting to constant")
+            self.model_method = 'constant'
+        if self.optimization_init_val is None:
+            self.optimization_init_val = np.random.rand() + 1e-6
+        self.optimization_init_val = (
+            np.log(self.optimization_init_val)
+            if self.log_transform_init_val
+            else self.optimization_init_val
+        )
+
+        c1 = self.subject_level_intercept_sd_init_val is None
+        c2 = self.subject_level_intercept
+        c3 = self.subject_level_intercept_sd_name is None
+        if c2 and c3:
+            self.subject_level_intercept_sd_name = f"omega2_{self.coeff_name}"
+        if c1 and c2:
+            self.subject_level_intercept_sd_init_val = np.random.rand() + 1e-6
+
+    def to_pandas(self):
+        cols = InitValsPdCols()
+        row_data = {
+                    cols.model_coeff: self.coeff_name,
+                    cols.log_name:self.log_name ,
+                    cols.model_coeff_dep_var: None,
+                    cols.population_coeff: False,
+                    cols.model_error: True,
+                    cols.init_val: self.optimization_init_val,
+                    cols.model_coeff_lower_bound: self.optimization_lower_bound,
+                    cols.model_coeff_upper_bound: self.optimization_upper_bound,
+                    cols.allometric: None,
+                    cols.allometric_norm_value: None,
+                    #Consider settings these to None as they do not currenly do anything
+                        #That is, there is currently no subject level model error and it seems like
+                        #it would be very difficult to estimate if it was included in the model as 
+                        #such alongside the 
+                    cols.subject_level_intercept: self.subject_level_intercept,
+                    cols.subject_level_intercept_name: self.subject_level_intercept_sd_name,
+                    cols.subject_level_intercept_sd_init_val: self.subject_level_intercept_sd_init_val,
+                    cols.subject_level_intercept_init_vals_column_name: self.subject_level_intercept_init_vals_column_name,
+                    cols.subject_level_intercect_sd_lower_bound: self.subject_level_intercept_sd_lower_bound,
+                    cols.subject_level_intercect_sd_upper_bound: self.subject_level_intercept_sd_upper_bound,
+                }
+        row_data = cols.validate_df_row(row_data)
+        pd_row = (pd.DataFrame([row_data], ))
+        return pd_row.copy()
 
 @dataclass
 class ObjectiveFunctionBeta:
     column_name: str
     value: np.float64
     allometric_norm_value: float = None
-    model_method: str = "linear"
+    model_method: Literal["linear", "allometric"] = "linear"
     optimization_lower_bound: np.float64 = None
     optimization_upper_bound: np.float64 = None
 
@@ -1068,10 +1198,7 @@ def arbitrary_objective_function(
     conc_at_time_c="DV",
     time_c="TIME",
     population_coeff=["k", "vd"],
-    dep_vars={
-        "k": [ObjectiveFunctionColumn("mgkg"), ObjectiveFunctionColumn("age")],
-        "vd": [ObjectiveFunctionColumn("mgkg"), ObjectiveFunctionColumn("age")],
-    },
+    dep_vars=None,
     verbose=False,
     parallel=False,
 ):
@@ -1371,7 +1498,7 @@ def optimize_with_checkpoint_joblib(
         *args,
         method=minimize_method,
         tol=tol,
-        options={"disp": True},
+        options={"disp": False},
         **kwargs,
     )
 
@@ -1456,10 +1583,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             PopulationCoeffcient("k", 0.6),
             PopulationCoeffcient("vd", 2.0),
         ],
-        dep_vars: Dict[str, List[ObjectiveFunctionColumn]] = {
-            "k": [ObjectiveFunctionColumn("mgkg"), ObjectiveFunctionColumn("age")],
-            "vd": [ObjectiveFunctionColumn("mgkg"), ObjectiveFunctionColumn("age")],
-        },
+        dep_vars: Dict[str, List[ObjectiveFunctionColumn]] = None,
+        dep_vars2: List[ObjectiveFunctionColumn] = None,
         no_me_loss_function=neg2_log_likelihood_loss,
         no_me_loss_params={},
         no_me_loss_needs_sigma=True,
@@ -1470,6 +1595,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             optimization_lower_bound=1e-6,
             optimization_upper_bound=20,
         ),
+        model_error2:ModelError = None,
         optimizer_tol=None,
         verbose=False,
         ode_solver_method="RK45",
@@ -1477,6 +1603,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         batch_id: uuid.UUID = None,
         model_id: uuid.UUID = None,
     ):
+        self.init_vals_pd_cols = InitValsPdCols()
         self.b_i_approx = None
         self.batch_id = uuid.uuid4() if batch_id is None else batch_id
         self.model_id = uuid.uuid4() if model_id is None else model_id
@@ -1512,7 +1639,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.no_me_loss_needs_sigma = no_me_loss_needs_sigma
         self.me_loss_function = me_loss_function
         # not sure if the section below needs to be in two places
-        
+        self.model_error2 = model_error2
+        self.dep_vars2 = dep_vars2
         for coef_obj in population_coeff:
             c = coef_obj.coeff_name
             if c not in (i for i in dep_vars):
@@ -1522,12 +1650,100 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.population_coeff = population_coeff
         self.dep_vars = dep_vars
         self.init_vals = self._unpack_init_vals()
+        self.init_vals_pd_alt = self._unpack_init_vals2()
+        self.result_template = self._initialize_result_template(self.init_vals_pd_alt)
+        
         self.bounds = self._unpack_upper_lower_bounds(self.model_error_sigma)
         self.no_me_loss_params = no_me_loss_params
         self.optimzer_tol = optimizer_tol
 
         # helper attributes possibly defined later
         self.fit_result_ = None
+
+    def _initialize_result_template(self, init_vals_pd):
+        #pop_coeffs
+        cols = self.init_vals_pd_cols
+        pop_coeff_rows = init_vals_pd.loc[init_vals_pd[cols.population_coeff]]
+        result_rows = []
+        for idx, row in pop_coeff_rows.iterrows():
+            result_rows.append(
+                {
+                "model_coeff": row[cols.model_coeff],
+                "log_name":row[cols.log_name],
+                "population_coeff": True,
+                "model_error": False,
+                "subject_level_intercept": False,
+                "coeff_dep_var": False,
+                "model_coeff_dep_var": None,
+                "subject_level_intercept_name": None,
+                "init_val":row[cols.init_val],
+                "lower_bound":row[cols.model_coeff_lower_bound],
+                "upper_bound":row[cols.model_coeff_upper_bound]
+                }
+            )
+            
+        c1 = self.no_me_loss_needs_sigma
+        c2 = self._subject_intercept_detected
+        model_error_rows = init_vals_pd.loc[init_vals_pd[cols.model_error]]
+        if c1 or c2 or len(model_error_rows) > 0:
+            for idx, row in model_error_rows.iterrows():
+                result_rows.append(
+                    {
+                    "model_coeff": row[cols.model_coeff],
+                    "log_name":row[cols.log_name],
+                    "population_coeff": False,
+                    "model_error": True,
+                    "subject_level_intercept": False,
+                    "coeff_dep_var": False,
+                    "model_coeff_dep_var": None,
+                    "subject_level_intercept_name": None,
+                    "init_val":row[cols.init_val],
+                    "lower_bound":row[cols.model_coeff_lower_bound],
+                    "upper_bound":row[cols.model_coeff_upper_bound]
+                    }
+                )
+        
+        omega_rows = init_vals_pd.loc[init_vals_pd[cols.subject_level_intercept]]
+        for idx, row in omega_rows.iterrows():
+            result_rows.append(
+                {
+                        "model_coeff": row[cols.model_coeff],
+                        "log_name": row[cols.subject_level_intercept_name],
+                        "population_coeff": False,
+                        "model_error": False,
+                        "subject_level_intercept": True,
+                        "coeff_dep_var": False,
+                        "model_coeff_dep_var": None,
+                        "subject_level_intercept_name": row[cols.subject_level_intercept_name],
+                        "init_val":row[cols.subject_level_intercept_sd_init_val],
+                        "lower_bound":row[cols.subject_level_intercect_sd_lower_bound],
+                        "upper_bound":row[cols.subject_level_intercect_sd_upper_bound]
+                    }
+                
+            )
+        theta_rows = (init_vals_pd.loc[
+            init_vals_pd[cols.model_coeff_dep_var].isnull() == False
+        ])
+        for idx, row in theta_rows.iterrows():
+            result_rows.append(
+                 {
+                        "model_coeff": row[cols.model_coeff],
+                        "log_name": row[cols.log_name],
+                        "population_coeff": False,
+                        "model_error": False,
+                        "subject_level_intercept": False,
+                        "coeff_dep_var": True,
+                        "model_coeff_dep_var": row[cols.model_coeff_dep_var],
+                        "subject_level_intercept_name": None,
+                        "init_val":row[cols.init_val], 
+                        "lower_bound":row[cols.model_coeff_lower_bound],
+                        "upper_bound":row[cols.model_coeff_upper_bound]
+                        
+                    }
+            )
+        return pd.DataFrame(result_rows)
+        
+             
 
     def _initalize_mlflow_experiment(self, ):
         #this seems very brittle . . .
@@ -1550,55 +1766,95 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         else:
             return ode_t0_vals
 
+    def _unpack_init_vals2(self, ):
+        init_vals_pd = []
+        init_vals_pop = []
+        init_vals_sigma = []
+        init_vals_theta = []
+        cols = self.init_vals_pd_cols
+        subject_intercept_detected = False
+        #pop_coeffs
+        for pop_coeff in self.population_coeff:
+            if pop_coeff.subject_level_intercept:
+                subject_intercept_detected = True
+            init_vals_pop.append(pop_coeff.to_pandas())
+        #then sigma
+        if subject_intercept_detected or self.no_me_loss_needs_sigma:
+            init_vals_sigma.append(self.model_error2.to_pandas())
+        #then thetas
+        for theta in self.dep_vars2:
+            init_vals_theta.append(theta.to_pandas())
+        init_vals_pd = init_vals_pop + init_vals_sigma + init_vals_theta
+        col_order = init_vals_pop[0].columns
+        init_vals_pd = pd.concat(init_vals_pd)[col_order].copy()
+        #self.n_optimized_coeff = len(init_vals)
+        init_vals_pd = init_vals_pd.fillna(pd.NA)
+        for c_idx, c in enumerate(cols.__dataclass_fields__):
+            target_dtype = cols.pd_dtypes[c_idx]
+            #this try except really seems to be a bug in pandas, iloc just
+            #doesnt work
+            try:
+                init_vals_pd.iloc[:, [c_idx]] = init_vals_pd.iloc[:, [c_idx]].astype(target_dtype)
+            except AttributeError:
+                c = init_vals_pd.columns[c_idx]
+                init_vals_pd.loc[:, [c]] = init_vals_pd.loc[:, [c]].astype(target_dtype)
+        self._subject_intercept_detected  = subject_intercept_detected
+        return init_vals_pd.reset_index(drop = True)
+    
     def _unpack_init_vals(
         self,
     ):
-        # unpack the population coeffs
+        
+
         init_vals = [obj.optimization_init_val for obj in self.population_coeff]
         init_vals_pd = []
+        cols = self.init_vals_pd_cols
         subject_intercept_detected = False
+        #unpack the information related to each ODE parameter
         for pop_coeff in self.population_coeff:
             if pop_coeff.subject_level_intercept:
                 subject_intercept_detected = True
             init_vals_pd.append(
-                {
-                    "model_coeff": pop_coeff.coeff_name,
-                    "log_name":pop_coeff.coeff_name + "_pop",
-                    "model_coeff_dep_var": None,
-                    "population_coeff": True,
-                    "model_error": False,
-                    "init_val": pop_coeff.optimization_init_val,
-                    "model_coeff_lower_bound": pop_coeff.optimization_lower_bound,
-                    "model_coeff_upper_bound": pop_coeff.optimization_upper_bound,
-                    "allometric": False,
-                    "allometric_norm_value": None,
-                    "subject_level_intercept": pop_coeff.subject_level_intercept,
-                    "subject_level_intercept_name": pop_coeff.subject_level_intercept_sd_name,
-                    "subject_level_intercept_sd_init_val": pop_coeff.subject_level_intercept_sd_init_val,
-                    "subject_level_intercept_init_vals_column_name": pop_coeff.subject_level_intercept_init_vals_column_name,
-                    "subject_level_intercect_sd_lower_bound": pop_coeff.subject_level_intercept_sd_lower_bound,
-                    "subject_level_intercect_sd_upper_bound": pop_coeff.subject_level_intercept_sd_upper_bound,
+                {   
+                #the name of the ODE parameter
+                cols.model_coeff: pop_coeff.coeff_name,
+                #the name of the population component of the parameter's variance
+                cols.log_name:pop_coeff.coeff_name + "_pop",
+                cols.model_coeff_dep_var: None,
+                cols.population_coeff: True,
+                cols.model_error: False,
+                cols.init_val: pop_coeff.optimization_init_val,
+                cols.model_coeff_lower_bound: pop_coeff.optimization_lower_bound,
+                cols.model_coeff_upper_bound: pop_coeff.optimization_upper_bound,
+                cols.allometric: False,
+                cols.allometric_norm_value: None,
+                cols.subject_level_intercept: pop_coeff.subject_level_intercept,
+                cols.subject_level_intercept_name: pop_coeff.subject_level_intercept_sd_name,
+                cols.subject_level_intercept_sd_init_val: pop_coeff.subject_level_intercept_sd_init_val,
+                cols.subject_level_intercept_init_vals_column_name: pop_coeff.subject_level_intercept_init_vals_column_name,
+                cols.subject_level_intercect_sd_lower_bound: pop_coeff.subject_level_intercept_sd_lower_bound,
+                cols.subject_level_intercect_sd_upper_bound: pop_coeff.subject_level_intercept_sd_upper_bound,
                 }
             )
         if subject_intercept_detected or self.no_me_loss_needs_sigma:
             init_vals_pd.append(
                 {
-                    "model_coeff": self.model_error_sigma.coeff_name,
-                    "log_name":self.model_error_sigma.coeff_name + "_const",
-                    "model_coeff_dep_var": None,
-                    "population_coeff": False,
-                    "model_error": True,
-                    "init_val": self.model_error_sigma.optimization_init_val,
-                    "model_coeff_lower_bound": self.model_error_sigma.optimization_lower_bound,
-                    "model_coeff_upper_bound": self.model_error_sigma.optimization_upper_bound,
-                    "allometric": False,
-                    "allometric_norm_value": None,
-                    "subject_level_intercept": self.model_error_sigma.subject_level_intercept,
-                    "subject_level_intercept_name": self.model_error_sigma.subject_level_intercept_sd_name,
-                    "subject_level_intercept_sd_init_val": self.model_error_sigma.subject_level_intercept_sd_init_val,
-                    "subject_level_intercept_init_vals_column_name": self.model_error_sigma.subject_level_intercept_init_vals_column_name,
-                    "subject_level_intercect_sd_lower_bound": self.model_error_sigma.subject_level_intercept_sd_lower_bound,
-                    "subject_level_intercect_sd_upper_bound": self.model_error_sigma.subject_level_intercept_sd_upper_bound,
+                    cols.model_coeff: self.model_error_sigma.coeff_name,
+                    cols.log_name:self.model_error_sigma.coeff_name + '_const',
+                    cols.model_coeff_dep_var: None,
+                    cols.population_coeff: False,
+                    cols.model_error: True,
+                    cols.init_val: self.model_error_sigma.optimization_init_val,
+                    cols.model_coeff_lower_bound: self.model_error_sigma.optimization_lower_bound,
+                    cols.model_coeff_upper_bound: self.model_error_sigma.optimization_upper_bound,
+                    cols.allometric: False,
+                    cols.allometric_norm_value: None,
+                    cols.subject_level_intercept: self.model_error_sigma.subject_level_intercept,
+                    cols.subject_level_intercept_name: self.model_error_sigma.subject_level_intercept_sd_name,
+                    cols.subject_level_intercept_sd_init_val: self.model_error_sigma.subject_level_intercept_sd_init_val,
+                    cols.subject_level_intercept_init_vals_column_name: self.model_error_sigma.subject_level_intercept_init_vals_column_name,
+                    cols.subject_level_intercect_sd_lower_bound: self.model_error_sigma.subject_level_intercept_sd_lower_bound,
+                    cols.subject_level_intercect_sd_upper_bound: self.model_error_sigma.subject_level_intercept_sd_upper_bound,
                 }
             )
         # unpack the dep vars for the population coeffs
@@ -1614,29 +1870,30 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             for coeff_dep_var in coeff_dep_vars:
                 init_vals_pd.append(
                     {
-                        "model_coeff": model_coeff,
-                        "log_name": model_coeff + "__" + coeff_dep_var.column_name,
-                        "model_coeff_dep_var": coeff_dep_var.column_name,
-                        "population_coeff": False,
-                        "model_error": False,
-                        "init_val": coeff_dep_var.optimization_init_val,
-                        "model_coeff_lower_bound": coeff_dep_var.optimization_lower_bound,
-                        "model_coeff_upper_bound": coeff_dep_var.optimization_upper_bound,
-                        "allometric": True
-                        if coeff_dep_var.model_method == "allometric"
+                        cols.model_coeff: model_coeff,
+                        cols.log_name: model_coeff + '__' + coeff_dep_var.column_name,
+                        cols.model_coeff_dep_var: coeff_dep_var.column_name,
+                        cols.population_coeff: False,
+                        cols.model_error: False,
+                        cols.init_val: coeff_dep_var.optimization_init_val,
+                        cols.model_coeff_lower_bound: coeff_dep_var.optimization_lower_bound,
+                        cols.model_coeff_upper_bound: coeff_dep_var.optimization_upper_bound,
+                        cols.allometric: True
+                        if coeff_dep_var.model_method == 'allometric'
                         else False,
-                        "allometric_norm_value": coeff_dep_var.allometric_norm_value,
-                        "subject_level_intercept": False,
-                        "subject_level_intercept_name": None,
-                        "subject_level_intercept_sd_init_val": False,
-                        "subject_level_intercept_init_vals_column_name": None,
-                        "subject_level_intercect_var_lower_bound": None,
-                        "subject_level_intercect_var_upper_bound": None,
+                        cols.allometric_norm_value: coeff_dep_var.allometric_norm_value,
+                        cols.subject_level_intercept: False,
+                        cols.subject_level_intercept_name: None,
+                        cols.subject_level_intercept_sd_init_val: None,
+                        cols.subject_level_intercept_init_vals_column_name: None,
+                        cols.subject_level_intercect_sd_lower_bound: None,
+                        cols.subject_level_intercect_sd_upper_bound: None,
                     }
                 )
         self.init_vals_pd = pd.DataFrame(init_vals_pd)
         self.n_optimized_coeff = len(init_vals)
         return np.array(init_vals, dtype=np.float64)
+
 
     def _unpack_upper_lower_bounds(self, model_error: PopulationCoeffcient):
         # pop coeff bounds
@@ -1788,21 +2045,22 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     ):
         thetas = pd.DataFrame()
         theta_data = pd.DataFrame()
+        ivc = self.init_vals_pd_cols
         for idx, row in model_param_dep_vars.iterrows():
-            coeff_name = row["model_coeff"]
-            theta_name = row["model_coeff_dep_var"]
-            theta_is_allometric = row["allometric"]
+            coeff_name = row[ivc.model_coeff]
+            theta_name = row[ivc.model_coeff_dep_var]
+            theta_is_allometric = row[ivc.allometric]
             col = (coeff_name, theta_name)
             if col not in thetas.columns:
                 thetas[col] = [np.nan]
                 thetas[col] = thetas[col].astype(pd.Float64Dtype())
-            thetas[col] = [row["init_val"]]
+            thetas[col] = [row[ivc.init_val]]
             if col not in theta_data.columns:
                 theta_data[col] = np.repeat(np.nan, len(subject_data))
                 theta_data[col] = thetas[col].astype(pd.Float64Dtype())
             if theta_is_allometric:
                 theta_data_col = safe_signed_log(
-                    subject_data[theta_name].values / row["allometric_norm_value"]
+                    subject_data[theta_name].values / row[ivc.allometric_norm_value]
                 )
             else:
                 theta_data_col = subject_data[theta_name].values
@@ -1819,22 +2077,24 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         )
         return thetas, theta_data
 
+    
     #@profile
     def _unpack_prepare_pop_coeffs(self, model_params: pd.DataFrame):
         pop_coeffs = pd.DataFrame()
         subject_level_intercept_sds = pd.DataFrame(dtype=pd.Float64Dtype())
         subject_level_intercept_init_vals = pd.DataFrame(dtype=pd.Float64Dtype())
+        ivc = self.init_vals_pd_cols
         for idx, row in model_params.iterrows():
-            coeff_name = row["model_coeff"]
+            coeff_name = row[ivc.model_coeff]
             if coeff_name not in pop_coeffs.columns:
                 pop_coeffs[coeff_name] = [np.nan]
                 pop_coeffs[coeff_name] = pop_coeffs[coeff_name].astype(
                     pd.Float64Dtype()
                 )
-            pop_coeffs[coeff_name] = [row["init_val"]]
+            pop_coeffs[coeff_name] = [row[ivc.init_val]]
 
-            if row["subject_level_intercept"]:
-                omega_name = f"omega2_{coeff_name}" #should get this from the table instead
+            if row[ivc.subject_level_intercept]: 
+                omega_name = row[ivc.subject_level_intercept_name]
                 col = (coeff_name, omega_name)
                 if col not in subject_level_intercept_sds.columns:
                     subject_level_intercept_sds[col] = [np.nan]
@@ -1842,9 +2102,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         col
                     ].astype(pd.Float64Dtype())
                 subject_level_intercept_sds[col] = [
-                    row["subject_level_intercept_sd_init_val"]
+                    row[ivc.subject_level_intercept_sd_init_val] 
                 ]  # this is terrible, referencing the names like this
-                init_vals_col = row["subject_level_intercept_init_vals_column_name"]
+                
+                init_vals_col = row[ivc.subject_level_intercept_init_vals_column_name]
                 if init_vals_col in self.subject_data.columns:
                     subject_level_intercept_init_vals[col] = (
                         self.subject_data[init_vals_col]
@@ -1916,12 +2177,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         )
         # n_subs = len(subs)
         init_vals = self.init_vals_pd.copy()
-        init_vals["init_val"] = init_vals["init_val"].fillna(0.0)
-        model_params = init_vals.loc[init_vals["population_coeff"], :]
+        ivc = self.init_vals_pd_cols
+        #init_val should never be null, but just to be safe
+        init_vals[ivc.init_val] = init_vals[ivc.init_val].fillna(0.0)
+        model_params = init_vals.loc[init_vals[ivc.population_coeff], :]
         self.n_population_coeff = len(model_params)
         model_param_dep_vars = init_vals.loc[
-            (init_vals["population_coeff"] == False)
-            & (init_vals["model_error"] == False),
+            (init_vals[ivc.population_coeff] == False)
+            & (init_vals[ivc.model_error] == False),
             :,
         ]
 
@@ -1951,6 +2214,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             thetas.copy(),
             theta_data.copy(),
         )
+    
 
     #@profile
     def _generate_pk_model_coeff_vectorized(
@@ -2408,6 +2672,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     for c_tuple in thetas.columns.to_list()
                 ]
             )
+        #it would be possible to construct this when the class is initialized from 
+        #init vals pd, that would make it much easier to follow. 
         fit_result_summary = pd.DataFrame(
                 param_names,
             )
@@ -2457,8 +2723,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 'subject_level_intercect_sd_lower_bound', 
                 'subject_level_intercect_sd_upper_bound'
             ]
-            subj_eff_cols = [i.replace('intercept', 'effect').replace('intercect', 'effect') 
-                             for i in subj_eff_cols]
+            #subj_eff_cols = [i.replace('intercept', 'effect').replace('intercect', 'effect') 
+            #                 for i in subj_eff_cols]
             tmp = self.init_vals_pd
             pop_coeffs_df = tmp.loc[tmp['population_coeff'], :]
             sigmas_df = tmp.loc[tmp['model_error'], :]
@@ -2549,7 +2815,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 "The Model must be fit before generating a fitted model id"
             )
         else:
-            return f"b-{str(self.batch_id)}_m-{str(self.model_id)}_f-{str(self.fit_id)}"
+            return f"b-{str(self.batch_id)}_m-{str(self.model_name)}_f-{str(self.fit_id)}"
 
 
 def fit_indiv_models(compartmental_model: CompartmentalModel, df: pd.DataFrame):
