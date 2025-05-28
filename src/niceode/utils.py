@@ -1605,6 +1605,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         batch_id: uuid.UUID = None,
         model_id: uuid.UUID = None,
     ):
+        self.jax_ivp_solver_compiled = False 
         self.init_vals_pd_cols = InitValsPdCols()
         self.b_i_approx = None
         self.batch_id = uuid.uuid4() if batch_id is None else batch_id
@@ -2310,24 +2311,28 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         time_mask = self.time_mask if time_mask is None else time_mask
         model_coeffs, ode_t0_vals = model_coeffs.to_numpy(), ode_t0_vals.to_numpy()
         
-        diffrax_solver = diffrax.Tsit5()
-        diffrax_step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-8)
-        dt0 = 0.01
-        
-        partial_solve_ivp = partial(
-            self._solve_ivp_jax_worker,
-            ode_class=self.pk_model_class,
-            tspan=self.global_tspan_init,
-            teval=self.global_tp_eval if timepoints is None else timepoints,
-            diffrax_solver=diffrax_solver,
-            diffrax_step_ctrl = diffrax_step_ctrl,
-            dt0 = dt0
+        if not self.jax_ivp_solver_compiled:
+            diffrax_solver = diffrax.Tsit5()
+            diffrax_step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-8)
+            dt0 = 0.01
             
-        )
-        
-        vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
-        jit_vmapped_solve = jax.jit(vmapped_solve)
-        
+            partial_solve_ivp = partial(
+                self._solve_ivp_jax_worker,
+                ode_class=self.pk_model_class,
+                tspan=self.global_tspan_init,
+                teval=self.global_tp_eval if timepoints is None else timepoints,
+                diffrax_solver=diffrax_solver,
+                diffrax_step_ctrl = diffrax_step_ctrl,
+                dt0 = dt0
+                
+            )
+            
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+            jit_vmapped_solve = jax.jit(vmapped_solve)
+            self._jit_vmapped_solve = jit_vmapped_solve
+            self.jax_ivp_solver_compiled = True
+        else:
+            jit_vmapped_solve = self._jit_vmapped_solve 
         all_solutions_masses, all_concentrations = jit_vmapped_solve(
                 ode_t0_vals,
                 model_coeffs
@@ -2352,15 +2357,18 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         time_mask = self.time_mask if time_mask is None else time_mask
         
         use_jax = True
+        parallel = False
+        parallel_n_jobs = 3
         if use_jax:
             masses, concs = self._solve_ivp_jax(
-                model_coeffs = model_coeffs
+                model_coeffs = model_coeffs,
             )
-            masses[:,:,0] = concs
+            sol_full = np.array(masses, dtype = np.float64)
+            sol_full[:,:,0] = concs
             
             sol_dep_var = concs
             sol_dep_var = np.concatenate(sol_dep_var)
-            sol_full = np.vstack(masses)
+            sol_full = np.vstack(sol_full)
         else:
             iter_obj = zip(model_coeffs.iterrows(), ode_t0_vals.iterrows())
             partial_solve_ivp = partial(
@@ -2501,6 +2509,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return error
 
     def save_fitted_model(self, jb_file_name: str = None):
+        
+        unpickable_attr = [self._jit_vmapped_solve]
+        for a in unpickable_attr:
+            a = None
         if self.fit_result_ is None:
             raise ValueError("The Model must be fit before saving a fitted model")
         save_dir = "logs/"
