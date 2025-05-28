@@ -2510,9 +2510,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
 
     def save_fitted_model(self, jb_file_name: str = None):
         
-        unpickable_attr = [self._jit_vmapped_solve]
+        unpickable_attr = ["_jit_vmapped_solve"]
         for a in unpickable_attr:
-            a = None
+            self.__dict__[a] = None
         if self.fit_result_ is None:
             raise ValueError("The Model must be fit before saving a fitted model")
         save_dir = "logs/"
