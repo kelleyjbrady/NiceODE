@@ -42,6 +42,8 @@ from warnings import warn
 import diffrax
 import jax
 from tempfile import TemporaryFile
+from .model_assesment import construct_profile_ci
+import re
 
 
 def debug_print(print_obj, debug=False):
@@ -2710,6 +2712,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         n_iters_per_checkpoint=0,
         warm_start=False,
         fit_id: uuid.UUID = None,
+        ci_level:np.float64 = 0.95
     ) -> Self:
         fit_id = uuid.uuid4() if fit_id is None else fit_id
         data = self._validate_data_chronology(data)
@@ -2926,13 +2929,28 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             mlflow.log_metric('final_success', bool(self.fit_result_.success))
             mlflow.log_text(str(self.fit_result_), 'OptimizeResult.txt')
             
+            
+            
             fit_result_summary["best_fit_param_val"] = pd.NA
             fit_result_summary["best_fit_param_val"] = fit_result_summary[
                 "best_fit_param_val"
             ].astype(pd.Float64Dtype())
             fit_result_summary["best_fit_param_val"] = self.fit_result_.x
+            if ci_level is not None:
+                ci_df = self._generate_profile_ci(data=data)
+                fit_result_summary = fit_result_summary.merge(
+                    ci_df, how = 'left', right_index=True, left_index=True
+                )
+                ci_re = re.compile('^ci[0-9]{1,2}')
+                ci_cols = [i for i in self.fit_result_summary_.columns if bool(re.search(ci_re, i))]
+                for idx, row in self.fit_result_summary_.iterrows():
+                    for c in ci_cols:
+                        log_str = f"param_{row['log_name']}_{c}"
+                        mlflow.log_metric(log_str, row[c])
+            
             self.fit_result_summary_ = fit_result_summary.copy()
             mlflow.log_table(self.fit_result_summary_, 'fit_result_summary.json')
+            
             # after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
             #
             preds = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs)
@@ -2960,10 +2978,24 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             mlflow.log_table(self._summary_pk_stats_descr, 'fitted_subject_ode_params_descr.json')
             for c in self._summary_pk_stats_descr.columns:
                 tmp = self._summary_pk_stats_descr[c]
-                [mlflow.log_metric(f"fitted_{c}_{idx.replace('%', 'quantile')}", tmp[idx])
+                [mlflow.log_metric(f"fitted_subject_{c}_{idx.replace('%', 'quantile')}", tmp[idx])
                  for idx in tmp.index[1:]] 
+            
+            
+                
         return deepcopy(self)
 
+    def _generate_profile_ci(self,data  ):
+        res_list = []
+        for param_idx, param_val in enumerate(self.fit_result_.x):
+            print(f"Profiling parameter:{param_idx}")
+            res_list = construct_profile_ci(model_obj = self,
+                                                       df = data,
+                                                       param_index=param_idx,
+                                                       result_list = res_list
+                                                       )
+        return pd.DataFrame(res_list,)
+    
     def _generate_fitted_model_name(self, ignore_fit_status=False):
         if (self.fit_result_ is None) and not ignore_fit_status:
             raise ValueError(
