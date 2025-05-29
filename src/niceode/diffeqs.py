@@ -230,6 +230,14 @@ class PKBaseODE(abc.ABC):
                 (e.g., concentration = mass / volume).
         """
         pass
+    
+    @staticmethod
+    @abc.abstractmethod
+    def summary_calculations(*params) -> dict:
+        """Used to declare summary parameters. For example vd in a two
+        compartment model can be defined as `vd = v1+v2`.
+        """
+        pass
 
     
 class OneCompartmentConc(PKBaseODE):
@@ -283,6 +291,57 @@ class OneCompartmentConc(PKBaseODE):
         """
         # _cl, _vd = args_tuple # Unpack if needed, not in this case
         return pred_y_state0
+    
+    @staticmethod
+    def summary_calculations(args_tuple: tuple) -> dict:
+        """
+        Calculates summary PK statistics from one-compartment concentration model parameters.
+
+        Args:
+            args_tuple: A tuple containing the model parameters (cl, vd).
+                        - cl: Clearance (volume/time)
+                        - vd: Volume of distribution (volume)
+
+        Returns:
+            A dictionary of summary statistics.
+        """
+        cl, vd = args_tuple
+        ln_2 = jnp.log(2.0)
+
+        # Ensure parameters are positive for stable calculations
+        cl_safe = jnp.maximum(cl, 1e-9) # Add small epsilon for safety if cl can be zero
+        vd_safe = jnp.maximum(vd, 1e-9) # Add small epsilon for safety if vd can be zero
+
+        ke = cl_safe / vd_safe
+        t_half_elim = ln_2 / jnp.maximum(ke, 1e-9)
+
+        summary = {
+            "ke": ke,
+            "t_half_elim": t_half_elim,
+            "cl": cl, # Direct parameter
+            "vd": vd   # Direct parameter
+        }
+        
+        # --- Documentation for comparison ---
+        # "ke": Elimination rate constant (1/time).
+        #       - Comparison: Fundamental property. Can be compared to ke from other
+        #                     one-compartment models or the terminal elimination rate (beta)
+        #                     from multi-compartment models.
+        # "t_half_elim": Elimination half-life (time).
+        #                - Comparison: Often compared to the half-life estimated from
+        #                              Non-Compartmental Analysis (NCA).
+        # "cl": Clearance (volume/time).
+        #       - Comparison: Should be comparable to NCA-derived total clearance if the
+        #                     model describes the data well.
+        # "vd": Volume of distribution (volume).
+        #       - Comparison: Can be compared to NCA Vz (volume of distribution during terminal phase)
+        #                     or Vss. Differences are expected if a one-compartment model
+        #                     is a simplification of multi-compartmental kinetics. A poor fit
+        #                     of a one-compartment model to clearly multi-compartmental data
+        #                     will yield a Vd that may not align well with NCA parameters or
+        #                     volumes from more complex models.
+        return summary
+        
 
 class OneCompartmentAbsorption(PKBaseODE):
     """
@@ -461,6 +520,50 @@ class OneCompartmentAbsorption(PKBaseODE):
         # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
         depvar_unit_result = pred_y_state0 / vd
         return depvar_unit_result
+    
+    @staticmethod
+    def summary_calculations(args_tuple: tuple) -> dict:
+        """
+        Calculates summary PK statistics from one-compartment absorption model parameters.
+
+        Args:
+            args_tuple: A tuple containing (ka, cl, vd).
+                        - ka: Absorption rate constant (1/time)
+                        - cl: Clearance (volume/time)
+                        - vd: Volume of distribution (volume)
+        Returns:
+            A dictionary of summary statistics.
+        """
+        ka, cl, vd = args_tuple
+        ln_2 = jnp.log(2.0)
+
+        ka_safe = jnp.maximum(ka, 1e-9)
+        cl_safe = jnp.maximum(cl, 1e-9)
+        vd_safe = jnp.maximum(vd, 1e-9)
+
+        ke = cl_safe / vd_safe
+        t_half_elim = ln_2 / jnp.maximum(ke, 1e-9)
+        t_half_abs = ln_2 / ka_safe
+        
+        summary = {
+            "ka": ka, # Direct parameter
+            "ke": ke,
+            "t_half_elim": t_half_elim,
+            "t_half_abs": t_half_abs,
+            "cl": cl, # Direct parameter
+            "vd": vd  # Direct parameter
+        }
+        # --- Documentation for comparison ---
+        # "ka": Absorption rate constant (1/time).
+        #       - Comparison: Reflects the speed of drug absorption.
+        # "ke": Elimination rate constant (1/time). (See OneCompartmentConc)
+        # "t_half_elim": Elimination half-life (time). (See OneCompartmentConc)
+        # "t_half_abs": Absorption half-life (time).
+        #               - Comparison: Reflects how quickly the drug is absorbed. Can be
+        #                             qualitatively compared to the time to maximum concentration (Tmax).
+        # "cl": Clearance (volume/time). (See OneCompartmentConc)
+        # "vd": Volume of distribution (volume). (See OneCompartmentConc)
+        return summary
         
 
 
@@ -645,6 +748,48 @@ class OneCompartmentAbsorption2(PKBaseODE):
         # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
         depvar_unit_result = pred_y_state0 / vd
         return depvar_unit_result
+    
+    @staticmethod
+    def summary_calculations(args_tuple: tuple) -> dict:
+        """
+        Calculates summary PK statistics. ke is a direct parameter.
+
+        Args:
+            args_tuple: A tuple containing (ka, ke, vd).
+                        - ka: Absorption rate constant (1/time)
+                        - ke: Elimination rate constant (1/time)
+                        - vd: Volume of distribution (volume)
+        Returns:
+            A dictionary of summary statistics.
+        """
+        ka, ke, vd = args_tuple
+        ln_2 = jnp.log(2.0)
+
+        ka_safe = jnp.maximum(ka, 1e-9)
+        ke_safe = jnp.maximum(ke, 1e-9)
+        # vd_safe = jnp.maximum(vd, 1e-9) # vd is used for CL calculation
+
+        cl_derived = ke_safe * vd # vd can be zero if not careful, but phys. shouldn't
+        t_half_elim = ln_2 / ke_safe
+        t_half_abs = ln_2 / ka_safe
+
+        summary = {
+            "ka": ka, # Direct parameter
+            "ke": ke, # Direct parameter
+            "vd": vd, # Direct parameter
+            "cl_derived": cl_derived,
+            "t_half_elim": t_half_elim,
+            "t_half_abs": t_half_abs
+        }
+        # --- Documentation for comparison ---
+        # "ka": Absorption rate constant (1/time). (See OneCompartmentAbsorption)
+        # "ke": Elimination rate constant (1/time). (See OneCompartmentConc)
+        # "vd": Volume of distribution (volume). (See OneCompartmentConc)
+        # "cl_derived": Derived clearance (volume/time), calculated as ke * vd.
+        #               - Comparison: Should be comparable to NCA-derived total clearance.
+        # "t_half_elim": Elimination half-life (time). (See OneCompartmentConc)
+        # "t_half_abs": Absorption half-life (time). (See OneCompartmentAbsorption)
+        return summary
 
 class OneCompartmentBolus_CL(PKBaseODE):
     """
@@ -791,6 +936,35 @@ class OneCompartmentBolus_CL(PKBaseODE):
         # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
         depvar_unit_result = pred_y_state0 / vd
         return depvar_unit_result
+    
+    @staticmethod
+    def summary_calculations(args_tuple: tuple) -> dict:
+        """
+        Calculates summary PK statistics. Same as OneCompartmentConc.
+
+        Args:
+            args_tuple: A tuple containing (cl, vd).
+                        - cl: Clearance (volume/time)
+                        - vd: Volume of distribution (volume)
+        Returns:
+            A dictionary of summary statistics.
+        """
+        cl, vd = args_tuple
+        ln_2 = jnp.log(2.0)
+        cl_safe = jnp.maximum(cl, 1e-9)
+        vd_safe = jnp.maximum(vd, 1e-9)
+
+        ke = cl_safe / vd_safe
+        t_half_elim = ln_2 / jnp.maximum(ke, 1e-9)
+
+        summary = {
+            "ke": ke,
+            "t_half_elim": t_half_elim,
+            "cl": cl,
+            "vd": vd
+        }
+        # Doc same as OneCompartmentConc
+        return summary
 
 class OneCompartmentBolus_Ke(PKBaseODE):
     """
@@ -938,6 +1112,34 @@ class OneCompartmentBolus_Ke(PKBaseODE):
         # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
         depvar_unit_result = pred_y_state0 / vd
         return depvar_unit_result
+    
+    @staticmethod
+    def summary_calculations(args_tuple: tuple) -> dict:
+        """
+        Calculates summary PK statistics. ke is a direct parameter.
+
+        Args:
+            args_tuple: A tuple containing (ke, vd).
+                        - ke: Elimination rate constant (1/time)
+                        - vd: Volume of distribution (volume)
+        Returns:
+            A dictionary of summary statistics.
+        """
+        ke, vd = args_tuple
+        ln_2 = jnp.log(2.0)
+        ke_safe = jnp.maximum(ke, 1e-9)
+
+        cl_derived = ke_safe * vd
+        t_half_elim = ln_2 / ke_safe
+        
+        summary = {
+            "ke": ke,
+            "vd": vd,
+            "cl_derived": cl_derived,
+            "t_half_elim": t_half_elim
+        }
+        # Doc similar to OneCompartmentAbsorption2 (without absorption parts)
+        return summary
 
 class TwoCompartmentBolus(PKBaseODE):
     """
@@ -1138,6 +1340,91 @@ class TwoCompartmentBolus(PKBaseODE):
         # v1_safe = jnp.where(jnp.abs(v1) < 1e-9, 1e-9, v1)
         depvar_unit_result = pred_y_state0 / v1
         return depvar_unit_result
+    
+    @staticmethod
+    def summary_calculations(args_tuple: tuple) -> dict:
+        """
+        Calculates summary PK statistics from two-compartment bolus model parameters.
+
+        Args:
+            args_tuple: A tuple containing (cl, v1, q, v2).
+                        - cl: Clearance from central compartment (volume/time)
+                        - v1: Volume of central compartment (volume)
+                        - q: Inter-compartmental clearance (volume/time)
+                        - v2: Volume of peripheral compartment (volume)
+        Returns:
+            A dictionary of summary statistics.
+        """
+        cl, v1, q, v2 = args_tuple
+        ln_2 = jnp.log(2.0)
+
+        v1_safe = jnp.maximum(v1, 1e-9)
+        v2_safe = jnp.maximum(v2, 1e-9) # q can be 0, so v2 could be irrelevant if q=0
+
+        k10 = cl / v1_safe
+        k12 = q / v1_safe
+        k21 = q / v2_safe # If q is 0, k21 is 0. If q>0 and v2=0, this is Inf.
+
+        # Sum of volumes, also Vss for this parameterization
+        Vd_sum_equals_Vss = v1 + v2
+
+        # Hybrid rate constants alpha and beta (exponents of decline)
+        # s^2 + (k10+k12+k21)s + k10*k21 = 0. Roots are -alpha, -beta.
+        # alpha and beta are positive values.
+        sum_k = k10 + k12 + k21
+        prod_k10_k21 = k10 * k21
+        
+        discriminant = sum_k**2 - 4 * prod_k10_k21
+        # Ensure discriminant is non-negative for sqrt
+        sqrt_discriminant = jnp.sqrt(jnp.maximum(0.0, discriminant))
+        
+        alpha = 0.5 * (sum_k + sqrt_discriminant)
+        beta = 0.5 * (sum_k - sqrt_discriminant)
+
+        # Ensure alpha is the larger rate constant (smaller half-life)
+        # If alpha and beta from formula are swapped, swap them back.
+        # The formula used should give alpha >= beta.
+        # If sum_k = 0, alpha=beta=0. If sqrt_discriminant = 0, alpha=beta.
+        
+        # Half-lives
+        # Add epsilon to alpha and beta to prevent division by zero if they are zero
+        # (e.g. if all k's are zero or q=0 and cl=0 for beta)
+        alpha_safe = jnp.maximum(alpha, 1e-9)
+        beta_safe = jnp.maximum(beta, 1e-9)
+
+        t_half_alpha = ln_2 / alpha_safe # Distribution half-life
+        t_half_beta = ln_2 / beta_safe   # Terminal/elimination half-life
+
+        summary = {
+            "cl": cl, "v1": v1, "q": q, "v2": v2, # Direct parameters
+            "Vss": Vd_sum_equals_Vss, # Vd_sum is Vss for this model structure
+            "k10": k10, "k12": k12, "k21": k21,
+            "alpha": alpha, "beta": beta,
+            "t_half_alpha": t_half_alpha,
+            "t_half_beta": t_half_beta
+        }
+        # --- Documentation for comparison ---
+        # "Vss": Volume of distribution at steady state (v1 + v2).
+        #        - Comparison: This is a key parameter. It should be comparable to Vss
+        #                      estimated by NCA if the model and NCA are appropriate.
+        #                      As you noted, expect it to be on the same order of magnitude.
+        #                      It might differ from a Vd from a one-compartment model fit
+        #                      to the same data, especially if the one-compartment model
+        #                      was a poor fit.
+        # "k10", "k12", "k21": Micro-rate constants (1/time).
+        #                      - Comparison: Fundamental model parameters describing drug disposition.
+        # "alpha", "beta": Hybrid rate constants (1/time) where alpha > beta.
+        #                  Alpha governs the initial rapid distribution phase, beta governs
+        #                  the terminal elimination phase.
+        #                  - Comparison: Beta can be compared to the terminal elimination
+        #                                rate constant from NCA (lambda_z).
+        # "t_half_alpha": Distribution half-life (time).
+        #                 - Comparison: Reflects the speed of drug distribution between central
+        #                               and peripheral compartments.
+        # "t_half_beta": Terminal elimination half-life (time).
+        #                - Comparison: This is often the clinically reported half-life and
+        #                              should be comparable to the half-life estimated from NCA.
+        return summary
 
 class TwoCompartmentAbsorption(PKBaseODE):
     """
@@ -1366,6 +1653,62 @@ class TwoCompartmentAbsorption(PKBaseODE):
         # v1_safe = jnp.where(jnp.abs(v1) < 1e-9, 1e-9, v1)
         depvar_unit_result = pred_y_state0 / v1
         return depvar_unit_result
+    
+    @staticmethod
+    def summary_calculations(args_tuple: tuple) -> dict:
+        """
+        Calculates summary PK statistics from two-compartment absorption model parameters.
+
+        Args:
+            args_tuple: A tuple containing (ka, cl, v1, q, v2).
+                        - ka: Absorption rate constant (1/time)
+                        - cl: Clearance from central compartment (volume/time)
+                        - v1: Volume of central compartment (volume)
+                        - q: Inter-compartmental clearance (volume/time)
+                        - v2: Volume of peripheral compartment (volume)
+        Returns:
+            A dictionary of summary statistics.
+        """
+        ka, cl, v1, q, v2 = args_tuple
+        ln_2 = jnp.log(2.0)
+
+        ka_safe = jnp.maximum(ka, 1e-9)
+        v1_safe = jnp.maximum(v1, 1e-9)
+        v2_safe = jnp.maximum(v2, 1e-9)
+
+        k10 = cl / v1_safe
+        k12 = q / v1_safe
+        k21 = q / v2_safe
+        
+        Vd_sum_equals_Vss = v1 + v2
+        
+        sum_k = k10 + k12 + k21
+        prod_k10_k21 = k10 * k21
+        discriminant = sum_k**2 - 4 * prod_k10_k21
+        sqrt_discriminant = jnp.sqrt(jnp.maximum(0.0, discriminant))
+        
+        alpha = 0.5 * (sum_k + sqrt_discriminant)
+        beta = 0.5 * (sum_k - sqrt_discriminant)
+
+        alpha_safe = jnp.maximum(alpha, 1e-9)
+        beta_safe = jnp.maximum(beta, 1e-9)
+
+        t_half_alpha = ln_2 / alpha_safe
+        t_half_beta = ln_2 / beta_safe
+        t_half_abs = ln_2 / ka_safe
+
+        summary = {
+            "ka": ka, "cl": cl, "v1": v1, "q": q, "v2": v2, # Direct parameters
+            "Vss": Vd_sum_equals_Vss,
+            "k10": k10, "k12": k12, "k21": k21,
+            "alpha": alpha, "beta": beta,
+            "t_half_alpha": t_half_alpha,
+            "t_half_beta": t_half_beta,
+            "t_half_abs": t_half_abs
+        }
+        # Doc same as TwoCompartmentBolus, plus:
+        # "t_half_abs": Absorption half-life (time). (See OneCompartmentAbsorption)
+        return summary
 
 class OneCompartmentInfusion(PKBaseODE):
     """
@@ -1521,6 +1864,46 @@ class OneCompartmentInfusion(PKBaseODE):
         # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
         depvar_unit_result = pred_y_state0 / vd
         return depvar_unit_result
+    
+    @staticmethod
+    def summary_calculations(args_tuple: tuple) -> dict:
+        """
+        Calculates summary PK statistics for a one-compartment infusion model.
+
+        Args:
+            args_tuple: A tuple containing (R0, cl, vd).
+                        - R0: Infusion rate (mass/time)
+                        - cl: Clearance (volume/time)
+                        - vd: Volume of distribution (volume)
+        Returns:
+            A dictionary of summary statistics.
+        """
+        R0, cl, vd = args_tuple
+        ln_2 = jnp.log(2.0)
+
+        cl_safe = jnp.maximum(cl, 1e-9)
+        vd_safe = jnp.maximum(vd, 1e-9)
+
+        ke = cl_safe / vd_safe
+        t_half_elim = ln_2 / jnp.maximum(ke, 1e-9)
+        Css = R0 / cl_safe # Steady-state concentration
+
+        summary = {
+            "R0": R0, "cl": cl, "vd": vd, # Direct parameters
+            "ke": ke,
+            "t_half_elim": t_half_elim,
+            "Css": Css
+        }
+        # --- Documentation for comparison ---
+        # "ke": Elimination rate constant (1/time). (See OneCompartmentConc)
+        # "t_half_elim": Elimination half-life (time). (See OneCompartmentConc)
+        # "cl": Clearance (volume/time). (See OneCompartmentConc)
+        # "vd": Volume of distribution (volume). (See OneCompartmentConc)
+        # "Css": Steady-state concentration (mass/volume).
+        #        - Comparison: Theoretical concentration achieved if the infusion
+        #                      continues indefinitely. Can be compared to observed
+        #                      concentrations during prolonged infusions.
+        return summary
 
 class OneCompartmentBolusMM(PKBaseODE):
     """
@@ -1726,5 +2109,58 @@ class OneCompartmentBolusMM(PKBaseODE):
             pred_y_state0 / vd
         )
         return depvar_unit_result
+    
+    @staticmethod
+    def summary_calculations(args_tuple: tuple) -> dict:
+        """
+        Calculates summary PK statistics for a one-compartment Michaelis-Menten model.
+
+        Args:
+            args_tuple: A tuple containing (vmax, km, vd).
+                        - vmax: Maximum elimination rate (mass/time)
+                        - km: Michaelis constant (concentration, mass/volume)
+                        - vd: Volume of distribution (volume)
+        Returns:
+            A dictionary of summary statistics.
+        """
+        vmax, km, vd = args_tuple
+        
+        # km is concentration, vmax is rate (mass/time)
+        # vd is volume
+        
+        km_safe = jnp.maximum(km, 1e-9) # Km should be > 0
+
+        # Pseudo first-order clearance at very low concentrations (C << Km)
+        cl_linear_approx = vmax / km_safe
+        
+        summary = {
+            "vmax": vmax, # Direct parameter
+            "km": km,     # Direct parameter
+            "vd": vd,     # Direct parameter
+            "cl_linear_approx_at_low_conc": cl_linear_approx
+        }
+        # --- Documentation for comparison ---
+        # "vmax": Maximum elimination rate (mass/time).
+        #         - Comparison: Fundamental parameter of non-linear elimination.
+        # "km": Michaelis constant (concentration units, e.g., mg/L).
+        #       The concentration at which the elimination rate is Vmax/2.
+        #       - Comparison: Fundamental parameter. Indicates the concentration range
+        #                     where kinetics transition from first-order to zero-order.
+        # "vd": Volume of distribution (volume).
+        #       - Comparison: (See OneCompartmentConc). The interpretation is similar,
+        #                     representing the apparent volume the drug distributes into.
+        # "cl_linear_approx_at_low_conc": Approximated first-order clearance (Vmax/Km)
+        #                                 that applies when concentrations are much lower than Km.
+        #                                 - Comparison: Can be compared to clearance values from
+        #                                               linear models (e.g., NCA CL, or CL from
+        #                                               a first-order model) if the observed
+        #                                               concentrations predominantly fall in the
+        #                                               linear (low concentration) range of the
+        #                                               MM kinetics. If concentrations are often near
+        #                                               or above Km, this linear CL approximation
+        #                                               will not match an 'overall' NCA CL well.
+        # Note: True half-life and clearance are concentration-dependent in MM kinetics.
+        return summary
+
     
 
