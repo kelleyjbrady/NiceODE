@@ -2942,8 +2942,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     ci_df, how = 'left', right_index=True, left_index=True
                 )
                 ci_re = re.compile('^ci[0-9]{1,2}')
-                ci_cols = [i for i in self.fit_result_summary_.columns if bool(re.search(ci_re, i))]
-                for idx, row in self.fit_result_summary_.iterrows():
+                ci_cols = [i for i in fit_result_summary.columns if bool(re.search(ci_re, i))]
+                for idx, row in fit_result_summary.iterrows():
                     for c in ci_cols:
                         log_str = f"param_{row['log_name']}_{c}"
                         mlflow.log_metric(log_str, row[c])
