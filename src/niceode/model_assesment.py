@@ -2,9 +2,9 @@ import numpy as np
 from scipy.stats import chi2
 from scipy.optimize import minimize, brentq
 
-def construct_profile_ci(model_obj,df, param_index,init_bounds_factor = 1.01, profile_bounds = None, profile_bounds_factor = 2.0, ci_level = 0.95, result_dict = None ):
-    if result_dict is None:
-        result_dict = {}
+def construct_profile_ci(model_obj,df, param_index,init_bounds_factor = 1.01, profile_bounds = None, profile_bounds_factor = 2.0, ci_level = 0.95, result_list = None ):
+    if result_list is None:
+        result_list = []
     
     fit_result = model_obj.fit_result_
     best_fit_params = fit_result.x.copy()
@@ -41,8 +41,11 @@ def construct_profile_ci(model_obj,df, param_index,init_bounds_factor = 1.01, pr
                                     start = best_fit_params[param_index],
                                     end = param_range[1],profile_bounds=profile_bounds, 
                                  profile_bounds_factor=profile_bounds_factor, lower=False)
-    result_dict[param_index] = {'lower':lower_bound, 'upper':upper_bound}
-    return result_dict
+    ci_label =    int(ci_level*100) 
+    result_list.append( {f'ci{ci_label}_lower':lower_bound,
+                                f'ci{ci_label}_upper':upper_bound}
+                        )
+    return result_list
     
     
 
@@ -55,13 +58,11 @@ def find_profile_bound(objective_func, param_index,
     """
     
     other_params = np.delete(best_fit_params, param_index)
-    #These are VERY IMPORTANT
-    #would be even better to use the 'CI' derived from NCA for at least Vd
 
     if profile_bounds is not None:
         other_p_bounds = profile_bounds
     else:
-        other_p_bounds = [(np.max([np.log((1/profile_bounds_factor)*i), 1e-3]), np.log(profile_bounds_factor*i)) for i in np.exp(other_params)]
+        other_p_bounds = [(np.log((1/profile_bounds_factor)*i), np.log(profile_bounds_factor*i)) for i in np.exp(other_params)]
     def root_function(param_value):
         result = minimize(
             objective_func,
