@@ -2626,6 +2626,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 preds, full_preds = self._solve_ivp(
                     model_coeffs, parallel=parallel, parallel_n_jobs=parallel_n_jobs
                 )
+                subject_coeffs = model_coeffs
                 # error = self.no_me_loss_function(self.y, preds, sigma, **self.no_me_loss_params)
             else:
                 if self.b_i_approx is None:
@@ -2663,6 +2664,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 self.b_i_approx = b_i_approx
 
             # CI95% construction
+        self._fitted_subject_ode_params = model_coeffs.copy()
+        
         self.ode_t0_vals_are_subject_y0 = ode_t0_vals_are_subject_y0_init_status
         if predict_all_ode_outputs:
             preds_out = full_preds
@@ -2930,9 +2933,15 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             self.fit_result_summary_ = fit_result_summary.copy()
             mlflow.log_table(self.fit_result_summary_, 'fit_result_summary.json')
             # after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
+            #
+            preds = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs)
+            pred_loss_sigma = (fit_result_summary
+                               .loc[fit_result_summary['model_error'], 'best_fit_param_val'])
+            pred_loss = neg2_log_likelihood_loss(self.y, preds, pred_loss_sigma)
+            mlflow.log_metric('fit_predict_neg2ll', pred_loss)
             if len(omegas.values) > 0:
-                _ = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs)
                 mlflow.log_table(self.b_i_approx, 'subject_level_effects.json')
+            mlflow.log_table(self._fitted_subject_ode_params, 'fitted_subject_ode_params.json')
         return deepcopy(self)
 
     def _generate_fitted_model_name(self, ignore_fit_status=False):
