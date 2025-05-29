@@ -41,6 +41,7 @@ from .pd_templates import InitValsPdCols
 from warnings import warn
 import diffrax
 import jax
+from tempfile import TemporaryFile
 
 
 def debug_print(print_obj, debug=False):
@@ -2941,7 +2942,26 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             mlflow.log_metric('fit_predict_neg2ll', pred_loss)
             if len(omegas.values) > 0:
                 mlflow.log_table(self.b_i_approx, 'subject_level_effects.json')
-            mlflow.log_table(self._fitted_subject_ode_params, 'fitted_subject_ode_params.json')
+
+   
+            mlflow.log_table(self._fitted_subject_ode_params, 'fitted_subject_ode_params_base.json')
+            
+            self._summary_pk_stats = (self._fitted_subject_ode_params
+                                      .apply(self.pk_model_class.summary_calculations,
+                                                                            axis = 1, result_type = 'expand'))
+            #For some reason this writing and reloading is required to get the df to be serializable.
+            #Related to: https://github.com/pandas-dev/pandas/issues/55490
+            with TemporaryFile() as f:
+                self._summary_pk_stats.to_csv(f,index=False)
+                f.seek(0)
+                self._summary_pk_stats = pd.read_csv(f, dtype = pd.Float64Dtype())
+            mlflow.log_table(self._summary_pk_stats, 'fitted_subject_ode_params.json')
+            self._summary_pk_stats_descr = self._summary_pk_stats.describe()
+            mlflow.log_table(self._summary_pk_stats_descr, 'fitted_subject_ode_params_descr.json')
+            for c in self._summary_pk_stats_descr.columns:
+                tmp = self._summary_pk_stats_descr[c]
+                [mlflow.log_metric(f"fitted_{c}_{idx.replace('%', 'quantile')}", tmp[idx])
+                 for idx in tmp.index[1:]] 
         return deepcopy(self)
 
     def _generate_fitted_model_name(self, ignore_fit_status=False):
