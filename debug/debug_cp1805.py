@@ -120,64 +120,65 @@ nca_obj = NCA(
 noboot_tmp = nca_obj.estimate_all_nca_params(terminal_phase_adj_r2_thresh=0.85)
 #tmp = nca_obj.estimate_all_nca_params(terminal_phase_adj_r2_thresh=0.85, n_boots=10)
 #%%
-me_mod_fo =  CompartmentalModel(
-    model_name = "debug_cp1805_abs_ka-clME-vd_sse_nodep_dermal",
-          ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('AMT_scale'),],
-          conc_at_time_col = 'DV_scale',
-          subject_id_col = 'ID_x', 
-          time_col = 'TIME_x',
-          population_coeff=[
-                            PopulationCoeffcient('ka', 
-                                                 optimization_init_val=2, 
-                                                 #subject_level_intercept=True,
-                                                 optimization_lower_bound = np.log(1e-6),
-                                                 #optimization_upper_bound = np.log(3),
-                                                 #subject_level_intercept_sd_init_val = 0.2, 
-                                                 #subject_level_intercept_sd_upper_bound = 20,
-                                                #subject_level_intercept_sd_lower_bound=1e-6
-                                                 ),
-                            PopulationCoeffcient('cl',
-                                                 optimization_init_val = .1,
-                                                  optimization_lower_bound = np.log(1e-4),
-                                                  optimization_upper_bound=np.log(1)
-                                                 #optimization_upper_bound = np.log(.005),
-                                                #subject_level_intercept=True, 
-                                                #subject_level_intercept_sd_init_val = 0.3, 
-                                                #subject_level_intercept_sd_upper_bound = 5,
-                                                #subject_level_intercept_sd_lower_bound=1e-6
-                                                 ),
-                            PopulationCoeffcient('vd', optimization_init_val = 1.2
-                                                , optimization_lower_bound = np.log(.1)
-                                                ,optimization_upper_bound=np.log(5)
-                                                
-                                                #, optimization_upper_bound = np.log(.05)
-                                                ),
-                         ],
-          dep_vars= None, 
-                                   no_me_loss_function=neg2_log_likelihood_loss, 
-                                   no_me_loss_needs_sigma=True,
-                                   optimizer_tol=None, 
-                                   pk_model_class=OneCompartmentAbsorption, 
-                                   model_error_sigma=PopulationCoeffcient('sigma'
-                                                                          ,log_transform_init_val=False
-                                                                          , optimization_init_val=.5
-                                                                          ,optimization_lower_bound=0.00001
-                                                                          ,optimization_upper_bound=3
-                                                                          ),
-                                   #ode_solver_method='BDF'
-                                   batch_id='mlflow_test_batch6',
-                                   minimize_method = 'COBYQA'
-                                   )
-#%%
-fit_model = True
-if fit_model:
-    me_mod_fo = me_mod_fo.fit2(df_oral, )
-else:
-    with open(f"logs/fitted_model_{me_mod_fo.model_name}.jb", 'rb') as f:
-        me_mod_fo = jb.load(f)
-res_df[me_mod_fo.model_name] = me_mod_fo.predict2(df_oral)
-piv_cols.append(me_mod_fo.model_name)
-me_mod_fo.save_fitted_model(jb_file_name = me_mod_fo.model_name)
+if True: 
+    me_mod_fo =  CompartmentalModel(
+        model_name = "debug_cp1805_abs_ka-clME-vd_sse_nodep_dermal",
+            ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('AMT_scale'),],
+            conc_at_time_col = 'DV_scale',
+            subject_id_col = 'ID_x', 
+            time_col = 'TIME_x',
+            population_coeff=[
+                                PopulationCoeffcient('ka', 
+                                                    optimization_init_val=2, 
+                                                    #subject_level_intercept=True,
+                                                    optimization_lower_bound = np.log(1e-6),
+                                                    #optimization_upper_bound = np.log(3),
+                                                    #subject_level_intercept_sd_init_val = 0.2, 
+                                                    #subject_level_intercept_sd_upper_bound = 20,
+                                                    #subject_level_intercept_sd_lower_bound=1e-6
+                                                    ),
+                                PopulationCoeffcient('cl',
+                                                    optimization_init_val = .1,
+                                                    optimization_lower_bound = np.log(1e-4),
+                                                    optimization_upper_bound=np.log(1)
+                                                    #optimization_upper_bound = np.log(.005),
+                                                    #subject_level_intercept=True, 
+                                                    #subject_level_intercept_sd_init_val = 0.3, 
+                                                    #subject_level_intercept_sd_upper_bound = 5,
+                                                    #subject_level_intercept_sd_lower_bound=1e-6
+                                                    ),
+                                PopulationCoeffcient('vd', optimization_init_val = 1.2
+                                                    , optimization_lower_bound = np.log(.1)
+                                                    ,optimization_upper_bound=np.log(5)
+                                                    
+                                                    #, optimization_upper_bound = np.log(.05)
+                                                    ),
+                            ],
+            dep_vars= None, 
+                                    no_me_loss_function=neg2_log_likelihood_loss, 
+                                    no_me_loss_needs_sigma=True,
+                                    optimizer_tol=None, 
+                                    pk_model_class=OneCompartmentAbsorption, 
+                                    model_error_sigma=PopulationCoeffcient('sigma'
+                                                                            ,log_transform_init_val=False
+                                                                            , optimization_init_val=.5
+                                                                            ,optimization_lower_bound=0.00001
+                                                                            ,optimization_upper_bound=3
+                                                                            ),
+                                    #ode_solver_method='BDF'
+                                    batch_id='mlflow_test_batch6',
+                                    minimize_method = 'COBYQA'
+                                    )
+    #%%
+    fit_model = True
+    if fit_model:
+        me_mod_fo = me_mod_fo.fit2(df_oral, )
+    else:
+        with open(f"logs/fitted_model_{me_mod_fo.model_name}.jb", 'rb') as f:
+            me_mod_fo = jb.load(f)
+    res_df[me_mod_fo.model_name] = me_mod_fo.predict2(df_oral)
+    piv_cols.append(me_mod_fo.model_name)
+    me_mod_fo.save_fitted_model(jb_file_name = me_mod_fo.model_name)
 
 
 
