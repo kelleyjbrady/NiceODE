@@ -31,6 +31,8 @@ from typing import Self
 from .diffeqs import PKBaseODE
 import uuid
 import mlflow
+import multiprocessing
+
 from mlflow.data.pandas_dataset import from_pandas
 from .mlflow_utils import (get_class_source_without_docstrings,
                                   generate_class_contents_hash, 
@@ -1611,8 +1613,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         batch_id: uuid.UUID = None,
         model_id: uuid.UUID = None,
     ):
+        self.stiff_ode = None
+        self.jax_ivp_nonstiff_solver_is_compiled = False 
+        self.jax_ivp_nonstiff_compiled_solver_ = None
+        self.jax_ivp_stiff_solver_is_compiled = False 
+        self.jax_ivp_stiff_compiled_solver_ = None
         self.loss_summary_name = loss_summary_name
-        self.jax_ivp_solver_compiled = False 
         self.init_vals_pd_cols = InitValsPdCols()
         self.b_i_approx = None
         self.batch_id = uuid.uuid4() if batch_id is None else batch_id
@@ -2294,7 +2300,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                        dt0 = None,
                        ode_class: PKBaseODE = None,
                        diffrax_solver=None, 
-                       diffrax_step_ctrl = None
+                       diffrax_step_ctrl = None,
+                       diffrax_max_steps = None
                        ):
         
         ode_term = diffrax.ODETerm(ode_class.diffrax_ode)
@@ -2307,6 +2314,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         dt0 = dt0,
         y0 = y0,
         args=args,
+        max_steps=diffrax_max_steps,
         saveat=diffrax.SaveAt(ts=teval), # Specify time points for output
         stepsize_controller=diffrax_step_ctrl
         )
@@ -2323,38 +2331,68 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         ode_t0_vals=None,
         time_mask=None,
         timepoints=None,
+        stiff_ode = False,
         **kwargs):
         
         ode_t0_vals = self.ode_t0_vals if ode_t0_vals is None else ode_t0_vals
         time_mask = self.time_mask if time_mask is None else time_mask
         model_coeffs, ode_t0_vals = model_coeffs.to_numpy(), ode_t0_vals.to_numpy()
         
-        if not self.jax_ivp_solver_compiled:
-            diffrax_solver = diffrax.Tsit5()
-            diffrax_step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-8)
-            dt0 = 0.01
-            
-            partial_solve_ivp = partial(
-                self._solve_ivp_jax_worker,
-                ode_class=self.pk_model_class,
-                tspan=self.global_tspan_init,
-                teval=self.global_tp_eval if timepoints is None else timepoints,
-                diffrax_solver=diffrax_solver,
-                diffrax_step_ctrl = diffrax_step_ctrl,
-                dt0 = dt0
+        if not self.stiff_ode:
+            if not (self.jax_ivp_nonstiff_solver_is_compiled):
+                diffrax_solver = diffrax.Tsit5()
+                diffrax_step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-8)
+                dt0 = 0.01
                 
-            )
+                partial_solve_ivp = partial(
+                    self._solve_ivp_jax_worker,
+                    ode_class=self.pk_model_class,
+                    tspan=self.global_tspan_init,
+                    teval=self.global_tp_eval if timepoints is None else timepoints,
+                    diffrax_solver=diffrax_solver,
+                    diffrax_step_ctrl = diffrax_step_ctrl,
+                    dt0 = dt0
+                    
+                )
+                
+                vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+                jit_vmapped_solve = jax.jit(vmapped_solve)
+                self.jax_ivp_nonstiff_compiled_solver_ = jit_vmapped_solve
+                self.jax_ivp_nonstiff_solver_is_compiled = True
+                print('Sucessfully complied non-stiff ODE solver')
+            else:
+                jit_vmapped_solve = self.jax_ivp_nonstiff_compiled_solver_
+
+        if self.stiff_ode:
+            if not (self.jax_ivp_stiff_solver_is_compiled):
+                diffrax_solver = diffrax.Kvaerno5()
+                diffrax_step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-8)
+                dt0 = 0.01
+                
+                partial_solve_ivp = partial(
+                    self._solve_ivp_jax_worker,
+                    ode_class=self.pk_model_class,
+                    tspan=self.global_tspan_init,
+                    teval=self.global_tp_eval if timepoints is None else timepoints,
+                    diffrax_solver=diffrax_solver,
+                    diffrax_step_ctrl = diffrax_step_ctrl,
+                    dt0 = dt0
+                    
+                )
+                
+                vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+                jit_vmapped_solve = jax.jit(vmapped_solve)
+                self.jax_ivp_stiff_compiled_solver_ = jit_vmapped_solve
+                self.jax_ivp_stiff_solver_is_compiled = True
+                print('Sucessfully complied stiff ODE solver')
+            else:
+                jit_vmapped_solve = self.jax_ivp_stiff_compiled_solver_
             
-            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
-            jit_vmapped_solve = jax.jit(vmapped_solve)
-            self._jit_vmapped_solve = jit_vmapped_solve
-            self.jax_ivp_solver_compiled = True
-        else:
-            jit_vmapped_solve = self._jit_vmapped_solve 
+        
         all_solutions_masses, all_concentrations = jit_vmapped_solve(
-                ode_t0_vals,
-                model_coeffs
-            )
+                    ode_t0_vals,
+                    model_coeffs
+                    )
         
         return all_solutions_masses, all_concentrations
         
@@ -2370,6 +2408,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         parallel=False,
         parallel_n_jobs=None,
         timepoints=None,
+        stiff_ode = False,
     ):
         ode_t0_vals = self.ode_t0_vals if ode_t0_vals is None else ode_t0_vals
         time_mask = self.time_mask if time_mask is None else time_mask
@@ -2380,7 +2419,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if use_jax:
             masses, concs = self._solve_ivp_jax(
                 model_coeffs = model_coeffs,
-                ode_t0_vals = ode_t0_vals
+                ode_t0_vals = ode_t0_vals, 
+                stiff_ode = stiff_ode
             )
             sol_full = np.array(masses, dtype = np.float64)
             sol_full[:,:,0] = concs
@@ -2451,6 +2491,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         subject_level_intercept_init_vals=None,
         parallel=None,
         parallel_n_jobs=None,
+        stiff_ode = False,
     ):
         # If we do not need to unpack sigma (ie. when the loss is just SSE, MSE, Huber etc)
         if (self.n_subject_level_intercept_sds == 0) and (
@@ -2470,7 +2511,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 pop_coeffs, thetas, beta_data
             )
             preds, full_preds = self._solve_ivp(
-                model_coeffs, parallel=parallel, parallel_n_jobs=parallel_n_jobs
+                model_coeffs, parallel=parallel, parallel_n_jobs=parallel_n_jobs, stiff_ode = stiff_ode
             )
             error = self.no_me_loss_function(self.y, preds, **self.no_me_loss_params)
         # If we DO need to unpack sigma, even without omegas, the unpacking logic is the same (ie. log-likelihood w/ or w/o mixed effects)
@@ -2509,7 +2550,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     pop_coeffs, thetas, beta_data
                 )
                 preds, full_preds = self._solve_ivp(
-                    model_coeffs, parallel=parallel, parallel_n_jobs=parallel_n_jobs
+                    model_coeffs, parallel=parallel, parallel_n_jobs=parallel_n_jobs, stiff_ode = stiff_ode
                 )
                 error = self.no_me_loss_function(
                     self.y, preds, sigma, **self.no_me_loss_params
@@ -2523,17 +2564,23 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     beta_data,
                     self,
                     FO_b_i_apprx=subject_level_intercept_init_vals,
+                    stiff_ode = stiff_ode,
                 )
         # self.preds_opt_.append(preds)
         return error
-
-    def save_fitted_model(self, jb_file_name: str = None):
-        
+    def generate_jb_dumpable_self(self,):
         unpickable_attr = ["_jit_vmapped_solve"]
         dump_obj = deepcopy(self)
 
-        dump_obj._jit_vmapped_solve = None
-        dump_obj.jax_ivp_solver_compiled = False
+        dump_obj.jax_ivp_nonstiff_compiled_solver_ = None
+        dump_obj.jax_ivp_nonstiff_solver_is_compiled = False
+        dump_obj.jax_ivp_stiff_compiled_solver_ = None
+        dump_obj.jax_ivp_stiff_solver_is_compiled = False
+        return dump_obj
+    
+    def save_fitted_model(self, jb_file_name: str = None):
+        
+        dump_obj = self.generate_jb_dumpable_self()
         
         if dump_obj.fit_result_ is None:
             raise ValueError("The Model must be fit before saving a fitted model")
@@ -2712,8 +2759,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         n_iters_per_checkpoint=0,
         warm_start=False,
         fit_id: uuid.UUID = None,
-        ci_level:np.float64 = 0.95
+        ci_level:np.float64 = 0.95, 
+        stiff_ode = False,
     ) -> Self:
+        self.stiff_ode = stiff_ode
         fit_id = uuid.uuid4() if fit_id is None else fit_id
         data = self._validate_data_chronology(data)
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data)
@@ -2985,15 +3034,23 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 
         return deepcopy(self)
 
-    def _generate_profile_ci(self,data  ):
-        res_list = []
-        for param_idx, param_val in enumerate(self.fit_result_.x):
-            print(f"Profiling parameter:{param_idx}")
-            res_list = construct_profile_ci(model_obj = self,
-                                                       df = data,
-                                                       param_index=param_idx,
-                                                       result_list = res_list
-                                                       )
+    def _generate_profile_ci(self,data, parallel = True  ):
+        if parallel:
+            dump_obj = self.generate_jb_dumpable_self()
+            n_jobs = int(np.min([multiprocessing.cpu_count(), len(dump_obj.fit_result_.x)]))
+            res_list = Parallel(n_jobs=n_jobs)(delayed(construct_profile_ci)(dump_obj, data, idx,)
+                                          for idx, val in enumerate(dump_obj.fit_result_.x))
+            res_list = [i[0] for i in res_list]
+        else:
+            res_list = []
+            for param_idx, param_val in enumerate(self.fit_result_.x):
+                print(f"Profiling parameter:{param_idx}")
+                res_list = construct_profile_ci(model_obj = self,
+                                                        df = data,
+                                                        param_index=param_idx,
+                                                        result_list = res_list
+                                                        )
+            
         return pd.DataFrame(res_list,)
     
     def _generate_fitted_model_name(self, ignore_fit_status=False):
