@@ -1764,12 +1764,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
 
     def _initalize_mlflow_experiment(self, ):
         #this seems very brittle . . .
+        #this func works, but is generally not correct
         try:
             experiment_id = mlflow.create_experiment(self.batch_id)
         except mlflow.exceptions.MlflowException as e:
             if "RESOURCE_ALREADY_EXISTS" in str(e):
                 experiment_id = mlflow.get_experiment_by_name(self.batch_id).experiment_id
         else:
+            #raises each time a new experiment is created
             raise
         mlflow.set_experiment(experiment_name=self.batch_id)
         self.mlf_experiment_id = experiment_id
@@ -2367,6 +2369,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 
                 vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
                 jit_vmapped_solve = jax.jit(vmapped_solve)
+                self.jax_ivp_nonstiff_jittable_ = vmapped_solve
                 self.jax_ivp_nonstiff_compiled_solver_ = jit_vmapped_solve
                 self.jax_ivp_nonstiff_solver_is_compiled = True
                 print('Sucessfully complied non-stiff ODE solver')
@@ -2393,6 +2396,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 
                 vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
                 jit_vmapped_solve = jax.jit(vmapped_solve)
+                self.jax_ivp_stiff_jittable_ = vmapped_solve
                 self.jax_ivp_stiff_compiled_solver_ = jit_vmapped_solve
                 self.jax_ivp_stiff_solver_is_compiled = True
                 print('Sucessfully complied stiff ODE solver')
