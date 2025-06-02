@@ -13,6 +13,7 @@ from scipy.integrate import solve_ivp
 import pandas as pd
 from pytensor import scan
 import icomo
+from copy import deepcopy
 
 
 
@@ -393,17 +394,19 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
     all_sub_tp = np.tile(all_sub_tp_alt.columns, (len(time_mask_df),1))
     timepoints = np.array(all_sub_tp_alt.columns)
     n_ode_params = len(model_params)
-    
-    t1 = model_obj.global_tf
-    t0 = model_obj.global_t0 
+    model_obj = deepcopy(model_obj)
+    model_obj.stiff_ode = True
+    t1 = model_obj.global_tf_eval
+    t0 = model_obj.global_t0_eval 
     dt0 = 0.1
     coords = {'subject':list(pm_subj_df['SUBJID'].values), 
           'obs_id': list(pm_df.index.values), 
-          'global_time':timepoints
+          'global_time':timepoints, 
+          'ode_output':list(model_obj.ode_t0_vals.columns)
           }
     
-    jax_odeint_op = JaxOdeintOp(one_compartment_model)
-    ode_func = ytp_ode_from_typ(one_compartment_diffrax2)
+    #jax_odeint_op = JaxOdeintOp(one_compartment_model)
+    #ode_func = ytp_ode_from_typ(one_compartment_diffrax2)
     
     #pymc_ode_model = DifferentialEquation(
     #func=ode_func, times=timepoints, n_states=1, n_theta=n_ode_params, t0=t0
@@ -416,12 +419,13 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
     pt_printing = True
     with pm.Model(coords=coords) as model:
         
-        data_obs = pm.Data('dv', pm_df['DV'].values, dims = 'obs_id')
+        data_obs = pm.Data('dv', pm_df['DV_scale'].values, dims = 'obs_id')
         #debug_print(data_obs.shape.eval())
         time_mask_data = pm.Data('time_mask', time_mask, dims = ('subject', 'global_time'))
         tp_data = pm.Data('timepoints', all_sub_tp, dims = ('subject', 'global_time'))
         tp_data_vector = pm.Data('timepoints_vector', timepoints.flatten(), dims = 'global_time')
-        subject_init_conc = pm.Data('c0', pm_subj_df['DV'].values, dims = 'subject')
+        subject_init_conc = pm.Data('c0', pm_subj_df['DV_scale'].values, dims = 'subject')
+        subject_init_y0 = pm.Data('y0', model_obj.ode_t0_vals.to_numpy(), dims = ('subject', 'ode_output'))
         #global_t0 = tp_data[0,0]
         #global_t1 = tp_data[0,-1]
         #subject_tps = pm.MutableData('subject_tp', pm_subj_df['subj_tp'].values, dims = 'subject')
@@ -546,7 +550,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 diffrax_op = DiffraxJaxOp(one_compartment_diffrax, t0, t1, dt0, timepoints, time_mask_data.eval())
                 vjp_op = DiffraxVJPOp(diffrax_op.jax_op)
                 diffrax_op.vjp_op = vjp_op
-                ode_sol = diffrax_op(pm_subj_df["DV"].values.astype("float64"), theta_matrix.astype("float64"), time_mask_data)[0]
+                ode_sol = diffrax_op(pm_subj_df["DV_scale"].values.astype("float64"), theta_matrix.astype("float64"), time_mask_data)[0]
                 sol = pm.Deterministic("sol", ode_sol.flatten())
             else:
                 sol = []
@@ -573,39 +577,69 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 filtered_ode_sol = sol[time_mask_data.flatten()]
                 sol = pm.Deterministic("sol", filtered_ode_sol, dims = 'obs_id')
         elif ode_method == 'icomo':
-            sol_alt = []
-            for sub_idx, subject in enumerate(coords['subject']):
-                subject_y0 = [subject_init_conc[sub_idx]]
-                #debug_print(subject_y0[0].shape.eval())
-                subject_model_params = theta_matrix[sub_idx, :]
-                #debug_print(subject_model_params.shape.eval())
-            
-                subject_timepoints = tp_data_vector
-                #debug_print(subject_timepoints.shape)
-                subject_t0 = subject_timepoints[ 0]
-                #debug_print(subject_t0.shape.eval())
-                subject_t1 = subject_timepoints[-1]
-                #debug_print(subject_t1.shape.eval())
+            icomo_for_loop = True
+            if icomo_for_loop:
+                sol_alt = []
+                for sub_idx, subject in enumerate(coords['subject']):
+                    subject_y0 = subject_init_y0[sub_idx]
+                    #debug_print(subject_y0[0].shape.eval())
+                    subject_model_params = theta_matrix[sub_idx, :]
+                    #debug_print(subject_model_params.shape.eval())
                 
-                ode_sol = icomo.jax2pytensor(icomo.diffeqsolve)(
-                        ts_out=subject_timepoints,
-                        y0=subject_y0,
-                        args=[i[sub_idx] for i in pm_model_params],
-                        ODE=one_compartment_diffrax2,
-                    ).ys  
-                ode_sol = ode_sol[0].flatten()
-                sol_alt.append(ode_sol)
-            
-                #debug_print(ode_sol.shape.eval())
-            
-            sol = pt.concatenate(sol_alt)
-            #debug_print(sol.shape.eval())
-            time_mask_data_f = time_mask_data.flatten()
-            
-            sol = sol[time_mask_data_f]
-            #debug_print(sol.shape.eval())
+                    subject_timepoints = tp_data_vector
+                    #debug_print(subject_timepoints.shape)
+                    subject_t0 = subject_timepoints[ 0]
+                    #debug_print(subject_t0.shape.eval())
+                    subject_t1 = subject_timepoints[-1]
+                    #debug_print(subject_t1.shape.eval())
+                    args = [i[sub_idx] for i in pm_model_params]
+                    ode_sol = icomo.jax2pytensor(icomo.diffeqsolve)(
+                            ts_out=subject_timepoints,
+                            y0=subject_y0,
+                            args=args,
+                            ODE=model_obj.pk_model_class.diffrax_ode,
+                        ).ys
+                    central_mass_trajectory = ode_sol[:, 0]
+                    concentrations = icomo.jax2pytensor(model_obj.pk_model_class.diffrax_mass_to_depvar)(
+                        central_mass_trajectory, 
+                        args # Pass the same parameter tuple
+                    )
+                    ode_sol = concentrations.flatten()
+                    sol_alt.append(ode_sol)
+                
+                    #debug_print(ode_sol.shape.eval())
+                
+                sol = pt.concatenate(sol_alt)
+                #debug_print(sol.shape.eval())
+                time_mask_data_f = time_mask_data.flatten()
+                
+                sol = sol[time_mask_data_f]
+                #debug_print(sol.shape.eval())
 
-            sol = pm.Deterministic("sol", sol)
+                sol = pm.Deterministic("sol", sol)
+            else:
+                #ode_t0_vals = subject_init_conc
+                model_coeffs = theta_matrix
+                
+                masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_stiff_jittable_)(
+                    subject_init_y0,
+                    model_coeffs
+                    )
+                sol_full = masses
+                
+                #sol_full[:,:,0] = concs
+                sol_full = sol_full[:,:,0].set(concs)
+                sol_dep_var = concs
+                sol_dep_var = sol_dep_var.flatten()
+                
+                time_mask_data_f = time_mask_data.flatten()
+                
+                sol = sol_dep_var[time_mask_data_f]
+                
+                #will deal with sol_full later
+                #sol_full = pt.vstack(sol_full)
+                #sol_full = sol_full[time_mask_data_f]
+                sol = pm.Deterministic("sol", sol)
                      
         elif ode_method == 'jax_odeint':
             ode_sol = jax_odeint_op(subject_init_conc.astype('float64'),
@@ -784,7 +818,14 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         # or
         #Something is
         ##debug_print("Shape of ode_sol (in PyMC model):", pt.shape(ode_sol).eval())
-        pm.LogNormal("obs", mu=pt.log(sol), sigma=sigma_obs, observed=data_obs)
+
+        error_model = 'additive'
+        if error_model == 'additive':
+            pm.Normal("obs", mu=sol, sigma=sigma_obs, observed=data_obs)
+        elif error_model == 'proportional':
+            #this requires censoring the intial per subject vals if the t0 y is zero
+            pm.LogNormal("obs", mu=pt.log(sol), sigma=sigma_obs, observed=data_obs)
+        #additive error model 
         
 
     return model
