@@ -2340,9 +2340,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         ode_t0_vals = self.ode_t0_vals if ode_t0_vals is None else ode_t0_vals
         time_mask = self.time_mask if time_mask is None else time_mask
         model_coeffs, ode_t0_vals = model_coeffs.to_numpy(), ode_t0_vals.to_numpy()
+        maxsteps = 1000000
         
-        if not self.stiff_ode:
-            if not (self.jax_ivp_nonstiff_solver_is_compiled):
+        #compile both types of solvers regardless of if we need them
+        if not (self.jax_ivp_nonstiff_solver_is_compiled):
                 diffrax_solver = diffrax.Tsit5()
                 #Initial thoughts:
                 #when the data is quite noisy to begin with
@@ -2363,7 +2364,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     teval=self.global_tp_eval if timepoints is None else timepoints,
                     diffrax_solver=diffrax_solver,
                     diffrax_step_ctrl = diffrax_step_ctrl,
-                    dt0 = dt0
+                    dt0 = dt0, 
+                    diffrax_max_steps = maxsteps
                     
                 )
                 
@@ -2373,11 +2375,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 self.jax_ivp_nonstiff_compiled_solver_ = jit_vmapped_solve
                 self.jax_ivp_nonstiff_solver_is_compiled = True
                 print('Sucessfully complied non-stiff ODE solver')
-            else:
-                jit_vmapped_solve = self.jax_ivp_nonstiff_compiled_solver_
-
-        if self.stiff_ode:
-            if not (self.jax_ivp_stiff_solver_is_compiled):
+        
+        if not (self.jax_ivp_stiff_solver_is_compiled):
                 diffrax_solver = diffrax.Kvaerno5()
                 
                 diffrax_step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-8)
@@ -2390,7 +2389,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     teval=self.global_tp_eval if timepoints is None else timepoints,
                     diffrax_solver=diffrax_solver,
                     diffrax_step_ctrl = diffrax_step_ctrl,
-                    dt0 = dt0
+                    dt0 = dt0, 
+                    diffrax_max_steps = maxsteps
                     
                 )
                 
@@ -2400,8 +2400,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 self.jax_ivp_stiff_compiled_solver_ = jit_vmapped_solve
                 self.jax_ivp_stiff_solver_is_compiled = True
                 print('Sucessfully complied stiff ODE solver')
-            else:
+        
+        #get the relevant solver
+        if self.stiff_ode:
                 jit_vmapped_solve = self.jax_ivp_stiff_compiled_solver_
+        if not self.stiff_ode:
+                jit_vmapped_solve = self.jax_ivp_nonstiff_compiled_solver_
+
+
             
         
         all_solutions_masses, all_concentrations = jit_vmapped_solve(
