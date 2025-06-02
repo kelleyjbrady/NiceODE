@@ -1507,7 +1507,8 @@ def optimize_with_checkpoint_joblib(
         *args,
         method=minimize_method,
         tol=tol,
-        options={"disp": False},
+        options={"disp": False, 
+                 },
         **kwargs,
     )
 
@@ -1606,7 +1607,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             optimization_upper_bound=20,
         ),
         model_error2:ModelError = None,
-        optimizer_tol=None,
+        optimizer_tol=1e-4,
         verbose=False,
         ode_solver_method="RK45",
         minimize_method: Literal[*MINIMIZE_METHODS_NEW_CB] = "l-bfgs-b",
@@ -2341,6 +2342,15 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if not self.stiff_ode:
             if not (self.jax_ivp_nonstiff_solver_is_compiled):
                 diffrax_solver = diffrax.Tsit5()
+                #Initial thoughts:
+                #when the data is quite noisy to begin with
+                #(eg. biomarker or drug level determinations)
+                #I bet rtol and atol can be much higher
+                #Later conclusion/hypothesis:
+                #Upon researching further, this is not where
+                #we should comprimise on precision, rather to speed
+                #things up the tol of the outer optimizer should be 
+                #increased as was done for the profiling optimizer. 
                 diffrax_step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-8)
                 dt0 = 0.01
                 
@@ -2366,6 +2376,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if self.stiff_ode:
             if not (self.jax_ivp_stiff_solver_is_compiled):
                 diffrax_solver = diffrax.Kvaerno5()
+                
                 diffrax_step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-8)
                 dt0 = 0.01
                 
