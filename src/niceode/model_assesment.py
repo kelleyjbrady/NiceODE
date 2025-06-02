@@ -84,9 +84,14 @@ def find_profile_bound(objective_func, param_index,
                 args=(param_index, param_value),
                 bounds=other_p_bounds,
                 method='COBYQA', 
-                options = {'disp':True if param_index == 1 else False, 
+                options = {'disp':False, 
                            "initial_tr_radius":initial_tr_radius,
-                           "final_tr_radius":1e-2
+                           #this final tr radius is quite high, however . . . 
+                           #the point of this is to find the bounds of the region 
+                           #within which the brentq solver will be applied
+                           #so it probably doesnt matter if this is noisy as the point 
+                           #of the increment decrement procedure to is find imprecise bounds. 
+                           "final_tr_radius":1e-2 
                            }# Or your chosen method
                 # Consider adding options like {'maxiter': some_val, 'eps': some_tol}
             )
