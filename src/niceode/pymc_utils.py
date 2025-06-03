@@ -29,7 +29,7 @@ def debug_print(print_obj, *args ):
 def make_pymc_model(model_obj, pm_subj_df, pm_df,
                     model_params, model_param_dep_vars,
                     model_error = None,
-                    ode_method:str = 'scipy'): 
+                    ): 
     
     pm_df['tmp'] = 1
     time_mask_df = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'tmp').fillna(0)
@@ -70,23 +70,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         tp_data_vector = pm.Data('timepoints_vector', timepoints.flatten(), dims = 'global_time')
         subject_init_conc = pm.Data('c0', pm_subj_df['DV_scale'].values, dims = 'subject')
         subject_init_y0 = pm.Data('y0', model_obj.ode_t0_vals.to_numpy(), dims = ('subject', 'ode_output'))
-        #global_t0 = tp_data[0,0]
-        #global_t1 = tp_data[0,-1]
-        #subject_tps = pm.MutableData('subject_tp', pm_subj_df['subj_tp'].values, dims = 'subject')
-        #sub_tps = {}
-        #for sub in coords['subject']:
-        #    one_subject_tps = np.array(pm_subj_df.loc[pm_subj_df['SUBJID'] == 1.0, 'subj_tp'].values[0])
-        #    sub_tps[sub] = pm.Data(f"subject{sub}_timepoints", one_subject_tps)
-        use_old_code = False
-        if use_old_code:
-            subject_max_tp_data = pm.Data('subject_tp_max', pm_subj_df['subj_tp_max'].values, dims = 'subject')
-            subject_min_tp_data = pm.Data('subject_tp_min', pm_subj_df['subj_tp_min'].values, dims = 'subject')
-        else:
-            subject_max_tp_data = pm.Data('subject_tp_max', np.repeat(t1, len(coords['subject'])), dims = 'subject')
-            subject_min_tp_data = pm.Data('subject_tp_min', np.repeat(t0, len(coords['subject'])), dims = 'subject')
-        #subject_init_conc_eval = subject_init_conc.eval()
-        #tp_data_eval = tp_data.eval()
-        #time_mask_data_eval = time_mask_data.eval()
+
 
         subject_data = {}
         thetas = {}
@@ -181,73 +165,71 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         #debug_print("Shape of theta_matrix:", theta_matrix_eval.shape)
         #debug_print("Shape of tp_data:",  tp_data_eval.shape)
         #debug_print("Shape of tp_data[0,:]:",  tp_data_eval[0,:].shape)
-        #scipy method could be useful for debugging, otherwise use icomo (jax)
-        ode_method = 'icomo'
-        if ode_method == 'icomo':
-            #the loop could be useful for debugging, also demonstrates how the 
-            #jax compiler works, the for loop is MUCH slower and does not 
-            #sample chains in parallel on CPU
-            icomo_for_loop = False
-            if icomo_for_loop:
-                sol_alt = []
-                for sub_idx, subject in enumerate(coords['subject']):
-                    subject_y0 = subject_init_y0[sub_idx]
-                    #debug_print(subject_y0[0].shape.eval())
-                    subject_model_params = theta_matrix[sub_idx, :]
-                    #debug_print(subject_model_params.shape.eval())
-                
-                    subject_timepoints = tp_data_vector
-                    #debug_print(subject_timepoints.shape)
-                    subject_t0 = subject_timepoints[ 0]
-                    #debug_print(subject_t0.shape.eval())
-                    subject_t1 = subject_timepoints[-1]
-                    #debug_print(subject_t1.shape.eval())
-                    args = [i[sub_idx] for i in pm_model_params]
-                    ode_sol = icomo.jax2pytensor(icomo.diffeqsolve)(
-                            ts_out=subject_timepoints,
-                            y0=subject_y0,
-                            args=args,
-                            ODE=model_obj.pk_model_class.diffrax_ode,
-                        ).ys
-                    central_mass_trajectory = ode_sol[:, 0]
-                    concentrations = icomo.jax2pytensor(model_obj.pk_model_class.diffrax_mass_to_depvar)(
-                        central_mass_trajectory, 
-                        args # Pass the same parameter tuple
-                    )
-                    ode_sol = concentrations.flatten()
-                    sol_alt.append(ode_sol)
-                
-                    #debug_print(ode_sol.shape.eval())
-                
-                sol = pt.concatenate(sol_alt)
-                #debug_print(sol.shape.eval())
-                time_mask_data_f = time_mask_data.flatten()
-                
-                sol = sol[time_mask_data_f]
-                #debug_print(sol.shape.eval())
 
-                sol = pm.Deterministic("sol", sol)
-            else:
-                model_coeffs = theta_matrix
-                
-                masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcstiff_jittable_)(
-                    subject_init_y0,
-                    model_coeffs
-                    )
-                sol_full = masses
-                
-                sol_full = sol_full[:,:,0].set(concs)
-                sol_dep_var = concs
-                sol_dep_var = sol_dep_var.flatten()
-                
-                time_mask_data_f = time_mask_data.flatten()
-                
-                sol = sol_dep_var[time_mask_data_f]
-                
-                #will deal with sol_full later
-                #sol_full = pt.vstack(sol_full)
-                #sol_full = sol_full[time_mask_data_f]
-                sol = pm.Deterministic("sol", sol)                   
+        #the loop could be useful for debugging, also demonstrates how the 
+        #jax compiler works, the for loop is MUCH slower and does not 
+        #sample chains in parallel on CPU
+        icomo_for_loop = False
+        if icomo_for_loop:
+            sol_alt = []
+            for sub_idx, subject in enumerate(coords['subject']):
+                subject_y0 = subject_init_y0[sub_idx]
+                #debug_print(subject_y0[0].shape.eval())
+                subject_model_params = theta_matrix[sub_idx, :]
+                #debug_print(subject_model_params.shape.eval())
+            
+                subject_timepoints = tp_data_vector
+                #debug_print(subject_timepoints.shape)
+                subject_t0 = subject_timepoints[ 0]
+                #debug_print(subject_t0.shape.eval())
+                subject_t1 = subject_timepoints[-1]
+                #debug_print(subject_t1.shape.eval())
+                args = [i[sub_idx] for i in pm_model_params]
+                ode_sol = icomo.jax2pytensor(icomo.diffeqsolve)(
+                        ts_out=subject_timepoints,
+                        y0=subject_y0,
+                        args=args,
+                        ODE=model_obj.pk_model_class.diffrax_ode,
+                    ).ys
+                central_mass_trajectory = ode_sol[:, 0]
+                concentrations = icomo.jax2pytensor(model_obj.pk_model_class.diffrax_mass_to_depvar)(
+                    central_mass_trajectory, 
+                    args # Pass the same parameter tuple
+                )
+                ode_sol = concentrations.flatten()
+                sol_alt.append(ode_sol)
+            
+                #debug_print(ode_sol.shape.eval())
+            
+            sol = pt.concatenate(sol_alt)
+            #debug_print(sol.shape.eval())
+            time_mask_data_f = time_mask_data.flatten()
+            
+            sol = sol[time_mask_data_f]
+            #debug_print(sol.shape.eval())
+
+            sol = pm.Deterministic("sol", sol)
+        else:
+            model_coeffs = theta_matrix
+            
+            masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcstiff_jittable_)(
+                subject_init_y0,
+                model_coeffs
+                )
+            sol_full = masses
+            
+            sol_full = sol_full[:,:,0].set(concs)
+            sol_dep_var = concs
+            sol_dep_var = sol_dep_var.flatten()
+            
+            time_mask_data_f = time_mask_data.flatten()
+            
+            sol = sol_dep_var[time_mask_data_f]
+            
+            #will deal with sol_full later
+            #sol_full = pt.vstack(sol_full)
+            #sol_full = sol_full[time_mask_data_f]
+            sol = pm.Deterministic("sol", sol)                   
 
         error_model = 'additive'
         if error_model == 'additive':
