@@ -43,7 +43,7 @@ from .pd_templates import InitValsPdCols
 from warnings import warn
 import diffrax
 import jax
-from tempfile import TemporaryFile
+from io import BytesIO
 from .model_assesment import construct_profile_ci
 import re
 
@@ -307,14 +307,14 @@ def huber_loss(y_true, y_pred, delta=1.0):
 
 
 def neg2_log_likelihood_loss(y_true, y_pred, sigma):
-    
+    sigma = sigma.to_numpy(dtype = np.float64)
     residuals = y_true - y_pred
     ss = np.sum(residuals**2)
     n = len(y_true)
     if len(sigma) == 0:
-        sigma = np.sqrt(ss/n)
+        sigma = [np.sqrt(ss/n)]
     neg2_log_likelihood = n * np.log(2 * np.pi * sigma**2) + ss / sigma**2
-    return neg2_log_likelihood.to_numpy()[0]
+    return neg2_log_likelihood[0]
 
 
 def get_function_args(func):
@@ -2814,7 +2814,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                                             axis = 1, result_type = 'expand'))
             #For some reason this writing and reloading is required to get the df to be serializable.
             #Related to: https://github.com/pandas-dev/pandas/issues/55490
-            with TemporaryFile() as f:
+            with BytesIO() as f:
                 self._summary_pk_stats.to_csv(f,index=False)
                 f.seek(0)
                 self._summary_pk_stats = pd.read_csv(f, dtype = pd.Float64Dtype())
