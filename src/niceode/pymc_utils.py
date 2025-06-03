@@ -475,25 +475,23 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
             coeff_has_subject_intercept = row['subject_level_intercept']
-            
-            #pop_coeff_init = 0
-            #while pop_coeff_init == 0:
-            #    pop_coeff_init = np.random.rand()
-                
+                         
             #prior for population coeff
-            pop_coeff_sigma = row['init_val'] * .2 if pd.isna(row['sigma']) else row['sigma']
-            population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = row['init_val'], sigma = pop_coeff_sigma, initval=row['init_val'])
-            #if the ODE parameter (row['model_coeff']) has subject level effects include them in the ODE parameter
+            population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = row['init_val'], sigma = row['sigma'], initval=row['init_val'])
+            #if the ODE parameter (row['model_coeff']) has subject level effects, include them in the ODE parameter
             if coeff_has_subject_intercept:
+                #one average subject level effect 
                 coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 3)
+                #one sd of subject level effect
                 coeff_intercept_sigma[coeff_name] = pm.HalfNormal(f"{coeff_name}_intercept_sigma",
                                                                   sigma = row['subject_level_intercept_sd_init_val'], initval= row['subject_level_intercept_sd_init_val'])
-                        # Non-centered subject-level deviations (standard normal prior)
+                #per subject deviation from coeff_intercept_mu
+                # Non-centered subject-level deviations (standard normal prior)
                 z_coeff[coeff_name] = pm.Normal(
                     f"z_{coeff_name}", mu=0, sigma=1, dims="subject"
                 )
 
-                # Subject-level intercept (non-centered)
+                # Subject-level effect (non-centered)
                 coeff_intercept_i[coeff_name] = pm.Deterministic(
                     f"{coeff_name}_intercept",
                     coeff_intercept_mu[coeff_name]
@@ -504,7 +502,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 #debug_print(f"Shape of coeff_intercept_i[{coeff_name}]: {coeff_intercept_i[coeff_name].shape.eval()}")
                 model_coeff = (population_coeff[coeff_name] + coeff_intercept_i[coeff_name])
             #if the ODE parameter (row['model_coeff']) DOES NOT have subject level effects
-            #The ODE parameter remainsthe pop_coeff
+            #and thus The ODE parameter (model_coeff) remains the pop_coeff
             else:
                 model_coeff = population_coeff[coeff_name]
             #if the ODE parameter includes fixed effects, include those
@@ -533,50 +531,18 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                                      )
                 )
         #debug_print(f"Shape of intial conc: {subject_init_conc_eval.shape}")
-        if use_old_code:
-            #debug_print(f"Shape of subject min tp: {subject_min_tp_data.shape.eval()}")
-            #debug_print(f"Shape of subject max tp: {subject_max_tp_data.shape.eval()}")
-            1 == 1
         #this should be called something other than theta, this is the inputs to the PK model ODE
         theta_matrix = pt.concatenate([param.reshape((1, -1)) for param in pm_model_params], axis=0).T
         
         #debug_print("Shape of theta_matrix:", theta_matrix_eval.shape)
         #debug_print("Shape of tp_data:",  tp_data_eval.shape)
         #debug_print("Shape of tp_data[0,:]:",  tp_data_eval[0,:].shape)
-        #use_diffrax = True
-        if ode_method == 'diffrax':
-            bad_solution = False
-            if bad_solution:
-                diffrax_op = DiffraxJaxOp(one_compartment_diffrax, t0, t1, dt0, timepoints, time_mask_data.eval())
-                vjp_op = DiffraxVJPOp(diffrax_op.jax_op)
-                diffrax_op.vjp_op = vjp_op
-                ode_sol = diffrax_op(pm_subj_df["DV_scale"].values.astype("float64"), theta_matrix.astype("float64"), time_mask_data)[0]
-                sol = pm.Deterministic("sol", ode_sol.flatten())
-            else:
-                sol = []
-                for sub_idx, subject in enumerate(coords['subject']):
-                    subject_y0 = pt.as_tensor([subject_init_conc[sub_idx]])
-                    #debug_print(subject_y0[0].shape.eval())
-                    subject_model_params = theta_matrix[sub_idx, :]
-                    subject_model_params_list = [param[sub_idx] for param in pm_model_params]
-                    subject_model_params_alt = pt.stack(subject_model_params_list, axis=1)
-                    #debug_print(subject_model_params.shape.eval())
-                   
-                    subject_timepoints = tp_data_vector
-                    #debug_print(subject_timepoints.shape)
-                    subject_t0 = subject_timepoints[ 0]
-                    #debug_print(subject_t0.shape.eval())
-                    subject_t1 = subject_timepoints[-1]
-                    #debug_print(subject_t1.shape.eval())
-                    
-                    diffrax_op = DiffraxODE(one_compartment_diffrax, )
-                    ode_sol = diffrax_op(subject_y0, subject_timepoints, subject_model_params)
-                    #debug_print(ode_sol.shape)
-                    sol.append(ode_sol)
-                sol = pt.concatenate(sol, axis=0).flatten()
-                filtered_ode_sol = sol[time_mask_data.flatten()]
-                sol = pm.Deterministic("sol", filtered_ode_sol, dims = 'obs_id')
-        elif ode_method == 'icomo':
+        #scipy method could be useful for debugging, otherwise use icomo (jax)
+        ode_method = 'icomo'
+        if ode_method == 'icomo':
+            #the loop could be useful for debugging, also demonstrates how the 
+            #jax compiler works, the for loop is MUCH slower and does not 
+            #sample chains in parallel on CPU
             icomo_for_loop = False
             if icomo_for_loop:
                 sol_alt = []
@@ -618,7 +584,6 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
 
                 sol = pm.Deterministic("sol", sol)
             else:
-                #ode_t0_vals = subject_init_conc
                 model_coeffs = theta_matrix
                 
                 masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcstiff_jittable_)(
@@ -627,7 +592,6 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                     )
                 sol_full = masses
                 
-                #sol_full[:,:,0] = concs
                 sol_full = sol_full[:,:,0].set(concs)
                 sol_dep_var = concs
                 sol_dep_var = sol_dep_var.flatten()
@@ -641,47 +605,6 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 #sol_full = sol_full[time_mask_data_f]
                 sol = pm.Deterministic("sol", sol)
                      
-        elif ode_method == 'jax_odeint':
-            ode_sol = jax_odeint_op(subject_init_conc.astype('float64'),
-                                    subject_min_tp_data,
-                                    subject_max_tp_data,
-                                    theta_matrix.astype('float64'),
-                                    tp_data.astype('float64'),
-                                    )
-            #debug_print("Shape of evaluated time_mask_data:", time_mask_data.shape.eval())
-            #debug_print("Shape of evaluated ode_sol:", ode_sol.shape.eval())
-            filtered_ode_sol = ode_sol[time_mask_data].flatten()
-            sol = pm.Deterministic("sol", filtered_ode_sol)
-        elif ode_method == 'pymc':
-            sol_alt = []
-            for sub_idx, subject in enumerate(coords['subject']):
-                subject_y0 = [subject_init_conc[sub_idx]]
-                #debug_print(subject_y0[0].shape.eval())
-                subject_model_params = theta_matrix[sub_idx, :]
-                #debug_print(subject_model_params.shape.eval())
-            
-                subject_timepoints = tp_data_vector
-                #debug_print(subject_timepoints.shape)
-                subject_t0 = subject_timepoints[ 0]
-                #debug_print(subject_t0.shape.eval())
-                subject_t1 = subject_timepoints[-1]
-                #debug_print(subject_t1.shape.eval())
-                
-                ode_sol = pymc_ode_model(y0=subject_y0, theta=[i[sub_idx] for i in pm_model_params])
-                ode_sol = ode_sol.flatten()
-                sol_alt.append(ode_sol)
-            
-                #debug_print(ode_sol.shape.eval())
-            
-            sol = pt.concatenate(sol_alt)
-            #debug_print(sol.shape.eval())
-            time_mask_data_f = time_mask_data.flatten()
-            
-            sol = sol[time_mask_data_f]
-            #debug_print(sol.shape.eval())
-
-            sol = pm.Deterministic("sol", sol)
-            
         elif ode_method == 'scipy':
             use_pytensor_wrapper = True
             use_pytensor_scan = True
@@ -812,8 +735,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
 
                 sol = pm.Deterministic("sol", sol)
                     
-        model_error = 1 if model_error is None else model_error
-        sigma_obs = pm.HalfNormal("sigma_obs", sigma=model_error)
+        
         ##debug_print("Shape of ode_sol (in PyMC model):", ode_sol.shape)
         # or
         #Something is
@@ -821,10 +743,30 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
 
         error_model = 'additive'
         if error_model == 'additive':
+            model_error = 1 if model_error is None else model_error
+            sigma_obs = pm.HalfNormal("sigma_additive", sigma=model_error)
             pm.Normal("obs", mu=sol, sigma=sigma_obs, observed=data_obs)
         elif error_model == 'proportional':
+            model_error = 1 if model_error is None else model_error
+            sigma_obs = pm.HalfNormal("sigma_proportional", sigma=model_error)
             #this requires censoring the intial per subject vals if the t0 y is zero
             pm.LogNormal("obs", mu=pt.log(sol), sigma=sigma_obs, observed=data_obs)
+        elif error_model == 'combined':
+            sigma_add = pm.HalfNormal("sigma_additive", sigma=0.5)
+            sigma_prop = pm.HalfNormal("sigma_proportional", sigma=0.5)
+            F_for_error_model = pt.maximum(sol, 0.0)
+            
+            var_prop = (sigma_prop * F_for_error_model)**2
+            var_add = sigma_add**2
+            
+            epsilon_variance = 1e-8 # A small constant for variance
+            combined_sigma_obs = pt.sqrt(var_prop + var_add + epsilon_variance)
+            
+            pm.Normal("obs",
+              mu=sol, # The model prediction F
+              sigma=combined_sigma_obs,
+              observed=data_obs
+             )
         #additive error model 
         
 
