@@ -2329,11 +2329,16 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         dump_obj = deepcopy(self)
 
         dump_obj.jax_ivp_nonstiff_compiled_solver_ = None
+        dump_obj.jax_ivp_nonstiff_jittable_ = None
         dump_obj.jax_ivp_nonstiff_solver_is_compiled = False
+        
         dump_obj.jax_ivp_stiff_compiled_solver_ = None
         dump_obj.jax_ivp_stiff_solver_is_compiled = False
+        dump_obj.jax_ivp_stiff_jittable_ = None
+        
         dump_obj.jax_ivp_pymcstiff_compiled_solver_ = None
         dump_obj.jax_ivp_pymcstiff_solver_is_compiled = False
+        dump_obj.jax_ivp_pymcstiff_jittable_ = None
         
         return dump_obj
     
