@@ -322,6 +322,17 @@ def get_function_args(func):
 
 
 def determine_ode_output_size(ode_func):
+    """Reads the signature of a function to determine the length of the output. 
+    This length is used in CompartmentalModel.__init__ to verify that the number of 
+    columns in the data indicated to contain the per subject initial conditions (y0)
+    matches the length of the defined ODE
+
+    Args:
+        ode_func (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
     try:
         source = inspect.getsource(ode_func)  # ode_func is a class method
         source = source.lstrip()  # thus we need to strip out the indentation in the method to make it look like a normal function
@@ -1258,8 +1269,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         model_name: str = None,
         subject_id_col: str = "SUBJID",
         conc_at_time_col: str = "DV",
-        log_transform_dep_var=False,
-        dose_col: str = None,
         time_col="TIME",
         solve_ode_at_time_col: str = None,
         pk_model_class: Type[PKBaseODE] = None,
@@ -1285,11 +1294,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         model_error2:ModelError = None,
         optimizer_tol=1e-4,
         verbose=False,
-        ode_solver_method="RK45",
         minimize_method: Literal[*MINIMIZE_METHODS_NEW_CB] = "l-bfgs-b",
         batch_id: uuid.UUID = None,
         model_id: uuid.UUID = None,
     ):
+        #defaults related to ODE solving
         self.stiff_ode = None
         self.jax_ivp_nonstiff_solver_is_compiled = False 
         self.jax_ivp_nonstiff_compiled_solver_ = None
@@ -1303,14 +1312,16 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.batch_id = uuid.uuid4() if batch_id is None else batch_id
         self.model_id = uuid.uuid4() if model_id is None else model_id
         self.model_name = model_name
+        #uninitialized pk_model_class to use for signature inspection
         self._pk_model_class = pk_model_class
+        #initialized pk_model_class to use with an ivp solver
         self.pk_model_class = pk_model_class()
+        #the ode within the pk_model_class
         self.pk_model_function = self.pk_model_class.ode
+        
         dep_vars = {} if dep_vars is None else dep_vars
         population_coeff = [] if population_coeff is None else population_coeff
         self.model_error_sigma = model_error_sigma  # perhaps update this to do a check and set the attr to None if this param is not needed
-        self.ode_solver_method = ode_solver_method
-        self.log_transform_dep_var = log_transform_dep_var
         self.ode_output_size = determine_ode_output_size(self.pk_model_function)
         self.ode_t0_cols = self._validate_ode_t0_vals_size(ode_t0_cols)
         self.groupby_col = subject_id_col
@@ -1350,7 +1361,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         self.bounds = self._unpack_upper_lower_bounds(self.model_error_sigma)
         self.no_me_loss_params = no_me_loss_params
-        self.optimzer_tol = optimizer_tol
+        self.optimizer_tol = optimizer_tol
 
         # helper attributes possibly defined later
         self.fit_result_ = None
@@ -1454,7 +1465,19 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         mlflow.set_experiment(experiment_name=self.batch_id)
         self.mlf_experiment_id = experiment_id
     
-    def _validate_ode_t0_vals_size(self, ode_t0_vals):
+    def _validate_ode_t0_vals_size(self, ode_t0_vals) -> List[ODEInitVals]:
+        """Validates that the list of `ODEInitVals` stored in `self.ode_t0_vals`
+        has the same length as the output of the ODE function to be integrated.
+
+        Args:
+            ode_t0_vals (list): A list of `ODEInitVals`
+
+        Raises:
+            ValueError: Indicates the size of the provided y0 does not match the shape of the ODE output. 
+
+        Returns:
+            list: The validated input `ode_t0_vals` list. 
+        """
         size_tmp = len(ode_t0_vals)
         if size_tmp != self.ode_output_size:
             raise ValueError(
@@ -2686,7 +2709,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             mlflow.log_param('scipy_minimize_method', self.minimize_method)
             mlflow.log_text(scipy.optimize.show_options('minimize', self.minimize_method, False), 'minimize_options.txt')
             
-            mlflow.log_param('minimize_tol', self.optimzer_tol)
+            mlflow.log_param('minimize_tol', self.optimizer_tol)
             mlflow.log_param('n_optimized_params', self.n_optimized_coeff)
             
             mlflow.log_param('model_has_subj_effects', model_has_subj_level_effects)
@@ -2701,7 +2724,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 args=(theta_data,),
                 warm_start=warm_start,
                 minimize_method=self.minimize_method,
-                tol=self.optimzer_tol,
+                tol=self.optimizer_tol,
                 bounds=self.bounds,
                 callback = mlf_callback
                 
