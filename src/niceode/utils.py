@@ -307,9 +307,12 @@ def huber_loss(y_true, y_pred, delta=1.0):
 
 
 def neg2_log_likelihood_loss(y_true, y_pred, sigma):
+    
     residuals = y_true - y_pred
     ss = np.sum(residuals**2)
     n = len(y_true)
+    if len(sigma) == 0:
+        sigma = np.sqrt(ss/n)
     neg2_log_likelihood = n * np.log(2 * np.pi * sigma**2) + ss / sigma**2
     return neg2_log_likelihood.to_numpy()[0]
 
@@ -1749,13 +1752,19 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             index=subject_id_c, columns=time_col, values="tmp"
         ).fillna(0)
         self.time_mask = time_mask_df.to_numpy().astype(bool)
+        #diffrax saveat times, that is: `diffrax.diffeqsolve(saveat = self.global_tp_eval)`
         self.global_tp_eval = np.array(time_mask_df.columns.values, dtype=np.float64)
+        #jax wants the saveat times as a list containing 
+        # all times where the ODE should be eval'd and reported at
+        # so these three below are not relevant
         self.global_t0_eval = self.global_tp_eval[0]
         self.global_tf_eval = self.global_tp_eval[-1]
         self.global_tspan_eval = np.array(
             [self.global_t0_eval, self.global_tf_eval], dtype=np.float64
         )
         # this assumes that all of the subjects have the ODE init
+        #diffrax t0 and t1, that is:
+        #`diffrax.diffeqsolve(t0 = self.global_tspan_init[0],t1 = self.global_tspan_init[0] )`
         self.global_tspan_init = np.array(
             [self.ode_t0_time_val, self.global_tf_eval], dtype=np.float64
         )
@@ -1868,7 +1877,13 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         data = data.reset_index(drop=True).copy()
         self.data = data.copy()
         subject_data = data.drop_duplicates(subset=subject_id_c, keep="first").copy()
+        subject_data_alt = data.loc[data[self.time_col] == 0, :].copy()
         self.subject_data = subject_data.copy()
+        #construct ode_data 
+        #ode_data is the data at which the ode will be solved
+        #When the initial concentration is known (eg. absorption models)
+        #the ode_data is just the data, when the initial concentration is 
+        #unknown then the ode_data starts at the first tp with known conc
         if self.solve_ode_at_time_col is None:
             ode_data = data.copy()
         else:
@@ -1887,14 +1902,25 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
 
         # y0 is the fist y where ODE solutions are generated, this may or may not be the solution to the ODE at t0
         # In the case of a model without absorption if all timepoints before
+        #the notation is confusing here b/c I am mixing the minimizer and ivp solver param names
         first_pred_t_df = ode_data.drop_duplicates(subset=subject_id_c, keep="first")
         self.subject_y0 = first_pred_t_df[conc_at_time_c].to_numpy(dtype=np.float64)
+        self._subject_y0 = (first_pred_t_df[[conc_at_time_c] + [self.time_col]]
+                            .copy()
+                            )
         self.subject_y0_idx = np.array(first_pred_t_df.index.values, dtype=np.int64)
         ode_init_val_cols = [i.column_name for i in self.ode_t0_cols]
+        #initial conditions for the ODE solver
         self.ode_t0_vals = subject_data[ode_init_val_cols].reset_index(drop=True).copy()
+        self._ode_t0_vals = (subject_data[ode_init_val_cols + [self.time_col]]
+                             .reset_index(drop=True).copy())
+        ode_saveat_min_time = self._subject_y0[self.time_col].to_numpy()
+        ode_init_cond_time = self._ode_t0_vals[self.time_col].to_numpy()
         self.ode_t0_vals_are_subject_y0 = np.all(
-            self.subject_y0 == self.ode_t0_vals.iloc[:, 0]
+             ode_saveat_min_time == ode_init_cond_time
         )
+        
+        
         # n_subs = len(subs)
         init_vals = self.init_vals_pd.copy()
         ivc = self.init_vals_pd_cols
@@ -2029,7 +2055,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         args # Pass the same parameter tuple
     )
         return solution.ys, concentrations
-        
+     
     def _solve_ivp_jax(self,
         model_coeffs,
         ode_t0_vals=None,
@@ -2372,6 +2398,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         subject_level_prediction=True,
         predict_unknown_t0=False,
     ):
+        #force recompilation of ivp solver in case the timepoints in the 
+        #prediction data are not those the model was trained with
+        self.jax_ivp_nonstiff_solver_is_compiled = False
+        self.jax_ivp_stiff_solver_is_compiled = False
+        self.jax_ivp_pymcstiff_solver_is_compiled = False
+        
         if self.fit_result_ is None:
             raise ValueError("The Model must be fit before prediction")
         params = self.fit_result_["x"]
