@@ -1619,6 +1619,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.jax_ivp_nonstiff_compiled_solver_ = None
         self.jax_ivp_stiff_solver_is_compiled = False 
         self.jax_ivp_stiff_compiled_solver_ = None
+        self.jax_ivp_pymcstiff_solver_is_compiled = False
+        self.jax_ivp_pymcstiff_compiled_solver_ = None
         self.loss_summary_name = loss_summary_name
         self.init_vals_pd_cols = InitValsPdCols()
         self.b_i_approx = None
@@ -2343,6 +2345,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         maxsteps = 1000000
         
         #compile both types of solvers regardless of if we need them
+        #consider moving this to __init__
         if not (self.jax_ivp_nonstiff_solver_is_compiled):
                 diffrax_solver = diffrax.Tsit5()
                 #Initial thoughts:
@@ -2400,6 +2403,39 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 self.jax_ivp_stiff_compiled_solver_ = jit_vmapped_solve
                 self.jax_ivp_stiff_solver_is_compiled = True
                 print('Sucessfully complied stiff ODE solver')
+        
+        if not (self.jax_ivp_pymcstiff_solver_is_compiled):
+                diffrax_solver = diffrax.Tsit5()
+                #Initial thoughts:
+                #when the data is quite noisy to begin with
+                #(eg. biomarker or drug level determinations)
+                #I bet rtol and atol can be much higher
+                #Later conclusion/hypothesis:
+                #Upon researching further, this is not where
+                #we should comprimise on precision, rather to speed
+                #things up the tol of the outer optimizer should be 
+                #increased as was done for the profiling optimizer. 
+                diffrax_step_ctrl = diffrax.ConstantStepSize()
+                dt0 = 0.01
+                
+                partial_solve_ivp = partial(
+                    self._solve_ivp_jax_worker,
+                    ode_class=self.pk_model_class,
+                    tspan=self.global_tspan_init,
+                    teval=self.global_tp_eval if timepoints is None else timepoints,
+                    diffrax_solver=diffrax_solver,
+                    diffrax_step_ctrl = diffrax_step_ctrl,
+                    dt0 = dt0, 
+                    diffrax_max_steps = maxsteps
+                    
+                )
+                
+                vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+                jit_vmapped_solve = jax.jit(vmapped_solve)
+                self.jax_ivp_pymcstiff_jittable_ = vmapped_solve
+                self.jax_ivp_pymcstiff_compiled_solver_ = jit_vmapped_solve
+                self.jax_ivp_pymcstiff_solver_is_compiled = True
+                print('Sucessfully complied stiff PyMC ODE solver')
         
         #get the relevant solver
         if self.stiff_ode:
@@ -2597,6 +2633,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         dump_obj.jax_ivp_nonstiff_solver_is_compiled = False
         dump_obj.jax_ivp_stiff_compiled_solver_ = None
         dump_obj.jax_ivp_stiff_solver_is_compiled = False
+        dump_obj.jax_ivp_pymcstiff_compiled_solver_ = None
+        dump_obj.jax_ivp_pymcstiff_solver_is_compiled = False
+        
         return dump_obj
     
     def save_fitted_model(self, jb_file_name: str = None):
