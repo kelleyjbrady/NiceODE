@@ -577,7 +577,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 filtered_ode_sol = sol[time_mask_data.flatten()]
                 sol = pm.Deterministic("sol", filtered_ode_sol, dims = 'obs_id')
         elif ode_method == 'icomo':
-            icomo_for_loop = True
+            icomo_for_loop = False
             if icomo_for_loop:
                 sol_alt = []
                 for sub_idx, subject in enumerate(coords['subject']):
@@ -621,7 +621,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 #ode_t0_vals = subject_init_conc
                 model_coeffs = theta_matrix
                 
-                masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_stiff_jittable_)(
+                masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcstiff_jittable_)(
                     subject_init_y0,
                     model_coeffs
                     )
