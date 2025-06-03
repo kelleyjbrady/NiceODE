@@ -54,9 +54,6 @@ def debug_print(print_obj, debug=False):
             print(print_obj)
 
 
-def softplus(x):
-    return np.log(1 + np.exp(x))
-
 
 def plot_subject_levels(df: pd.DataFrame, x="TIME", y="DV", subject="SUBJID", ax=None):
     if ax is None:
@@ -66,55 +63,6 @@ def plot_subject_levels(df: pd.DataFrame, x="TIME", y="DV", subject="SUBJID", ax
     df[y] = df[y].astype(pd.Float32Dtype())
     df[x] = df[x].astype(pd.Float32Dtype())
     sns.lineplot(data=df, x=x, y=y, hue=subject, ax=ax)
-
-
-@njit
-def numba_one_compartment_model(t, y, k, Vd, dose):
-    """
-    Defines the differential equation for a one-compartment pharmacokinetic model.
-
-    This function calculates the rate of change of drug concentration in the central
-    compartment over time.
-
-    Args:
-        t (float): Time point (not used in this specific model, but required by solve_ivp).
-        y (list): Current drug concentration in the central compartment.
-        k (float): Elimination rate constant.
-        Vd (float): Volume of distribution.
-        dose (float): Administered drug dose (not used in this model, as it assumes
-                        intravenous bolus administration where the initial concentration
-                        is directly given).
-
-    Returns:
-        float: The rate of change of drug concentration (dC/dt).
-    """
-    C = y[0]  # Extract concentration from the state vector
-    dCdt = -(k / Vd) * C  # Calculate the rate of change
-    return dCdt
-
-
-def one_compartment_model(t, y, k, Vd, dose):
-    """
-    Defines the differential equation for a one-compartment pharmacokinetic model.
-
-    This function calculates the rate of change of drug concentration in the central
-    compartment over time.
-
-    Args:
-      t (float): Time point (not used in this specific model, but required by solve_ivp).
-      y (list): Current drug concentration in the central compartment.
-      k (float): Elimination rate constant.
-      Vd (float): Volume of distribution.
-      dose (float): Administered drug dose (not used in this model, as it assumes
-                     intravenous bolus administration where the initial concentration
-                     is directly given).
-
-    Returns:
-      float: The rate of change of drug concentration (dC/dt).
-    """
-    C = y[0]  # Extract concentration from the state vector
-    dCdt = -(k / Vd) * C  # Calculate the rate of change
-    return dCdt
 
 
 @dataclass
