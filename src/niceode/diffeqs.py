@@ -502,8 +502,8 @@ class OneCompartmentAbsorption(PKBaseODE):
         y = [central_mass, gut_mass]
         args_tuple: (ka, cl, vd)
         """
-        ka, cl, vd = args_tuple
-        central_mass, gut_mass = y
+        ka, cl, vd = args_tuple[0], args_tuple[1], args_tuple[2]
+        central_mass, gut_mass = y[0], y[1]
         # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
         dCMdt = ka * gut_mass - (cl / vd) * central_mass
         dGdt = -ka * gut_mass
