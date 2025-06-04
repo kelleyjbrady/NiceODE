@@ -1,3 +1,7 @@
+import os
+os.environ['JAX_PLATFORMS'] = 'cpu'
+os.environ['JAX_ENABLE_X64']='True'
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns

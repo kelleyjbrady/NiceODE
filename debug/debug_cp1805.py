@@ -1,6 +1,7 @@
 # %%
 import os
 os.environ['JAX_PLATFORMS'] = 'cpu'
+os.environ['JAX_ENABLE_X64']='True'
 import pandas as pd
 from niceode.diffeqs import OneCompartmentAbsorption, TwoCompartmentAbsorption
 from niceode.utils import CompartmentalModel, ObjectiveFunctionColumn
@@ -57,6 +58,8 @@ piv_cols = []
 res_df[['SUBJID', 'TIME',  'DV_scale']] = df_oral[['ID_x', 'TIME_x', 'DV_scale']].copy()
 res_df_all[['SUBJID', 'TIME',  'DV_scale']] = df_allroute[['ID_x', 'TIME_x', 'DV_scale']].copy()
 piv_cols = ['DV_scale']
+with open('cp1805_prep.jb', 'wb') as f:
+    jb.dump(df_oral, f)
 df_nca = df_oral.copy()
 #%%
 run_old_nca_pipe = False
@@ -157,7 +160,7 @@ if True:
             dep_vars= None, 
                                     no_me_loss_function=neg2_log_likelihood_loss, 
                                     no_me_loss_needs_sigma=True,
-                                    optimizer_tol=None, 
+                                    #optimizer_tol=None, 
                                     pk_model_class=OneCompartmentAbsorption, 
                                     model_error_sigma=PopulationCoeffcient('sigma'
                                                                             ,log_transform_init_val=False
@@ -166,10 +169,10 @@ if True:
                                                                             ,optimization_upper_bound=3
                                                                             ),
                                     #ode_solver_method='BDF'
-                                    batch_id='mlflow_test_batch6',
+                                    batch_id='mlflow_test_batch9',
                                     minimize_method = 'COBYQA'
                                     )
-    #%%
+
     fit_model = True
     if fit_model:
         me_mod_fo = me_mod_fo.fit2(df_oral, )
@@ -236,7 +239,7 @@ me_mod_fo_dep =  CompartmentalModel(
                                                    optimization_upper_bound = 5) ]}, 
                                    no_me_loss_function=neg2_log_likelihood_loss, 
                                    no_me_loss_needs_sigma=True,
-                                   optimizer_tol=None, 
+                                   optimizer_tol=1e-6, 
                                    pk_model_class=OneCompartmentAbsorption, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
@@ -244,9 +247,9 @@ me_mod_fo_dep =  CompartmentalModel(
                                                                           ,optimization_lower_bound=0.00001
                                                                           ,optimization_upper_bound=3
                                                                           ),
-                                   batch_id='mlflow_test_batch6',
+                                   batch_id='mlflow_test_batch9',
                                    #ode_solver_method='BDF'
-                                   #minimize_method = 'COBYQA'
+                                   minimize_method = 'L-BFGS-B'
                                    )
 fit_model = True
 if fit_model:
@@ -295,7 +298,7 @@ me_mod_fo_dep =  CompartmentalModel(
                                                    optimization_upper_bound = 5) ]}, 
                                    no_me_loss_function=neg2_log_likelihood_loss, 
                                    no_me_loss_needs_sigma=True,
-                                   optimizer_tol=None, 
+                                   #optimizer_tol=None, 
                                    pk_model_class=OneCompartmentAbsorption, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
@@ -303,7 +306,7 @@ me_mod_fo_dep =  CompartmentalModel(
                                                                           ,optimization_lower_bound=0.00001
                                                                           ,optimization_upper_bound=3
                                                                           ),
-                                   batch_id='mlflow_test_batch6',
+                                   batch_id='mlflow_test_batch9',
                                    #ode_solver_method='BDF'
                                    minimize_method = 'COBYQA'
                                    )
@@ -365,7 +368,7 @@ me_mod_fo_dep =  CompartmentalModel(
                                                                           ,optimization_lower_bound=0.00001
                                                                           ,optimization_upper_bound=3
                                                                           ),
-                                   batch_id='mlflow_test_batch6',
+                                   batch_id='mlflow_test_batch9',
                                    #ode_solver_method='BDF'
                                    minimize_method = 'COBYQA'
                                    )
@@ -430,7 +433,7 @@ me_mod_fo =  CompartmentalModel(
                                                                           ,optimization_upper_bound=3
                                                                           ),
                                    #ode_solver_method='BDF'
-                                   batch_id='mlflow_test_batch6',
+                                   batch_id='mlflow_test_batch9',
                                    minimize_method = 'COBYQA'
                                    )
 fit_model = True
@@ -490,7 +493,7 @@ me_mod_fo =  CompartmentalModel(
                                                                           ,optimization_upper_bound=3
                                                                           ),
                                    #ode_solver_method='BDF'
-                                   batch_id='mlflow_test_batch6',
+                                   batch_id='mlflow_test_batch9',
                                    minimize_method = 'COBYQA'
                                    )
 fit_model = True
@@ -566,7 +569,7 @@ me_mod_foce =  CompartmentalModel(
                                                                           ,optimization_upper_bound=1.5
                                                                           ),
                                    #ode_solver_method='BDF'
-                                   batch_id='mlflow_test_batch6',
+                                   batch_id='mlflow_test_batch9',
                                    minimize_method = 'COBYQA'
                                    )
 fit_model = True
@@ -635,7 +638,7 @@ me_mod_fo =  CompartmentalModel(
                                                                           ,optimization_upper_bound=3
                                                                           ),
                                    #ode_solver_method='BDF'
-                                   batch_id='mlflow_test_batch6',
+                                   batch_id='mlflow_test_batch9',
                                    minimize_method = 'COBYQA'
                                    )
 
@@ -716,7 +719,7 @@ me_mod_fo =  CompartmentalModel(
                                                                           ,optimization_upper_bound=3
                                                                           ),
                                    #ode_solver_method='BDF'
-                                   batch_id='mlflow_test_batch6',
+                                   batch_id='mlflow_test_batch9',
                                    minimize_method = 'COBYQA'
                                    )
 
