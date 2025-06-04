@@ -305,14 +305,14 @@ def huber_loss(y_true, y_pred, delta=1.0):
     loss = huber(delta, resid)
     return np.mean(loss)
 
-
+#consider changing this to allow sigma to be None, would be much more simple
 def neg2_log_likelihood_loss(y_true, y_pred, sigma):
     sigma = sigma.to_numpy(dtype = np.float64)
     residuals = y_true - y_pred
     ss = np.sum(residuals**2)
     n = len(y_true)
     if len(sigma) == 0:
-        sigma = [np.sqrt(ss/n)]
+        sigma = np.array([np.sqrt(ss/n)])
     neg2_log_likelihood = n * np.log(2 * np.pi * sigma**2) + ss / sigma**2
     return neg2_log_likelihood[0]
 
