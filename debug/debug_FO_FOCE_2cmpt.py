@@ -1,39 +1,38 @@
 # %%
+import os
+os.environ['JAX_PLATFORMS'] = 'cpu'
+os.environ['JAX_ENABLE_X64']='True'
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from utils import plot_subject_levels
+from niceode.utils import plot_subject_levels
 import joblib as jb
 
 
 # %%
-from utils import CompartmentalModel, FOCE_approx_ll_loss, FO_approx_ll_loss, neg2_log_likelihood_loss
-from diffeqs import( OneCompartmentFODiffEq,
-                    mm_one_compartment_model,
-                    first_order_one_compartment_model,
-                    first_order_one_compartment_model2,
-                    parallel_elim_one_compartment_model, 
-                    one_compartment_absorption,
-                    one_compartment_absorption2, 
+from niceode.utils import (CompartmentalModel,
+                           FOCE_approx_ll_loss,
+                           FO_approx_ll_loss,
+                           neg2_log_likelihood_loss)
+from niceode.diffeqs import( OneCompartmentFODiffEq,
                     TwoCompartmentBolus
                     )
 import numpy as np
 
-# %%
-diffeq_obj = OneCompartmentFODiffEq()
-pk_model_function = diffeq_obj.diff_eq()
 
 # %%
 
-
-# %%
-
-from utils import sum_of_squares_loss, numba_one_compartment_model, PopulationCoeffcient, ODEInitVals, mean_squared_error_loss, huber_loss
+from niceode.utils import (sum_of_squares_loss,
+                           PopulationCoeffcient,
+                           ODEInitVals, 
+                           mean_squared_error_loss, 
+                           huber_loss)
 import cProfile
 from datetime import datetime
 
 now_str = datetime.now().strftime("_%d%m%Y-%H%M%S")
-with open(r'/workspaces/PK-Analysis/absorbtion_debug_scale_df.jb', 'rb') as f:
+with open(r'/workspaces/PK-Analysis/data/absorbtion_debug_scale_df.jb', 'rb') as f:
     scale_df = jb.load(f)
 #%%
 scale_df['dose_ng'] = scale_df['AMT']*1000
@@ -42,7 +41,9 @@ scale_df['dose_scale'] = scale_df['dose_ng'] / 1e5
 scale_df['DV_scale'] = scale_df['DV_ng/L'] / 1e5
 #scale_df['DV_scale']= scale_df['DV_ng/L']/scale_df['dose_ng'].max()
 #scale_df['dose_scale'] = 1.0
-
+#%%
+plot_subject_levels(scale_df, y = 'DV_scale')
+#%%
 zero_out_abs = True
 if zero_out_abs:
     dfs = []
@@ -76,6 +77,10 @@ pred_df = scale_df.copy()
 #pred_df = pred_df.loc[pred_df['solve_ode_at_TIME'], :].copy()
 pred_df['solve_ode_at_TIME'] = True
 res_df[['SUBJID', 'TIME',  'DV_scale']] = pred_df[['SUBJID', 'TIME', 'DV_scale']].copy()
+#%%
+plot_subject_levels(scale_df, y = 'DV_scale')
+subject_data = scale_df.loc[scale_df['TIME'] == 0, :].copy()
+train_df = scale_df.loc[scale_df['TIME'] != 0 , :].copy()
 
 # %%
 me_mod_fo =  CompartmentalModel(
@@ -84,7 +89,8 @@ me_mod_fo =  CompartmentalModel(
           conc_at_time_col = 'DV_scale',
           solve_ode_at_time_col = 'solve_ode_at_TIME',
           population_coeff=[
-                            PopulationCoeffcient('cl', 14, 
+                            PopulationCoeffcient('cl', 
+                            optimization_init_val = 14, 
                                                  #subject_level_intercept=True,
                                                  optimization_lower_bound = np.log(1e-6),
                                                  optimization_upper_bound = np.log(40),
@@ -93,7 +99,8 @@ me_mod_fo =  CompartmentalModel(
                                                 #subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
                             PopulationCoeffcient('v1',
-                                                 40,
+                                                 
+                                                 optimization_init_val = 40,
                                                   optimization_lower_bound = np.log(1e-6),
                                                  #optimization_upper_bound = np.log(45),
                                                 subject_level_intercept=True, 
@@ -101,11 +108,13 @@ me_mod_fo =  CompartmentalModel(
                                                 subject_level_intercept_sd_upper_bound = 5,
                                                 subject_level_intercept_sd_lower_bound=1e-6
                                                  ),
-                            PopulationCoeffcient('q', 40
+                            PopulationCoeffcient('q', 
+                            optimization_init_val = 40
                                                 , optimization_lower_bound = np.log(1e-6)
                                                 , optimization_upper_bound = np.log(80)
                                                 ),
-                            PopulationCoeffcient('v2', 3
+                            PopulationCoeffcient('v2', 
+                            optimization_init_val = 3
                                                 , optimization_lower_bound = np.log(1e-6)
                                                 , optimization_upper_bound = np.log(50)
                                                 ),
@@ -114,21 +123,24 @@ me_mod_fo =  CompartmentalModel(
                                    no_me_loss_function=sum_of_squares_loss, 
                                    no_me_loss_needs_sigma=False,
                                    optimizer_tol=None, 
-                                   pk_model_class=TwoCompartmentBolus(), 
+                                   pk_model_class=TwoCompartmentBolus, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
                                                                           , optimization_init_val=.2
                                                                           ,optimization_lower_bound=0.00001
                                                                           ,optimization_upper_bound=1
                                                                           ),
+                                   batch_id='abs_test_1',
                                    #ode_solver_method='BDF'
                                    minimize_method = 'COBYQA',
                                    )
 fit_model = True
 if fit_model:
-    me_mod_fo = me_mod_fo.fit2(scale_df, )
+    me_mod_fo = me_mod_fo.fit2(scale_df, ci_level = None )
+    me_mod_fo.save_fitted_model(jb_file_name = me_mod_fo.model_name)
 else:
-    with open(f"logs/fitted_model_{me_mod_fo.model_name}.jb", 'rb') as f:
+    #fitted_model_debug_hydrocortisone_2cmptbolus_cl-v1ME-q-v2_fo_nojit.jb
+    with open(f"/workspaces/PK-Analysis/logs/fitted_model_{me_mod_fo.model_name}.jb", 'rb') as f:
         me_mod_fo = jb.load(f)
 #Something about the way predict2 works in the context of this ME model makes it such 
 #that the preds output by predict2 do not match those generated during fitting, possibly only 
@@ -137,6 +149,7 @@ else:
 #by this model are much worse than the model below. 
 #%%
 res_df[me_mod_fo.model_name] = me_mod_fo.predict2(pred_df, )
+#%%
 res_df[f"avg_effect_{me_mod_fo.model_name}"] = me_mod_fo.predict2(pred_df, subject_level_prediction = False, )
 piv_cols.extend([me_mod_fo.model_name, f"avg_effect_{me_mod_fo.model_name}"])
 me_mod_fo.save_fitted_model(jb_file_name = me_mod_fo.model_name)
@@ -177,7 +190,7 @@ me_mod_fo2 =  CompartmentalModel(
                                    no_me_loss_function=sum_of_squares_loss, 
                                    no_me_loss_needs_sigma=False,
                                    optimizer_tol=None, 
-                                   pk_model_class=TwoCompartmentBolus(), 
+                                   pk_model_class=TwoCompartmentBolus, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
                                                                           , optimization_init_val=.5
@@ -185,28 +198,31 @@ me_mod_fo2 =  CompartmentalModel(
                                                                           ,optimization_upper_bound=1
                                                                           ),
                                    #ode_solver_method='BDF'
+                                   batch_id='abs_test_1',
                                    minimize_method = 'COBYQA',
                                    #ode_solver_method = 'Radau'
                                    )
 #%%
-fits = []
-fit_res_dfs = []
-for sub in scale_df['SUBJID'].unique():
-    fit_df = scale_df.loc[scale_df['SUBJID'] == sub, :].copy()
-    fit = me_mod_fo2.fit2(fit_df,)
-    inner_pred_df = pred_df.loc[scale_df['SUBJID'] == sub, :]
-    fit_df['pred_y'] = fit.predict2(inner_pred_df)
-    fits.append(fit.fit_result_)
-    fit_res_dfs.append(fit_df.copy())
-fit_res_df = pd.concat(fit_res_dfs)
-fit_readout = [np.exp(i['x']) for i in fits]
-res_df['indiv_fit_preds'] = fit_res_df['pred_y'].copy()
-piv_cols.append('indiv_fit_preds')
+indiv_fits = False
+if indiv_fits:
+    fits = []
+    fit_res_dfs = []
+    for sub in scale_df['SUBJID'].unique():
+        fit_df = scale_df.loc[scale_df['SUBJID'] == sub, :].copy()
+        fit = me_mod_fo2.fit2(fit_df,)
+        inner_pred_df = pred_df.loc[scale_df['SUBJID'] == sub, :]
+        fit_df['pred_y'] = fit.predict2(inner_pred_df)
+        fits.append(fit.fit_result_)
+        fit_res_dfs.append(fit_df.copy())
+    fit_res_df = pd.concat(fit_res_dfs)
+    fit_readout = [np.exp(i['x']) for i in fits]
+    res_df['indiv_fit_preds'] = fit_res_df['pred_y'].copy()
+    piv_cols.append('indiv_fit_preds')
 
 #%%
 fit_model = True
 if fit_model:
-    me_mod_fo2 = me_mod_fo2.fit2(scale_df, )
+    me_mod_fo2 = me_mod_fo2.fit2(scale_df, ci_level = None )
 else:
     with open(f"logs/fitted_model_{me_mod_fo2.model_name}.jb", 'rb') as f:
         me_mod_fo2 = jb.load(f)
@@ -255,7 +271,7 @@ me_mod_fo2 =  CompartmentalModel(
                                    no_me_loss_function=neg2_log_likelihood_loss, 
                                    no_me_loss_needs_sigma=True,
                                    optimizer_tol=None, 
-                                   pk_model_class=TwoCompartmentBolus(), 
+                                   pk_model_class=TwoCompartmentBolus, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
                                                                           , optimization_init_val=.2
@@ -264,13 +280,14 @@ me_mod_fo2 =  CompartmentalModel(
                                                                           ),
                                    #ode_solver_method='BDF'
                                    minimize_method = 'COBYQA',
+                                   batch_id='abs_test_1',
                                    #ode_solver_method = 'Radau'
                                    )
 
 #%%
 fit_model = True
 if fit_model:
-    me_mod_fo2 = me_mod_fo2.fit2(scale_df, )
+    me_mod_fo2 = me_mod_fo2.fit2(scale_df, ci_level = None )
 else:
     with open(f"logs/fitted_model_{me_mod_fo2.model_name}.jb", 'rb') as f:
         me_mod_fo2 = jb.load(f)
@@ -329,7 +346,7 @@ me4_mod_fo =  CompartmentalModel(
                                    no_me_loss_function=sum_of_squares_loss, 
                                    no_me_loss_needs_sigma=False,
                                    optimizer_tol=None, 
-                                   pk_model_class=TwoCompartmentBolus(), 
+                                   pk_model_class=TwoCompartmentBolus, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
                                                                           , optimization_init_val=.2
@@ -337,11 +354,12 @@ me4_mod_fo =  CompartmentalModel(
                                                                           ,optimization_upper_bound=1
                                                                           ),
                                    #ode_solver_method='BDF'
+                                   batch_id='abs_test_1',
                                    minimize_method = 'COBYQA',
                                    )
 fit_model = True
 if fit_model:
-    me4_mod_fo = me4_mod_fo.fit2(scale_df, )
+    me4_mod_fo = me4_mod_fo.fit2(scale_df, ci_level = None )
 else:
     with open(f"logs/fitted_model_{me4_mod_fo.model_name}.jb", 'rb') as f:
         me4_mod_fo = jb.load(f)
@@ -398,7 +416,7 @@ me3_mod_fo =  CompartmentalModel(
                                    no_me_loss_function=sum_of_squares_loss, 
                                    no_me_loss_needs_sigma=False,
                                    optimizer_tol=None, 
-                                   pk_model_class=TwoCompartmentBolus(), 
+                                   pk_model_class=TwoCompartmentBolus, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
                                                                           , optimization_init_val=.2
@@ -406,11 +424,12 @@ me3_mod_fo =  CompartmentalModel(
                                                                           ,optimization_upper_bound=1
                                                                           ),
                                    #ode_solver_method='BDF'
+                                   batch_id='abs_test_1',
                                    minimize_method = 'COBYQA',
                                    )
 fit_model = True
 if fit_model:
-    me3_mod_fo = me3_mod_fo.fit2(scale_df, )
+    me3_mod_fo = me3_mod_fo.fit2(scale_df, ci_level = None )
 else:
     with open(f"logs/fitted_model_{me3_mod_fo.model_name}.jb", 'rb') as f:
         me3_mod_fo = jb.load(f)
@@ -479,7 +498,7 @@ me3_mod_foce =  CompartmentalModel(
                                    me_loss_function = FOCE_approx_ll_loss,
                                    no_me_loss_needs_sigma=False,
                                    optimizer_tol=None, 
-                                   pk_model_class=TwoCompartmentBolus(), 
+                                   pk_model_class=TwoCompartmentBolus, 
                                    model_error_sigma=PopulationCoeffcient('sigma'
                                                                           ,log_transform_init_val=False
                                                                           , optimization_init_val=.2
@@ -487,11 +506,12 @@ me3_mod_foce =  CompartmentalModel(
                                                                           ,optimization_upper_bound=1
                                                                           ),
                                    #ode_solver_method='BDF'
+                                   batch_id='abs_test_1',
                                    minimize_method = 'COBYQA',
                                    )
 fit_model = True
 if fit_model:
-    me3_mod_foce = me3_mod_foce.fit2(scale_df, )
+    me3_mod_foce = me3_mod_foce.fit2(scale_df, ci_level = None )
 else:
     with open(f"logs/fitted_model_{me3_mod_foce.model_name}.jb", 'rb') as f:
         me3_mod_foce = jb.load(f)
