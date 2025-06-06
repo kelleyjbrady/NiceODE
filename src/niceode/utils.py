@@ -720,7 +720,7 @@ def _estimate_b_i(
     thetas,
     beta_data,
     sigma2,
-    Omega,
+    Omega2,
     omega_names,
     b_i_init,
     ode_t0_val,
@@ -738,7 +738,7 @@ def _estimate_b_i(
         thetas,
         beta_data,
         sigma2,
-        Omega,
+        Omega2,
         model_obj,
         debug_print=debug_print,
     ):
@@ -751,7 +751,7 @@ def _estimate_b_i(
         debug_print(f"thetas: {thetas}\n")
         debug_print(f"beta_data: {beta_data}\n")
         debug_print(f"sigma2: {sigma2}\n")
-        debug_print(f"Omega: {Omega}\n")
+        debug_print(f"Omega: {Omega2}\n")
 
         check_pos_inf = np.any(np.isinf(b_i))
         check_neg_inf = np.any(np.isneginf(b_i))
@@ -807,13 +807,13 @@ def _estimate_b_i(
         )
 
         try:
-            inv_Omega = np.linalg.inv(Omega)
+            inv_Omega = np.linalg.inv(Omega2) #omega squared (variance) or omega (sd)?
         except np.linalg.LinAlgError:
             return np.inf  # return inf if Omega is singular
 
         log_likelihood_prior = -0.5 * (
             len(b_i) * np.log(2 * np.pi)
-            + np.log(np.linalg.det(Omega))
+            + np.log(np.linalg.det(Omega2)) #omega squared (variance) or omega (sd)?
             + b_i.T @ inv_Omega @ b_i
         )
 
@@ -829,7 +829,7 @@ def _estimate_b_i(
 
     b_i_bounds = []
     if np.any(b_i_init == 0):
-        for omega in np.diag(Omega) ** 0.5:  # Iterate through standard deviations
+        for omega in np.diag(Omega2) ** 0.5:  # Iterate through standard deviations
             lower_bound = -6 * omega
             upper_bound = 6 * omega
             b_i_bounds.append((lower_bound, upper_bound))
@@ -845,7 +845,7 @@ def _estimate_b_i(
     result_b_i = minimize(
         conditional_log_likelihood,
         b_i_init.values.flatten(),  # Initial guess for b_i (flattened)
-        args=(y_i, pop_coeffs, thetas, beta_data, sigma2, Omega, model_obj),
+        args=(y_i, pop_coeffs, thetas, beta_data, sigma2, Omega2, model_obj),
         method="L-BFGS-B",
         bounds=b_i_bounds,
         # tol = 1e-6
@@ -856,8 +856,10 @@ def _estimate_b_i(
         dtype=pd.Float64Dtype(),
         columns=b_i_init.columns,
     )
+    
+    hess_inv = result_b_i.hess_inv
 
-    return b_i_estimated
+    return b_i_estimated, hess_inv
 
 
 #@profile
@@ -872,6 +874,7 @@ def FOCE_approx_ll_loss(
     tqdm_bi=False,
     debug=None,
     debug_print=debug_print,
+    focei = False,
     **kwargs,
 ):
     debug_print("Objective Call Start")
@@ -892,6 +895,7 @@ def FOCE_approx_ll_loss(
         "Inner Loop Optimizing b_i ================= INNER LOOP =================="
     )
     b_i_estimates = []
+    b_i_hess_invs = []
     if tqdm_bi:
         iter_obj = tqdm(model_obj.unique_groups)
     else:
@@ -933,7 +937,7 @@ def FOCE_approx_ll_loss(
         debug_print(f"omegas2: {omegas2}")
         debug_print("INNER LOOP VALUES IN END ===================")
 
-        b_i_est = _estimate_b_i(
+        b_i_est, b_i_hess_inv = _estimate_b_i(
             model_obj,
             pop_coeffs,
             thetas_i,
@@ -948,6 +952,7 @@ def FOCE_approx_ll_loss(
             sub,
         )
         b_i_estimates.append(b_i_est)
+        b_i_hess_invs.append(b_i_hess_inv)
     b_i_estimates = pd.concat(b_i_estimates)
     b_i_estimates.columns = pd.MultiIndex.from_tuples(b_i_estimates.columns)
 
@@ -1011,6 +1016,34 @@ def FOCE_approx_ll_loss(
         naive_cov_vec=direct_det_cov,
         naive_cov_subj=per_sub_direct_neg_ll,
     )
+    
+    if focei:
+        interaction_term = 0
+        calculation_successful = True 
+
+        # Loop through the inverse Hessians from your optimizer results
+        for hess_inv_i in b_i_hess_invs:
+            try:
+                # 1. Apply Cholesky directly to the INVERSE Hessian.
+                # This serves as our stability and convergence check.
+                L_inv_i = np.linalg.cholesky(hess_inv_i.todense())
+                
+                # 2. Calculate the log-determinant of the INVERSE Hessian.
+                logdet_H_inv_i = 2 * np.sum(np.log(np.diag(L_inv_i)))
+                
+                # 3. The log-determinant of H is the NEGATIVE of the above.
+                logdet_H_i = -logdet_H_inv_i
+                
+                interaction_term += logdet_H_i
+
+            except np.linalg.LinAlgError:
+                # This block executes if hess_inv_i is not positive-definite,
+                # indicating a failure in the inner optimization step.
+                calculation_successful = False
+                break
+        
+    
+        neg2_ll = neg2_ll + interaction_term
     debug_print(
         "Objective Call Complete ============= OBEJECTIVE CALL COMPLETE ======================="
     )
@@ -1018,6 +1051,35 @@ def FOCE_approx_ll_loss(
     debug_print(f"b_i_estimates: {b_i_estimates}\n")
     return neg2_ll, b_i_estimates, (preds, full_preds)
 
+def FOCEi_approx_ll_loss(
+    pop_coeffs,
+    sigma,
+    omegas,
+    thetas,
+    theta_data,
+    model_obj,
+    FO_b_i_apprx=None,
+    tqdm_bi=False,
+    debug=None,
+    debug_print=debug_print,
+    **kwargs
+):
+
+    res_collection = FOCE_approx_ll_loss(
+        pop_coeffs,
+        sigma,
+        omegas,
+        thetas,
+        theta_data,
+        model_obj,
+        FO_b_i_apprx=FO_b_i_apprx,
+        tqdm_bi=tqdm_bi,
+        debug=debug,
+        debug_print=debug_print,
+        focei = True,
+        **kwargs,)
+    
+    return res_collection
 
 #@profile
 def FO_approx_ll_loss(
@@ -1028,6 +1090,7 @@ def FO_approx_ll_loss(
     theta_data,
     model_obj,
     solve_for_omegas=False,
+    
     **kwargs,
 ):
     # unpack some variables locally for clarity
@@ -2170,7 +2233,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
 
 
             
-        
+        ode_t0_vals = np.array(ode_t0_vals, dtype = np.float64)
+        model_coeffs = np.array(model_coeffs, dtype = np.float64)
         all_solutions_masses, all_concentrations = jit_vmapped_solve(
                     ode_t0_vals,
                     model_coeffs
@@ -2483,6 +2547,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         thetas,
                         beta_data,
                         self,
+                        FO_b_i_apprx=self.subject_level_intercept_init_vals,
                         solve_for_omegas=True,
                     )
                 else:
