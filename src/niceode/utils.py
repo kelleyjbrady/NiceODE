@@ -2053,7 +2053,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     else np.zeros_like(pop_coeff)
                 )
                 data_contribution = (X @ theta)
-                out = np.exp(data_contribution + pop_coeff)  # + 1e-6
+                out = np.exp(data_contribution + pop_coeff)   + 1e-6
                 if len(out) != expected_len_out:
                     out = np.repeat(out, expected_len_out)
                 if c not in model_coeffs.columns:
