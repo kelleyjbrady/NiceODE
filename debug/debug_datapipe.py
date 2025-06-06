@@ -17,7 +17,6 @@ from niceode.utils import (
 import joblib as jb
 from niceode.utils import (
     sum_of_squares_loss,
-    numba_one_compartment_model,
     PopulationCoeffcient,
     ODEInitVals,
     ModelError,

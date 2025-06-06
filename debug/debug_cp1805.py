@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from niceode.utils import plot_subject_levels, neg2_log_likelihood_loss, FOCE_approx_ll_loss
 import joblib as jb
-from niceode.utils import sum_of_squares_loss, numba_one_compartment_model, PopulationCoeffcient, ODEInitVals, mean_squared_error_loss, huber_loss
+from niceode.utils import sum_of_squares_loss, PopulationCoeffcient, ODEInitVals, mean_squared_error_loss, huber_loss
 import cProfile
 from datetime import datetime
 import uuid
@@ -498,7 +498,7 @@ me_mod_fo =  CompartmentalModel(
                                    )
 fit_model = True
 if fit_model:
-    me_mod_fo = me_mod_fo.fit2(df_oral, )
+    me_mod_fo = me_mod_fo.fit2(df_oral, ci_level = None )
 else:
     with open(f"logs/fitted_model_{me_mod_fo.model_name}.jb", 'rb') as f:
         me_mod_fo = jb.load(f)
@@ -727,7 +727,7 @@ me_mod_fo =  CompartmentalModel(
 #%%
 fit_model = True
 if fit_model:
-    me_mod_fo = me_mod_fo.fit2(df_oral, )
+    me_mod_fo = me_mod_fo.fit2(df_oral, ci_level = None )
 else:
     with open(f"logs/fitted_model_{me_mod_fo.model_name}.jb", 'rb') as f:
         me_mod_fo = jb.load(f)
