@@ -793,19 +793,16 @@ def _estimate_b_i(
         # compute residuals
         residuals_i = y_i - preds_i
         # Calculate the negative conditional log-likelihood
-        n_t = len(y_i)
-        R_i = sigma2 * np.eye(n_t)
-        try:
-            inv_R_i = np.linalg.inv(R_i)
-        except np.linalg.LinAlgError:
-            return np.inf  # return inf if R is singular
-
-        log_likelihood_data = -0.5 * (
-            n_t * np.log(2 * np.pi)
-            + np.log(np.linalg.det(R_i))
-            + residuals_i.T @ inv_R_i @ residuals_i
-        )
-
+        error_model = 'additive'
+        if error_model == 'additive':
+            n_t = len(y_i)
+            sum_sq_residuals = np.sum(residuals_i**2)
+            log_likelihood_data = -0.5 * (n_t * np.log(2 * np.pi) 
+                                + n_t * np.log(sigma2) 
+                                + sum_sq_residuals / sigma2)
+            assert len(log_likelihood_data) == 1
+            log_likelihood_data = log_likelihood_data[0]
+        
         try:
             inv_Omega = np.linalg.inv(Omega2) #omega squared (variance) or omega (sd)?
         except np.linalg.LinAlgError:
@@ -826,21 +823,24 @@ def _estimate_b_i(
         return -(log_likelihood_data + log_likelihood_prior)
 
     # y_i = model_obj.y[model_obj.y_groups == b_i_init.name] #b_i_init.name will contain subject id
-
-    b_i_bounds = []
-    if np.any(b_i_init == 0):
-        for omega in np.diag(Omega2) ** 0.5:  # Iterate through standard deviations
-            lower_bound = -6 * omega
-            upper_bound = 6 * omega
-            b_i_bounds.append((lower_bound, upper_bound))
+    bound_bi = False
+    if bound_bi:
+        b_i_bounds = []
+        if np.any(b_i_init == 0):
+            for omega in np.diag(Omega2) ** 0.5:  # Iterate through standard deviations
+                lower_bound = -6 * omega
+                upper_bound = 6 * omega
+                b_i_bounds.append((lower_bound, upper_bound))
+        else:
+            for b_i in b_i_init.to_numpy().flatten():
+                lower_bound = b_i - np.abs(
+                    2 * b_i
+                )  # 3 is a hyperparameter that should be visible to the user.
+                upper_bound = b_i + np.abs(2 * b_i)
+                b_i_bounds.append((lower_bound, upper_bound))
+        debug_print(f"INNER b_i_bounds: {b_i_bounds}")
     else:
-        for b_i in b_i_init.to_numpy().flatten():
-            lower_bound = b_i - np.abs(
-                2 * b_i
-            )  # 3 is a hyperparameter that should be visible to the user.
-            upper_bound = b_i + np.abs(2 * b_i)
-            b_i_bounds.append((lower_bound, upper_bound))
-    debug_print(f"INNER b_i_bounds: {b_i_bounds}")
+        b_i_bounds = None
     # Use scipy.optimize.minimize for the inner optimization
     result_b_i = minimize(
         conditional_log_likelihood,
