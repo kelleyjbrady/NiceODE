@@ -803,17 +803,20 @@ def _estimate_b_i(
             assert len(log_likelihood_data) == 1
             log_likelihood_data = log_likelihood_data[0]
         
-        try:
-            inv_Omega = np.linalg.inv(Omega2) #omega squared (variance) or omega (sd)?
-        except np.linalg.LinAlgError:
-            return np.inf  # return inf if Omega is singular
+        diag_omega2 = np.diag(Omega2)
+        # This check is critical for the shrinkage problem!
+        if np.any(diag_omega2 <= 0):
+            return np.inf # Penalize non-positive definite Omega matrices
 
-        log_likelihood_prior = -0.5 * (
-            len(b_i) * np.log(2 * np.pi)
-            + np.log(np.linalg.det(Omega2)) #omega squared (variance) or omega (sd)?
-            + b_i.T @ inv_Omega @ b_i
-        )
+        sum_log_diag_omega2 = np.sum(np.log(diag_omega2))
+        b_i_flat = b_i.flatten() # Ensure b_i is 1D
+        prior_penalty = np.sum(b_i_flat**2 / diag_omega2)
 
+        log_likelihood_prior = -0.5 * (len(b_i_flat) * np.log(2 * np.pi) 
+                            + sum_log_diag_omega2 
+                            + prior_penalty)
+        
+        
         debug_print(f"log_likelihood_data: {-log_likelihood_data}\n")
         debug_print(f"log_likelihood_prior: {-log_likelihood_prior}\n")
         debug_print(
