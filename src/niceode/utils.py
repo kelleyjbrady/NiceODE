@@ -786,23 +786,25 @@ def _estimate_b_i(
             combined_coeffs, thetas, beta_data, expected_len_out=1
         )
         # Solve the ODEs for this individual
-
-        preds_i, full_preds_i = model_obj._solve_ivp(
-            model_coeffs_i, ode_t0_val, time_mask_i, parallel=False
-        )
-        # compute residuals
-        residuals_i = y_i - preds_i
-        # Calculate the negative conditional log-likelihood
-        error_model = 'additive'
-        if error_model == 'additive':
-            n_t = len(y_i)
-            sum_sq_residuals = np.sum(residuals_i**2)
-            log_likelihood_data = -0.5 * (n_t * np.log(2 * np.pi) 
-                                + n_t * np.log(sigma2) 
-                                + sum_sq_residuals / sigma2)
-            assert len(log_likelihood_data) == 1
-            log_likelihood_data = log_likelihood_data[0]
-        
+        if np.any(np.isinf(model_coeffs_i.to_numpy().flatten())):
+            log_likelihood_data = 1e12
+        else:
+            preds_i, full_preds_i = model_obj._solve_ivp(
+                model_coeffs_i, ode_t0_val, time_mask_i, parallel=False
+            )
+            # compute residuals
+            residuals_i = y_i - preds_i
+            # Calculate the negative conditional log-likelihood
+            error_model = 'additive'
+            if error_model == 'additive':
+                n_t = len(y_i)
+                sum_sq_residuals = np.sum(residuals_i**2)
+                log_likelihood_data = -0.5 * (n_t * np.log(2 * np.pi) 
+                                    + n_t * np.log(sigma2) 
+                                    + sum_sq_residuals / sigma2)
+                assert len(log_likelihood_data) == 1
+                log_likelihood_data = log_likelihood_data[0]
+            
         diag_omega2 = np.diag(Omega2)
         # This check is critical for the shrinkage problem!
         if np.any(diag_omega2 <= 0):
@@ -823,7 +825,8 @@ def _estimate_b_i(
             f"total log_likelihood: {-log_likelihood_data - log_likelihood_prior}\n"
         )
         debug_print("INNER OPTIMIZATION END ===================")
-        return -(log_likelihood_data + log_likelihood_prior)
+        loss_out = -(log_likelihood_data + log_likelihood_prior)
+        return loss_out
 
     # y_i = model_obj.y[model_obj.y_groups == b_i_init.name] #b_i_init.name will contain subject id
     bound_bi = False
