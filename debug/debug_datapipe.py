@@ -136,8 +136,6 @@ me_mod_fo = CompartmentalModel(
             ObjectiveFunctionColumn(
                 coeff_name = 'tmp',
                 column_name="sex_cat",
-                allometric_norm_value=70,
-                model_method="allometric",
             )
         ], 
         "cl": [
@@ -182,6 +180,11 @@ me_mod_fo = CompartmentalModel(
     batch_id="debug_datapipe",
     minimize_method="COBYQA",
 )
+tmp = me_mod_fo._assemble_pred_matrices(
+        df_oral,
+    )
+#%%
+
 fit_model = True
 if fit_model:
     me_mod_fo = me_mod_fo.fit2(
