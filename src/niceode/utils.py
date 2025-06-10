@@ -2885,7 +2885,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         fit_result_summary['lower_bound'] = [i[0] for i in self.bounds]
         fit_result_summary['upper_bound'] = [i[1] for i in self.bounds]
         self.preds_opt_ = []
-        debugging = False
+        debugging = True
         if debugging:
             return init_params_jax, theta_data_jax
         objective_function = partial(

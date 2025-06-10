@@ -82,6 +82,32 @@ def _estimate_jacobian_jax(pop_coeffs,
     return jacobian_dict
 
 
+def neg2_ll_chol(J, y_groups_idx,
+                 y_groups_unique,
+                 y, residuals, sigma2, omegas2,):
+    # V_all = []
+    log_det_V = 0
+    L_all = []
+    for sub in y_groups_unique:
+        filt = y_groups_idx == sub
+        J_sub = J[filt]
+        n_timepoints = len(J_sub)
+        R_i = sigma2 * np.eye(n_timepoints)  # Constant error
+        # Omega = np.diag(omegas**2) # Construct D matrix from omegas
+        V_i = R_i + J_sub @ omegas2 @ J_sub.T
+
+        L_i, lower = jax.scipy.linalg.cho_factor(V_i)  # Cholesky of each V_i
+        L_all.append(L_i)
+        log_det_V += 2 * np.sum(np.log(np.diag(L_i)))  # log|V_i|
+
+    L_block = jax.scipy.linalg.block_diag(*L_all)  # key change from before
+    V_inv_residuals = jax.scipy.linalg.cho_solve((L_block, True), residuals)
+    neg2_ll_chol = (
+        log_det_V + residuals.T @ V_inv_residuals + len(y) * np.log(2 * np.pi)
+    )
+
+    return neg2_ll_chol
+
 def FO_approx_ll_loss_jax(
     params,
     params_order,
@@ -130,7 +156,6 @@ def FO_approx_ll_loss_jax(
     gen_coeff_jit = jax.jit(generate_pk_model_coeff_jax)
     
 
-    omegas_names = [i for i in omegas]
     # omegas are SD, we want Variance, thus **2 below
     # FO assumes that there is no cov btwn the random effects, thus off diags are zero
     #this is not actually FO's assumption, but a simplification,
@@ -142,7 +167,7 @@ def FO_approx_ll_loss_jax(
     sigma = jnp.array([sigma[i] for i in sigma]).flatten()
     sigma2 = sigma**2
     n_individuals = len(y_groups_unique)
-    n_random_effects = len(omegas_names)
+    n_random_effects = len(omegas_order)
 
     # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
     model_coeffs = generate_pk_model_coeff_jax(
@@ -168,59 +193,24 @@ def FO_approx_ll_loss_jax(
     
     
     residuals = y - preds
-    
+
+    pop_coeffs_j = {i:pop_coeffs[i] for i in pop_coeffs if i[0] in [i[0] for i in omegas_order]}
     j = _estimate_jacobian_jax(pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
                                thetas=thetas, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
                                gen_coeff_jit=gen_coeff_jit, compiled_ivp_solver=compiled_ivp_solver
                                )
-    
-    # estimate jacobian
-    # there is something going on with the way this is filtered to use fprime and
-    # when there are multiple omegas
-    apprx_fprime_jac = False
-    central_diff_jac = True
-    use_adaptive = True
-    J = estimate_jacobian(
-        pop_coeffs,
-        thetas,
-        theta_data,
-        omegas_names,
-        y,
-        model_obj,
-        use_fprime=apprx_fprime_jac,
-        use_cdiff=central_diff_jac,
-        use_adaptive=use_adaptive,
-    )
-
-    if np.all(J == 0):
-        raise ValueError("All elements of the Jacobian are zero")
-    # drop initial values from relevant arrays if `model_obj.ode_t0_vals_are_subject_y0`
-    # perfect predictions can cause issues during optimization and also add no information to the loss
-    # If there are any subjects with only one data point this will fail by dropping the entire subject
-    if model_obj.ode_t0_vals_are_subject_y0:
-        drop_idx = model_obj.subject_y0_idx
-        J = np.delete(J, drop_idx, axis=0)
-        residuals = np.delete(residuals, drop_idx)
-        y = np.delete(y, drop_idx)
-        y_groups_idx = np.delete(y_groups_idx, drop_idx)
-
+    j = {i:j[i][time_mask] for i in j if i in (i for i in pop_coeffs_j)}
+    J = jnp.vstack([j[i].flatten() for i in j]).T
+    #J = 
     # Estimate the covariance matrix, then estimate neg log likelihood
-    direct_det_cov = False
-    per_sub_direct_neg_ll = False
-    cholsky_cov = True
-    neg2_ll = estimate_neg_log_likelihood(
+    neg2_ll = neg2_ll_chol(
         J,
         y_groups_idx,
+        y_groups_unique,
         y,
         residuals,
         sigma2,
         omegas2,
-        n_individuals,
-        n_random_effects,
-        model_obj,
-        cholsky_cov=cholsky_cov,
-        naive_cov_vec=direct_det_cov,
-        naive_cov_subj=per_sub_direct_neg_ll,
     )
 
     # if predicting or debugging, solve for the optimal b_i given the first order apprx
@@ -229,7 +219,7 @@ def FO_approx_ll_loss_jax(
     # col, this should make the resdiduals very wrong
     b_i_approx = np.zeros((n_individuals, n_random_effects))
     if solve_for_omegas:
-        for sub_idx, sub in enumerate(model_obj.unique_groups):
+        for sub_idx, sub in enumerate(y_groups_unique):
             filt = y_groups_idx == sub
             J_sub = J[filt]
             residuals_sub = residuals[filt]
