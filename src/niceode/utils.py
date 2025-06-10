@@ -32,6 +32,7 @@ from .diffeqs import PKBaseODE
 import uuid
 import mlflow
 import multiprocessing
+import jax.numpy as jnp
 
 from mlflow.data.pandas_dataset import from_pandas
 from .mlflow_utils import (get_class_source_without_docstrings,
@@ -1109,6 +1110,7 @@ def FO_approx_ll_loss(
     omegas2 = np.diag(
         omegas**2
     )  # FO assumes that there is no cov btwn the random effects, thus off diags are zero
+    #this is not actually FO's assumption, but a simplification, 
     sigma = sigma.to_numpy(dtype=np.float64)[0]
     sigma2 = sigma**2
     n_individuals = len(model_obj.unique_groups)
@@ -1988,6 +1990,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.ode_t0_vals_are_subject_y0 = np.all(
              ode_saveat_min_time == ode_init_cond_time
         )
+        self.ode_t0_vals_are_subject_y0 = False
         
         
         # n_subs = len(subs)
@@ -2151,8 +2154,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 #we should comprimise on precision, rather to speed
                 #things up the tol of the outer optimizer should be 
                 #increased as was done for the profiling optimizer. 
-                diffrax_step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-8)
-                dt0 = 0.01
+                diffrax_step_ctrl = diffrax.PIDController(rtol=1e-8, atol=1e-10)
+                dt0 = 0.1
                 
                 partial_solve_ivp = partial(
                     self._solve_ivp_jax_worker,
@@ -2176,8 +2179,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if not (self.jax_ivp_stiff_solver_is_compiled):
                 diffrax_solver = diffrax.Kvaerno5()
                 
-                diffrax_step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-8)
-                dt0 = 0.01
+                diffrax_step_ctrl = diffrax.PIDController(rtol=1e-8, atol=1e-10)
+                dt0 = 0.1
                 
                 partial_solve_ivp = partial(
                     self._solve_ivp_jax_worker,
@@ -2210,7 +2213,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 #things up the tol of the outer optimizer should be 
                 #increased as was done for the profiling optimizer. 
                 diffrax_step_ctrl = diffrax.ConstantStepSize()
-                dt0 = 0.01
+                dt0 = 0.1
                 
                 partial_solve_ivp = partial(
                     self._solve_ivp_jax_worker,
@@ -2336,6 +2339,50 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         raise NotImplementedError
         
     #@profile
+    @staticmethod
+    def _me_objective_jax(params:Dict[str, jnp.array],
+                          theta_data,
+                          subject_level_effect_init_vals, 
+                          n_subject_level_effects, 
+                          n_population_coeff,
+                          loss_function,
+                          ):
+        
+        
+
+        pop_coeffs = {i:params[i] 
+                      for idx, i in enumerate(params) 
+                      if idx < n_population_coeff}
+        
+        start_idx = n_population_coeff
+        end_idx = start_idx + 1
+        sigma = {i:params[i] 
+                      for idx, i in enumerate(params) 
+                      if idx >= start_idx and idx < end_idx}
+        
+        start_idx = end_idx
+        end_idx = start_idx + n_subject_level_effects
+        omegas = {i:params[i] 
+                      for idx, i in enumerate(params) 
+                      if idx >= start_idx and idx < end_idx}
+        
+        start_idx = end_idx
+        thetas = {i:params[i] 
+                      for idx, i in enumerate(params) 
+                      if idx >= start_idx}
+        
+        
+        error, _, preds = loss_function( #preds is a tuple containing the (dep_var_preds, full_preds)
+                    pop_coeffs,
+                    sigma,
+                    omegas,
+                    thetas,
+                    theta_data,
+                    self,
+                    FO_b_i_apprx=subject_level_effect_init_vals,
+                    stiff_ode = stiff_ode,
+                )
+    
     def _objective_function2(
         self,
         params,
@@ -2642,6 +2689,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         init_params = [
             pop_coeffs.values,
         ]  # pop coeffs already includes sigma if needed, this is confusing
+        init_params_jax = pop_coeffs.to_dict(orient = 'list')
+        init_params_jax = {(i,f"{i}_pop"):jnp.array(init_params_jax[i]) for i in init_params_jax}
         param_names = [
             {
                 "model_coeff": c,
@@ -2657,6 +2706,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         ]
         if sigma_check_1 or sigma_check_2:
             init_params.append(sigma.values.reshape(1, -1))
+            sigma_jax = sigma.to_dict(orient = 'list')
+            sigma_jax = {(i,f"{i}_const"):jnp.array(sigma_jax[i]) for i in sigma_jax}
+            init_params_jax.update(sigma_jax)
             param_names.extend(
                 [
                     {
@@ -2679,6 +2731,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             model_has_subj_level_effects = False
         if len(omegas.values) > 0:
             init_params.append(omegas.values)
+            omega_jax = omegas.to_dict(orient = 'list')
+            omega_jax = {i:jnp.array(omega_jax[i]) for i in omega_jax}
+            init_params_jax.update(omega_jax)
+            
             param_names.extend(
                 [
                     {
@@ -2696,6 +2752,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             )
         if len(thetas.values) > 0:
             init_params.append(thetas.values)
+            theta_jax = thetas.to_dict(orient = 'list')
+            theta_jax = {i:jnp.array(theta_jax[i]) for i in theta_jax}
+            init_params_jax.update(theta_jax)
             param_names.extend(
                 [
                     {
@@ -2711,6 +2770,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     for c_tuple in thetas.columns.to_list()
                 ]
             )
+        theta_data_jax = theta_data.to_dict(orient = 'list')
+        theta_data_jax = {i:jnp.array(theta_data_jax[i]) for i in theta_data_jax}
         #it would be possible to construct this when the class is initialized from 
         #init vals pd, that would make it much easier to follow. 
         fit_result_summary = pd.DataFrame(
@@ -2721,6 +2782,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         fit_result_summary['lower_bound'] = [i[0] for i in self.bounds]
         fit_result_summary['upper_bound'] = [i[1] for i in self.bounds]
         self.preds_opt_ = []
+        
         objective_function = partial(
             self._objective_function2,
             subject_level_intercept_init_vals=subject_level_intercept_init_vals,
@@ -2824,19 +2886,24 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             
             mlf_callback = MLflowCallback(objective_name=mlflow_loss.__name__, 
                                           parameter_names=fit_result_summary['log_name'].values)
-            self.fit_result_ = optimize_with_checkpoint_joblib(
-                objective_function,
-                init_params,
-                n_checkpoint=n_iters_per_checkpoint,
-                checkpoint_filename=checkpoint_filename,
-                args=(theta_data,),
-                warm_start=warm_start,
-                minimize_method=self.minimize_method,
-                tol=self.optimizer_tol,
-                bounds=self.bounds,
-                callback = mlf_callback
-                
-            )
+            fit_with_jax = False
+            if fit_with_jax:
+                raise NotImplementedError
+
+            else:
+                self.fit_result_ = optimize_with_checkpoint_joblib(
+                    objective_function,
+                    init_params,
+                    n_checkpoint=n_iters_per_checkpoint,
+                    checkpoint_filename=checkpoint_filename,
+                    args=(theta_data,),
+                    warm_start=warm_start,
+                    minimize_method=self.minimize_method,
+                    tol=self.optimizer_tol,
+                    bounds=self.bounds,
+                    callback = mlf_callback
+                    
+                )
             # hess_fun = nd.Hessian()
             mlflow.log_metric(f"final_{mlflow_loss.__name__}", self.fit_result_.fun)
             mlflow.log_metric(f"final_{self.loss_summary_name}", self.fit_result_.fun)
