@@ -1,11 +1,13 @@
 # %%
 import os
 os.environ['JAX_PLATFORMS'] = 'cpu'
+os.environ['JAX_ENABLE_X64']='True'
 import jax
 
 import pandas as pd
 from niceode.diffeqs import OneCompartmentAbsorption, TwoCompartmentAbsorption
 from niceode.utils import CompartmentalModel, ObjectiveFunctionColumn
+from niceode.jax_utils import FO_approx_ll_loss_jax
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -32,6 +34,8 @@ from niceode.nca import estimate_subject_slope_cv
 from niceode.nca import identify_low_conc_zones, estimate_k_halflife
 from niceode.nca import calculate_mrt
 from niceode.nca import prepare_section_aucs, calculate_auc_from_sections
+import jax.numpy as jnp
+from niceode.jax_utils import make_jittable_pk_coeff
 
 # Your JAX code will now reliably use the CPU
 print(f"JAX default backend: {jax.default_backend()}")
@@ -185,16 +189,56 @@ tmp = me_mod_fo._assemble_pred_matrices(
     )
 #%%
 
-fit_model = True
-if fit_model:
-    me_mod_fo = me_mod_fo.fit2(
-        df_oral,
-    )
-else:
-    with open(f"logs/fitted_model_{me_mod_fo.model_name}.jb", "rb") as f:
-        me_mod_fo = jb.load(f)
-res_df[me_mod_fo.model_name] = me_mod_fo.predict2(df_oral)
-piv_cols.append(me_mod_fo.model_name)
-me_mod_fo.save_fitted_model(jb_file_name=me_mod_fo.model_name)
+
+init_params, theta_data = me_mod_fo.fit2(
+    df_oral,
+)
+n_pop_e = me_mod_fo.n_population_coeff
+n_subj_e = me_mod_fo.n_subject_level_intercept_sds
+unique_groups = me_mod_fo.unique_groups
+groups_idx = me_mod_fo.y_groups
+y = me_mod_fo.y
+expected_len_out =  len(unique_groups)
+time_mask = me_mod_fo.time_mask
+ode_t0_vals = jnp.array(me_mod_fo.ode_t0_vals.to_numpy())
+me_mod_fo._compile_jax_ivp_solvers()
+generate_pk_model_coeff_jax = make_jittable_pk_coeff(len(unique_groups))
+params_order = (i for i in init_params)
+#%%
+mask_df = []
+for row in range(time_mask.shape[0]):
+    inner_df = pd.DataFrame()
+    id = unique_groups[row]
+    dat = time_mask[row]
+    inner_df['mask'] = dat
+    inner_df['id'] = id
+    inner_df['time'] = me_mod_fo.global_tp_eval
+    mask_df.append(inner_df)
+mask_df = pd.concat(mask_df)
+
+tmp_y = pd.DataFrame()
+tmp_y['y'] = y
+tmp_y['id'] = groups_idx
+tmp_y['time'] = me_mod_fo.data['TIME']
+
+masked_y = mask_df.merge(tmp_y, how = 'left', on = ['id', 'time'])
+
+padded_y = masked_y['y'].fillna(0.0).to_numpy()
+#%%
+
+FO_approx_ll_loss_jax(params = init_params,
+                      params_order = params_order, 
+                      theta_data = theta_data,
+                      y = y, 
+                      y_groups_idx = groups_idx,
+                      y_groups_unique = unique_groups, 
+                      n_population_coeff = n_pop_e, 
+                      n_subject_level_effects = n_subj_e,
+                      time_mask = time_mask,
+                      compiled_ivp_solver = me_mod_fo.jax_ivp_stiff_compiled_solver_,
+                      ode_t0_vals = ode_t0_vals,
+                      compiled_gen_ode_coeff = generate_pk_model_coeff_jax,
+                      solve_for_omegas = False
+                      )
 
 # %%

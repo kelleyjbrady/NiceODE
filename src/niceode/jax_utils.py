@@ -27,6 +27,9 @@ def make_jittable_pk_coeff(expected_len_out):
                 #else jnp.zeros_like(pop_coeff)
                 else jnp.zeros((expected_len_out, 1))
             )
+            jax.debug.print("--- Debugging Shapes ---")
+            jax.debug.print("X shape: {x_shape}", x_shape=X.shape)
+            jax.debug.print("theta shape: {theta_shape}", theta_shape=theta.shape)
             data_contribution = (X @ theta)
             out = jnp.exp(data_contribution + pop_coeff)   + 1e-6
             #if len(out) != expected_len_out:
@@ -108,11 +111,17 @@ def neg2_ll_chol(J, y_groups_idx,
 
     return neg2_ll_chol
 
+@partial(jax.jit, static_argnames = ("params_order",
+                                     "n_population_coeff", 
+                                    "n_subject_level_effects",
+                                    "compiled_ivp_solver",
+                                    "compiled_gen_ode_coeff",
+                                    "solve_for_omegas"
+                                     ))
 def FO_approx_ll_loss_jax(
     params,
     params_order,
     theta_data,
-    theta_order,
     y,
     y_groups_idx, 
     y_groups_unique,
@@ -123,11 +132,10 @@ def FO_approx_ll_loss_jax(
     ode_t0_vals,
     compiled_gen_ode_coeff,
     solve_for_omegas=False,
-    
-    **kwargs,
 ):
     # unpack some variables locally for clarity
-    
+    params_order = list(params_order)
+    params = {i:params[i] for i in params_order}
     pop_coeffs = {i:params[i] 
                       for idx, i in enumerate(params) 
                       if idx < n_population_coeff}
@@ -159,14 +167,13 @@ def FO_approx_ll_loss_jax(
     # FO assumes that there is no cov btwn the random effects, thus off diags are zero
     #this is not actually FO's assumption, but a simplification,
     omegas = jnp.array([omegas[i] for i in omegas]).flatten()
-    omegas2 = np.diag(
+    omegas2 = jnp.diag(
         omegas**2
     )  
      
     sigma = jnp.array([sigma[i] for i in sigma]).flatten()
     sigma2 = sigma**2
     n_individuals = len(y_groups_unique)
-    n_random_effects = len(omegas_order)
 
     # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
     model_coeffs = compiled_gen_ode_coeff(
@@ -208,7 +215,7 @@ def FO_approx_ll_loss_jax(
     # perhaps b_i approx is off in the 2cmpt case bc the model was learned on t1+ w/
     # t0 as the intial condition but now t0 is in the data w/out a conc in the DV
     # col, this should make the resdiduals very wrong
-    b_i_approx = jnp.zeros((n_individuals, n_random_effects))
+    b_i_approx = jnp.zeros((n_individuals, n_subject_level_effects))
     if solve_for_omegas:
         for sub_idx, sub in enumerate(y_groups_unique):
             filt = y_groups_idx == sub
