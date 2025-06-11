@@ -40,13 +40,13 @@ def make_jittable_pk_coeff(expected_len_out):
 @partial(jax.jit, static_argnames = ("pop_coeffs_order", 
                                      "gen_coeff_jit", "compiled_ivp_solver"
                                      ) )
-def _predict_jax(pop_coeffs,
+def _predict_jax_jacobian(jac_pop_coeffs, pop_coeffs,
                  pop_coeffs_order, thetas,
                  theta_data, ode_t0_vals, 
                  gen_coeff_jit,
                  compiled_ivp_solver):
 
-    
+    pop_coeffs.update(jac_pop_coeffs)
     model_coeffs_jit = gen_coeff_jit(
         pop_coeffs, thetas, theta_data,
     )
@@ -65,15 +65,15 @@ def _predict_jax(pop_coeffs,
 @partial(jax.jit, static_argnames = ("pop_coeffs_order", 
                                      "gen_coeff_jit", "compiled_ivp_solver"
                                      ) )
-def _estimate_jacobian_jax(pop_coeffs,
+def _estimate_jacobian_jax(jac_pop_coeffs, pop_coeffs,
                  pop_coeffs_order, thetas,
                  theta_data, ode_t0_vals, 
                  gen_coeff_jit,
                  compiled_ivp_solver):
     
-    jac_fn = jax.jacobian(_predict_jax)
+    jac_fn = jax.jacobian(_predict_jax_jacobian)
 
-    jacobian_dict = jac_fn(pop_coeffs,
+    jacobian_dict = jac_fn(jac_pop_coeffs, pop_coeffs,
                  pop_coeffs_order, thetas,
                  theta_data, ode_t0_vals, 
                  gen_coeff_jit,
@@ -121,7 +121,9 @@ def FO_approx_ll_loss_jax(
     time_mask,
     compiled_ivp_solver,
     ode_t0_vals,
+    compiled_gen_ode_coeff,
     solve_for_omegas=False,
+    
     **kwargs,
 ):
     # unpack some variables locally for clarity
@@ -152,9 +154,6 @@ def FO_approx_ll_loss_jax(
                     if idx >= start_idx}
     thetas_order = params_order[start_idx:]
     
-    generate_pk_model_coeff_jax = make_jittable_pk_coeff(len(y_groups_unique))
-    gen_coeff_jit = jax.jit(generate_pk_model_coeff_jax)
-    
 
     # omegas are SD, we want Variance, thus **2 below
     # FO assumes that there is no cov btwn the random effects, thus off diags are zero
@@ -170,23 +169,15 @@ def FO_approx_ll_loss_jax(
     n_random_effects = len(omegas_order)
 
     # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
-    model_coeffs = generate_pk_model_coeff_jax(
+    model_coeffs = compiled_gen_ode_coeff(
         pop_coeffs, thetas, theta_data,
     )
     model_coeffs = {i:model_coeffs[i[0]] for i in pop_coeffs_order}
     
-    model_coeffs_jit = gen_coeff_jit(
-        pop_coeffs, thetas, theta_data,
-    )
-    
-    model_coeffs_jit = {i:model_coeffs_jit[i[0]] for i in pop_coeffs_order}
-    # would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`)
-    # prepopulated with partial
-    #return model_coeffs
-    model_coeffs_jit_a = jnp.vstack([model_coeffs_jit[i] for i in model_coeffs_jit]).T
+    model_coeffs_a = jnp.vstack([model_coeffs[i] for i in model_coeffs]).T
     full_preds, pred_y = compiled_ivp_solver(
         ode_t0_vals,
-        model_coeffs_jit_a
+        model_coeffs_a
     )
     
     preds = pred_y[time_mask]
@@ -195,9 +186,9 @@ def FO_approx_ll_loss_jax(
     residuals = y - preds
 
     pop_coeffs_j = {i:pop_coeffs[i] for i in pop_coeffs if i[0] in [i[0] for i in omegas_order]}
-    j = _estimate_jacobian_jax(pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
+    j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
                                thetas=thetas, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
-                               gen_coeff_jit=gen_coeff_jit, compiled_ivp_solver=compiled_ivp_solver
+                               gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver=compiled_ivp_solver
                                )
     j = {i:j[i][time_mask] for i in j if i in (i for i in pop_coeffs_j)}
     J = jnp.vstack([j[i].flatten() for i in j]).T
@@ -217,7 +208,7 @@ def FO_approx_ll_loss_jax(
     # perhaps b_i approx is off in the 2cmpt case bc the model was learned on t1+ w/
     # t0 as the intial condition but now t0 is in the data w/out a conc in the DV
     # col, this should make the resdiduals very wrong
-    b_i_approx = np.zeros((n_individuals, n_random_effects))
+    b_i_approx = jnp.zeros((n_individuals, n_random_effects))
     if solve_for_omegas:
         for sub_idx, sub in enumerate(y_groups_unique):
             filt = y_groups_idx == sub
@@ -227,17 +218,17 @@ def FO_approx_ll_loss_jax(
                 # Ensure omegas2 is invertible (handle near-zero omegas)
                 # Add a small value to diagonal for stability if needed, or use pinv
                 min_omega_var = 1e-9  # Example threshold
-                stable_omegas2 = np.diag(np.maximum(np.diag(omegas2), min_omega_var))
-                omega_inv = np.linalg.inv(stable_omegas2)
+                stable_omegas2 = jnp.diag(jnp.maximum(jnp.diag(omegas2), min_omega_var))
+                omega_inv = jnp.linalg.inv(stable_omegas2)
 
                 # Corrected matrix A
                 A = J_sub.T @ J_sub + sigma2 * omega_inv
                 # Right-hand side
                 rhs = J_sub.T @ residuals_sub
                 # Solve
-                b_i_approx[sub_idx, :] = np.linalg.solve(A, rhs)
+                b_i_approx[sub_idx, :] = jnp.linalg.solve(A, rhs)
 
-            except np.linalg.LinAlgError:
+            except jnp.linalg.LinAlgError:
                 print(
                     f"Warning: Linear algebra error (likely singular matrix) for subject {sub}. Setting b_i to zero."
                 )
