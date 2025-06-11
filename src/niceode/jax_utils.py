@@ -111,6 +111,97 @@ def neg2_ll_chol(J, y_groups_idx,
 
     return neg2_ll_chol
 
+
+
+def _calculate_per_subject_likelihood_terms(
+    J_sub, residuals_sub, mask_sub, sigma2, omegas2
+):
+    """
+    Calculates likelihood components for a single subject on dense/padded arrays.
+
+    Args:
+      J_sub: Dense Jacobian for one subject. Shape: (max_obs, num_effects)
+      residuals_sub: Dense residuals for one subject. Shape: (max_obs,)
+      mask_sub: Boolean mask for one subject. Shape: (max_obs,)
+      sigma2: Scalar variance of the residual error.
+      omegas2: Dense covariance matrix of random effects. Shape: (num_effects, num_effects)
+    """
+    # Get the maximum number of observations for padding purposes.
+    max_obs = J_sub.shape[0]
+
+    # Construct the dense covariance matrix V_i for this subject.
+    # The padded sections will contain garbage values, but we will fix this.
+    R_i_dense = sigma2 * jnp.eye(max_obs)
+    V_i_dense = R_i_dense + J_sub @ omegas2 @ J_sub.T
+
+    # To handle the variable number of observations, we create a "masked" V_i.
+    # Where the mask is False (i.e., for padded data), we want V_i to be
+    # the identity matrix. This ensures that its log-determinant is 0
+    # and it doesn't affect the Cholesky solve for the valid data.
+    identity_matrix = jnp.eye(max_obs)
+    
+    # Create a 2D mask for the matrix from the 1D time mask
+    # This is True where both the row and column correspond to real observations.
+    mask_2d = mask_sub[:, None] & mask_sub[None, :]
+
+    V_i_masked = jnp.where(mask_2d, V_i_dense, identity_matrix)
+
+    # Now perform the Cholesky decomposition on the stabilized, dense matrix.
+    # We add a small "jitter" for numerical stability, preventing errors
+    # if the matrix is not perfectly positive definite.
+    jitter = 1e-6
+    L_i, lower = jax.scipy.linalg.cho_factor(V_i_masked + identity_matrix * jitter, lower=True)
+
+    # The log-determinant is now correctly calculated on the dense matrix.
+    # The identity part contributes log(1) = 0 to the sum.
+    log_det_Vi = 2 * jnp.sum(jnp.log(jnp.diag(L_i)))
+
+    # Use the Cholesky factor to solve V_i * x = residuals_sub.
+    # Since residuals_sub is already masked with zeros in the padded section,
+    # this solve will produce the correct result for the valid data.
+    V_inv_residuals_i = jax.scipy.linalg.cho_solve((L_i, lower), residuals_sub)
+
+    # Calculate the quadratic form: residuals.T @ V_inv @ residuals
+    quadratic_term = residuals_sub.T @ V_inv_residuals_i
+
+    return log_det_Vi, quadratic_term
+
+@partial(jax.jit, static_argnames=("num_total_obs",))
+def neg2_ll_chol_jit(
+    J_dense,           # Shape: (n_subjects, max_obs, n_effects)
+    masked_residuals,  # Shape: (n_subjects, max_obs)
+    mask,              # Shape: (n_subjects, max_obs)
+    sigma2,            # Shape: scalar
+    omegas2,           # Shape: (n_effects, n_effects)
+    num_total_obs,     # Static integer: total number of actual observations
+):
+    """
+    Calculates the negative 2 log-likelihood using a batched Cholesky decomposition.
+    """
+    # Vmap the per-subject function over the subjects axis (axis 0).
+    # `in_axes` tells vmap how to handle each argument:
+    #   0: Map over the first axis of J_dense, masked_residuals, and mask.
+    #   None: Do not map over sigma2 and omegas2; broadcast them to every call.
+    vmapped_calculator = jax.vmap(
+        _calculate_per_subject_likelihood_terms, in_axes=(0, 0, 0, None, None)
+    )
+
+    # Run the vmapped function. It returns two arrays, one for each value returned
+    # by the helper function.
+    all_log_dets, all_quadratic_terms = vmapped_calculator(
+        J_dense, masked_residuals, mask, sigma2, omegas2
+    )
+
+    # Aggregate the results from all subjects using jnp.sum
+    total_log_det = jnp.sum(all_log_dets)
+    total_quadratic = jnp.sum(all_quadratic_terms)
+
+    # Final likelihood calculation
+    neg2_ll = total_log_det + total_quadratic + num_total_obs * jnp.log(2 * jnp.pi)
+
+    return neg2_ll
+
+
 @partial(jax.jit, static_argnames = ("params_order",
                                      "n_population_coeff", 
                                     "n_subject_level_effects",
@@ -122,12 +213,13 @@ def FO_approx_ll_loss_jax(
     params,
     params_order,
     theta_data,
-    y,
+    padded_y,
     y_groups_idx, 
     y_groups_unique,
     n_population_coeff, 
     n_subject_level_effects,
-    time_mask,
+    time_mask_y,
+    time_mask_J,
     compiled_ivp_solver,
     ode_t0_vals,
     compiled_gen_ode_coeff,
@@ -182,31 +274,31 @@ def FO_approx_ll_loss_jax(
     model_coeffs = {i:model_coeffs[i[0]] for i in pop_coeffs_order}
     
     model_coeffs_a = jnp.vstack([model_coeffs[i] for i in model_coeffs]).T
-    full_preds, pred_y = compiled_ivp_solver(
+    padded_full_preds, padded_pred_y = compiled_ivp_solver(
         ode_t0_vals,
         model_coeffs_a
     )
     
-    preds = pred_y[time_mask]
-    
-    
-    residuals = y - preds
+    masked_residuals = jnp.where(time_mask_y, padded_y.flatten() - padded_pred_y.flatten(), 0.0)
 
     pop_coeffs_j = {i:pop_coeffs[i] for i in pop_coeffs if i[0] in [i[0] for i in omegas_order]}
-    j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
+    j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
                                thetas=thetas, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
                                gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver=compiled_ivp_solver
                                )
-    j = {i:j[i][time_mask] for i in j if i in (i for i in pop_coeffs_j)}
-    J = jnp.vstack([j[i].flatten() for i in j]).T
+    
+    # We create a dense J by stacking, then apply the mask to zero-out rows.
+    J_dense = jnp.concatenate([j[key] for key in pop_coeffs_j],axis = 2) #shape (n_subject, max_obs_per_subject, n_s)
+    
+    J = jnp.where(time_mask_J, J_dense, 0.0) # time_mask_J shape  (n_subject, max_obs_per_subject, n_s)
     #J = 
     # Estimate the covariance matrix, then estimate neg log likelihood
     neg2_ll = neg2_ll_chol(
         J,
         y_groups_idx,
         y_groups_unique,
-        y,
-        residuals,
+        padded_y,
+        masked_residuals,
         sigma2,
         omegas2,
     )
@@ -220,7 +312,7 @@ def FO_approx_ll_loss_jax(
         for sub_idx, sub in enumerate(y_groups_unique):
             filt = y_groups_idx == sub
             J_sub = J[filt]
-            residuals_sub = residuals[filt]
+            residuals_sub = masked_residuals[filt]
             try:
                 # Ensure omegas2 is invertible (handle near-zero omegas)
                 # Add a small value to diagonal for stability if needed, or use pinv
@@ -243,4 +335,4 @@ def FO_approx_ll_loss_jax(
             except Exception as e:
                 print(f"Error calculating b_i for subject {sub}: {e}")
 
-    return neg2_ll, b_i_approx, (preds, full_preds)
+    return neg2_ll, b_i_approx, (padded_pred_y, padded_full_preds)
