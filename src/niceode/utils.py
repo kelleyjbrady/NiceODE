@@ -43,6 +43,9 @@ from typing import Type
 from .pd_templates import InitValsPdCols
 from warnings import warn
 import diffrax
+from diffrax import (ODETerm, SaveAt, diffeqsolve,
+                     Kvaerno5, Tsit5, PIDController, BacksolveAdjoint
+                     )
 import jax
 from io import BytesIO
 from .model_assesment import construct_profile_ci
@@ -1380,6 +1383,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.jax_ivp_stiff_compiled_solver_ = None
         self.jax_ivp_pymcstiff_solver_is_compiled = False
         self.jax_ivp_pymcstiff_compiled_solver_ = None
+        self.jax_ivp_keys_stiff_solver_is_compiled = False
+        self.jax_ivp_keys_stiff_compiled_solver_ = None
         self.loss_summary_name = loss_summary_name
         self.init_vals_pd_cols = InitValsPdCols()
         self.b_i_approx = None
@@ -1823,7 +1828,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             index=subject_id_c, columns=time_col, values="tmp"
         ).fillna(0)
         self.time_mask = time_mask_df.to_numpy().astype(bool)
-        #diffrax saveat times, that is: `diffrax.diffeqsolve(saveat = self.global_tp_eval)`
+        #diffrax saveat times, that is: `diffeqsolve(saveat = self.global_tp_eval)`
         self.global_tp_eval = np.array(time_mask_df.columns.values, dtype=np.float64)
         #jax wants the saveat times as a list containing 
         # all times where the ODE should be eval'd and reported at
@@ -1835,7 +1840,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         )
         # this assumes that all of the subjects have the ODE init
         #diffrax t0 and t1, that is:
-        #`diffrax.diffeqsolve(t0 = self.global_tspan_init[0],t1 = self.global_tspan_init[0] )`
+        #`diffeqsolve(t0 = self.global_tspan_init[0],t1 = self.global_tspan_init[0] )`
         self.global_tspan_init = np.array(
             [self.ode_t0_time_val, self.global_tf_eval], dtype=np.float64
         )
@@ -2102,13 +2107,13 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                        dt0 = None,
                        ode_class: PKBaseODE = None,
                        diffrax_solver=None, 
-                       diffrax_step_ctrl = None,
+                       diffrax_step_ctrl = None,    
                        diffrax_max_steps = None
                        ):
         
-        ode_term = diffrax.ODETerm(ode_class.diffrax_ode)
-        
-        solution = diffrax.diffeqsolve(
+        ode_term = ODETerm(ode_class.diffrax_ode)
+        adjoint = BacksolveAdjoint()
+        solution = diffeqsolve(
         terms = ode_term,
         solver = diffrax_solver,
         t0 = tspan[0],
@@ -2117,12 +2122,47 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         y0 = y0,
         args=args,
         max_steps=diffrax_max_steps,
-        saveat=diffrax.SaveAt(ts=teval), # Specify time points for output
-        stepsize_controller=diffrax_step_ctrl
+        saveat=SaveAt(ts=teval), # Specify time points for output
+        stepsize_controller=diffrax_step_ctrl, 
+        adjoint=adjoint
         )
         
         central_mass_trajectory = solution.ys[:, 0]
         concentrations = ode_class.diffrax_mass_to_depvar(
+        central_mass_trajectory, 
+        args # Pass the same parameter tuple
+    )
+        return solution.ys, concentrations
+    
+    @staticmethod
+    def _solve_ivp_jax_worker_keys(y0, args,
+                       tspan=None,
+                       teval=None,
+                       dt0 = None,
+                       ode_class: PKBaseODE = None,
+                       diffrax_solver=None, 
+                       diffrax_step_ctrl = None,    
+                       diffrax_max_steps = None
+                       ):
+        
+        ode_term = ODETerm(ode_class.diffrax_ode_keys)
+        adjoint = BacksolveAdjoint()
+        solution = diffeqsolve(
+        terms = ode_term,
+        solver = diffrax_solver,
+        t0 = tspan[0],
+        t1 = tspan[1],
+        dt0 = dt0,
+        y0 = y0,
+        args=(args),
+        max_steps=diffrax_max_steps,
+        saveat=SaveAt(ts=teval), # Specify time points for output
+        stepsize_controller=diffrax_step_ctrl, 
+        adjoint=adjoint
+        )
+        
+        central_mass_trajectory = solution.ys[:, 0]
+        concentrations = ode_class.diffrax_mass_to_depvar_keys(
         central_mass_trajectory, 
         args # Pass the same parameter tuple
     )
@@ -2139,7 +2179,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         #compile both types of solvers regardless of if we need them
         #consider moving this to __init__
         if not (self.jax_ivp_nonstiff_solver_is_compiled):
-                diffrax_solver = diffrax.Tsit5()
+                diffrax_solver = Tsit5()
                 #Initial thoughts:
                 #when the data is quite noisy to begin with
                 #(eg. biomarker or drug level determinations)
@@ -2149,7 +2189,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 #we should comprimise on precision, rather to speed
                 #things up the tol of the outer optimizer should be 
                 #increased as was done for the profiling optimizer. 
-                diffrax_step_ctrl = diffrax.PIDController(rtol=1e-8, atol=1e-10)
+                diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
                 dt0 = 0.1
                 
                 partial_solve_ivp = partial(
@@ -2172,9 +2212,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 print('Sucessfully complied non-stiff ODE solver')
         
         if not (self.jax_ivp_stiff_solver_is_compiled):
-                diffrax_solver = diffrax.Kvaerno5()
+                diffrax_solver = Kvaerno5()
                 
-                diffrax_step_ctrl = diffrax.PIDController(rtol=1e-8, atol=1e-10)
+                diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
                 dt0 = 0.1
                 
                 partial_solve_ivp = partial(
@@ -2196,8 +2236,33 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 self.jax_ivp_stiff_solver_is_compiled = True
                 print('Sucessfully complied stiff ODE solver')
         
+        if not (self.jax_ivp_keys_stiff_solver_is_compiled):
+                diffrax_solver = Kvaerno5()
+                
+                diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
+                dt0 = 0.1
+                
+                partial_solve_ivp = partial(
+                    self._solve_ivp_jax_worker_keys,
+                    ode_class=self.pk_model_class,
+                    tspan=self.global_tspan_init,
+                    teval=self.global_tp_eval if timepoints is None else timepoints,
+                    diffrax_solver=diffrax_solver,
+                    diffrax_step_ctrl = diffrax_step_ctrl,
+                    dt0 = dt0, 
+                    diffrax_max_steps = maxsteps
+                    
+                )
+                
+                vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+                jit_vmapped_solve = jax.jit(vmapped_solve)
+                self.jax_ivp_keys_stiff_jittable_ = vmapped_solve
+                self.jax_ivp_keys_stiff_compiled_solver_ = jit_vmapped_solve
+                self.jax_ivp_keys_stiff_solver_is_compiled = True
+                print('Sucessfully complied stiff ODE solver')
+        
         if not (self.jax_ivp_pymcstiff_solver_is_compiled):
-                diffrax_solver = diffrax.Tsit5()
+                diffrax_solver = Tsit5()
                 #Initial thoughts:
                 #when the data is quite noisy to begin with
                 #(eg. biomarker or drug level determinations)
@@ -2247,7 +2312,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         #compile both types of solvers regardless of if we need them
         #consider moving this to __init__
         if not (self.jax_ivp_nonstiff_solver_is_compiled):
-                diffrax_solver = diffrax.Tsit5()
+                diffrax_solver = Tsit5()
                 #Initial thoughts:
                 #when the data is quite noisy to begin with
                 #(eg. biomarker or drug level determinations)
@@ -2257,7 +2322,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 #we should comprimise on precision, rather to speed
                 #things up the tol of the outer optimizer should be 
                 #increased as was done for the profiling optimizer. 
-                diffrax_step_ctrl = diffrax.PIDController(rtol=1e-8, atol=1e-10)
+                diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
                 dt0 = 0.1
                 
                 partial_solve_ivp = partial(
@@ -2280,9 +2345,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 print('Sucessfully complied non-stiff ODE solver')
         
         if not (self.jax_ivp_stiff_solver_is_compiled):
-                diffrax_solver = diffrax.Kvaerno5()
+                diffrax_solver = Kvaerno5()
                 
-                diffrax_step_ctrl = diffrax.PIDController(rtol=1e-8, atol=1e-10)
+                diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
                 dt0 = 0.1
                 
                 partial_solve_ivp = partial(
@@ -2305,7 +2370,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 print('Sucessfully complied stiff ODE solver')
         
         if not (self.jax_ivp_pymcstiff_solver_is_compiled):
-                diffrax_solver = diffrax.Tsit5()
+                diffrax_solver = Tsit5()
                 #Initial thoughts:
                 #when the data is quite noisy to begin with
                 #(eg. biomarker or drug level determinations)
