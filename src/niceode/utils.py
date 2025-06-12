@@ -44,7 +44,8 @@ from .pd_templates import InitValsPdCols
 from warnings import warn
 import diffrax
 from diffrax import (ODETerm, SaveAt, diffeqsolve,
-                     Kvaerno5, Tsit5, PIDController, BacksolveAdjoint
+                     Kvaerno5, Tsit5, PIDController, BacksolveAdjoint, 
+                     RecursiveCheckpointAdjoint
                      )
 import jax
 from io import BytesIO
@@ -2112,7 +2113,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                        ):
         
         ode_term = ODETerm(ode_class.diffrax_ode)
-        adjoint = BacksolveAdjoint()
+        adjoint = BacksolveAdjoint(solver = diffrax_solver, 
+                                   stepsize_controller=diffrax_step_ctrl, 
+                                   )
         solution = diffeqsolve(
         terms = ode_term,
         solver = diffrax_solver,
@@ -2146,7 +2149,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                        ):
         
         ode_term = ODETerm(ode_class.diffrax_ode_keys)
-        adjoint = BacksolveAdjoint()
+        adjoint = BacksolveAdjoint(solver = diffrax_solver, 
+                                   stepsize_controller=diffrax_step_ctrl, 
+                                   )
         solution = diffeqsolve(
         terms = ode_term,
         solver = diffrax_solver,
