@@ -508,6 +508,20 @@ class OneCompartmentAbsorption(PKBaseODE):
         dCMdt = ka * gut_mass - (cl / vd) * central_mass
         dGdt = -ka * gut_mass
         return jnp.array([dCMdt, dGdt])
+    
+    @staticmethod
+    def diffrax_ode_keys(t, y, args_pytree):
+        """
+        JAX-compatible ODE function for Diffrax.
+        y = [central_mass, gut_mass]
+        args_pytree: {'ka':jnp.array(), 'cl':jnp.array(), 'vd':jnp.array()}
+        """
+        ka, cl, vd = args_pytree['ka'], args_pytree['cl'], args_pytree['vd']
+        central_mass, gut_mass = y[0], y[1]
+        # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
+        dCMdt = ka * gut_mass - (cl / vd) * central_mass
+        dGdt = -ka * gut_mass
+        return jnp.array([dCMdt, dGdt])
 
     @staticmethod
     def diffrax_mass_to_depvar(pred_y_state0, args_tuple):
@@ -517,6 +531,18 @@ class OneCompartmentAbsorption(PKBaseODE):
         args_tuple: (ka, cl, vd)
         """
         _ka, _cl, vd = args_tuple
+        # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
+        depvar_unit_result = pred_y_state0 / vd
+        return depvar_unit_result
+    
+    @staticmethod
+    def diffrax_mass_to_depvar_keys(pred_y_state0, args_tuple):
+        """
+        JAX-compatible conversion from central mass to concentration.
+        pred_y_state0: Predicted central_mass trajectory.
+        args_tuple: (ka, cl, vd)
+        """
+        _ka, _cl, vd = args_tuple['ka'], args_tuple['cl'], args_tuple['vd']
         # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
         depvar_unit_result = pred_y_state0 / vd
         return depvar_unit_result
