@@ -49,7 +49,7 @@ def _predict_jax_jacobian(
     theta_data,
     ode_t0_vals,
     gen_coeff_jit,
-    compiled_ivp_solver
+    compiled_ivp_solver_keys,
 ):
     """
     Prediction function refactored for stable nested differentiation.
@@ -66,17 +66,17 @@ def _predict_jax_jacobian(
         pop_coeffs, thetas, theta_data,
     )
 
-    model_coeffs_jit = {i: model_coeffs_jit[i[0]] for i in pop_coeffs_order}
-    model_coeffs_jit_a = jnp.vstack([model_coeffs_jit[i] for i in model_coeffs_jit]).T
+    #model_coeffs_jit = {i: model_coeffs_jit[i[0]] for i in pop_coeffs_order}
+    #model_coeffs_jit_a = jnp.vstack([model_coeffs_jit[i] for i in model_coeffs_jit]).T
     
-    _full_preds, pred_y = compiled_ivp_solver(
+    _full_preds, pred_y = compiled_ivp_solver_keys(
         ode_t0_vals,
-        model_coeffs_jit_a
+        model_coeffs_jit
     )
     return pred_y
 
 @partial(jax.jit, static_argnames=(
-    "pop_coeffs_order", "gen_coeff_jit", "compiled_ivp_solver"
+    "pop_coeffs_order", "gen_coeff_jit", "compiled_ivp_solver_keys"
 ))
 def _estimate_jacobian_jax(
     jac_pop_coeffs, # The original dictionary of coefficients
@@ -86,7 +86,7 @@ def _estimate_jacobian_jax(
     theta_data,
     ode_t0_vals,
     gen_coeff_jit,
-    compiled_ivp_solver
+    compiled_ivp_solver_keys,
 ):
     """
     Estimates the Jacobian by differentiating with respect to array values,
@@ -109,7 +109,7 @@ def _estimate_jacobian_jax(
         theta_data=theta_data,
         ode_t0_vals=ode_t0_vals,
         gen_coeff_jit=gen_coeff_jit,
-        compiled_ivp_solver=compiled_ivp_solver
+        compiled_ivp_solver_keys=compiled_ivp_solver_keys
     )
     
     # Calculate the jacobian of the partial function with respect to its first
@@ -246,8 +246,9 @@ def neg2_ll_chol_jit(
 @partial(jax.jit, static_argnames = ("params_order",
                                      "n_population_coeff", 
                                     "n_subject_level_effects",
-                                    "compiled_ivp_solver",
+                                    "compiled_ivp_solver_keys",
                                     "compiled_gen_ode_coeff",
+                                    #"compiled_ivp_predictor",
                                     "solve_for_omegas"
                                      ))
 def FO_approx_ll_loss_jax(
@@ -262,12 +263,24 @@ def FO_approx_ll_loss_jax(
     n_subject_level_effects,
     time_mask_y,
     time_mask_J,
-    compiled_ivp_solver,
+    compiled_ivp_solver_keys,
     ode_t0_vals,
     compiled_gen_ode_coeff,
+    #compiled_ivp_predictor,
     solve_for_omegas=False,
 ):
     # unpack some variables locally for clarity
+    
+    theta_data = jax.lax.stop_gradient(theta_data)
+    padded_y = jax.lax.stop_gradient(padded_y)
+    unpadded_y_len = jax.lax.stop_gradient(unpadded_y_len)
+    y_groups_idx = jax.lax.stop_gradient(y_groups_idx)
+    y_groups_unique = jax.lax.stop_gradient(y_groups_unique)
+    time_mask_y = jax.lax.stop_gradient(time_mask_y)
+    time_mask_J = jax.lax.stop_gradient(time_mask_J)
+    ode_t0_vals = jax.lax.stop_gradient(ode_t0_vals)
+    
+    
     params_order = list(params_order)
     params = {i:params[i] for i in params_order}
     pop_coeffs = {i:params[i] 
@@ -310,23 +323,30 @@ def FO_approx_ll_loss_jax(
     n_individuals = len(y_groups_unique)
 
     # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
-    model_coeffs = compiled_gen_ode_coeff(
+    model_coeffs_i = compiled_gen_ode_coeff(
         pop_coeffs, thetas, theta_data,
     )
-    model_coeffs = {i:model_coeffs[i[0]] for i in pop_coeffs_order}
+    #model_coeffs = {i:model_coeffs_i[i[0]] for i in pop_coeffs_order}
     
-    model_coeffs_a = jnp.vstack([model_coeffs[i] for i in model_coeffs]).T
-    padded_full_preds, padded_pred_y = compiled_ivp_solver(
+    #model_coeffs_a = jnp.vstack([model_coeffs[i] for i in model_coeffs]).T
+    padded_full_preds, padded_pred_y = compiled_ivp_solver_keys(
         ode_t0_vals,
-        model_coeffs_a
+        model_coeffs_i
     )
+    # padded_full_preds, padded_pred_y = compiled_ivp_predictor(pop_coeffs,
+    #                                                           thetas,
+    #                                                           theta_data,
+    #                                                           compiled_gen_ode_coeff, 
+    #                                                           compiled_ivp_solver_keys
+    #                                                           )
+    
     
     masked_residuals = jnp.where(time_mask_y, padded_y - padded_pred_y, 0.0)
 
     pop_coeffs_j = {i:pop_coeffs[i] for i in pop_coeffs if i[0] in [i[0] for i in omegas_order]}
     j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
                                thetas=thetas, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
-                               gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver=compiled_ivp_solver
+                               gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver_keys=compiled_ivp_solver_keys
                                )
     
     # We create a dense J by stacking, then apply the mask to zero-out rows.
