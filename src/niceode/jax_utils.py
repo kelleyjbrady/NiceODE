@@ -40,48 +40,89 @@ def make_jittable_pk_coeff(expected_len_out):
         return model_coeffs
     return generate_pk_model_coeff_jax
 
-@partial(jax.jit, static_argnames = ("pop_coeffs_order", 
-                                     "gen_coeff_jit", "compiled_ivp_solver"
-                                     ) )
-def _predict_jax_jacobian(jac_pop_coeffs, pop_coeffs,
-                 pop_coeffs_order, thetas,
-                 theta_data, ode_t0_vals, 
-                 gen_coeff_jit,
-                 compiled_ivp_solver):
+def _predict_jax_jacobian(
+    jac_pop_coeff_values, # Differentiable argument: A tuple of JAX arrays
+    jac_pop_coeff_keys,   # Static argument: A tuple of string keys
+    pop_coeffs,
+    pop_coeffs_order,
+    thetas,
+    theta_data,
+    ode_t0_vals,
+    gen_coeff_jit,
+    compiled_ivp_solver
+):
+    """
+    Prediction function refactored for stable nested differentiation.
+    It takes coefficient VALUES as the primary differentiable argument and rebuilds
+    the dictionary internally from the static keys.
+    """
+    # Reconstruct the dictionary from the static keys and differentiable values.
+    # This keeps the non-differentiable structure separate from the values being traced.
+    jac_pop_coeffs = dict(zip(jac_pop_coeff_keys, jac_pop_coeff_values))
 
+    # The rest of the function proceeds as before.
     pop_coeffs.update(jac_pop_coeffs)
     model_coeffs_jit = gen_coeff_jit(
         pop_coeffs, thetas, theta_data,
     )
-    
-    model_coeffs_jit = {i:model_coeffs_jit[i[0]] for i in pop_coeffs_order}
-    # would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`)
-    # prepopulated with partial
-    #return model_coeffs
+
+    model_coeffs_jit = {i: model_coeffs_jit[i[0]] for i in pop_coeffs_order}
     model_coeffs_jit_a = jnp.vstack([model_coeffs_jit[i] for i in model_coeffs_jit]).T
-    full_preds, pred_y = compiled_ivp_solver(
+    
+    _full_preds, pred_y = compiled_ivp_solver(
         ode_t0_vals,
         model_coeffs_jit_a
     )
     return pred_y
 
-@partial(jax.jit, static_argnames = ("pop_coeffs_order", 
-                                     "gen_coeff_jit", "compiled_ivp_solver"
-                                     ) )
-def _estimate_jacobian_jax(jac_pop_coeffs, pop_coeffs,
-                 pop_coeffs_order, thetas,
-                 theta_data, ode_t0_vals, 
-                 gen_coeff_jit,
-                 compiled_ivp_solver):
-    
-    jac_fn = jax.jacobian(_predict_jax_jacobian)
+@partial(jax.jit, static_argnames=(
+    "pop_coeffs_order", "gen_coeff_jit", "compiled_ivp_solver"
+))
+def _estimate_jacobian_jax(
+    jac_pop_coeffs, # The original dictionary of coefficients
+    pop_coeffs,
+    pop_coeffs_order,
+    thetas,
+    theta_data,
+    ode_t0_vals,
+    gen_coeff_jit,
+    compiled_ivp_solver
+):
+    """
+    Estimates the Jacobian by differentiating with respect to array values,
+    not the dictionary structure, to ensure compatibility with second-order gradients.
+    """
+    # Deconstruct the dictionary into differentiable values (JAX arrays) and
+    # static keys (strings). This is the key step for stable differentiation.
+    jac_keys = tuple(jac_pop_coeffs.keys())
+    jac_values = tuple(jac_pop_coeffs.values())
 
-    jacobian_dict = jac_fn(jac_pop_coeffs, pop_coeffs,
-                 pop_coeffs_order, thetas,
-                 theta_data, ode_t0_vals, 
-                 gen_coeff_jit,
-                 compiled_ivp_solver)
+    # Create a partial function where only the values will be the dynamic,
+    # differentiable argument. All other arguments, including the keys, are
+    # treated as static for the purpose of this differentiation.
+    predict_fn_partial = partial(
+        _predict_jax_jacobian,
+        jac_pop_coeff_keys=jac_keys, # Pass keys as a static argument
+        pop_coeffs=pop_coeffs,
+        pop_coeffs_order=pop_coeffs_order,
+        thetas=thetas,
+        theta_data=theta_data,
+        ode_t0_vals=ode_t0_vals,
+        gen_coeff_jit=gen_coeff_jit,
+        compiled_ivp_solver=compiled_ivp_solver
+    )
     
+    # Calculate the jacobian of the partial function with respect to its first
+    # argument, which is now `jac_pop_coeff_values` (a tuple of arrays).
+    jac_fn = jax.jacobian(predict_fn_partial, argnums=0)
+
+    # Execute the jacobian function on the differentiable values.
+    jacobian_as_pytree = jac_fn(jac_values)
+    
+    # The output `jacobian_as_pytree` has the same pytree structure as the input
+    # `jac_values` (a tuple). We can now safely reconstruct the dictionary.
+    jacobian_dict = dict(zip(jac_keys, jacobian_as_pytree))
+
     return jacobian_dict
 
 
