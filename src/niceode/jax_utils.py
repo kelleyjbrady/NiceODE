@@ -27,9 +27,9 @@ def make_jittable_pk_coeff(expected_len_out):
                 #else jnp.zeros_like(pop_coeff)
                 else jnp.zeros((expected_len_out, 1))
             )
-            jax.debug.print("--- Debugging Shapes ---")
-            jax.debug.print("X shape: {x_shape}", x_shape=X.shape)
-            jax.debug.print("theta shape: {theta_shape}", theta_shape=theta.shape)
+            #jax.debug.print("--- Debugging Shapes ---")
+            #jax.debug.print("X shape: {x_shape}", x_shape=X.shape)
+            #jax.debug.print("theta shape: {theta_shape}", theta_shape=theta.shape)
             data_contribution = (X @ theta)
             out = jnp.exp(data_contribution + pop_coeff)   + 1e-6
             #if len(out) != expected_len_out:
@@ -166,7 +166,7 @@ def _calculate_per_subject_likelihood_terms(
 
     return log_det_Vi, quadratic_term
 
-@partial(jax.jit, static_argnames=("num_total_obs",))
+@jax.jit
 def neg2_ll_chol_jit(
     J_dense,           # Shape: (n_subjects, max_obs, n_effects)
     masked_residuals,  # Shape: (n_subjects, max_obs)
@@ -214,6 +214,7 @@ def FO_approx_ll_loss_jax(
     params_order,
     theta_data,
     padded_y,
+    unpadded_y_len,
     y_groups_idx, 
     y_groups_unique,
     n_population_coeff, 
@@ -279,10 +280,10 @@ def FO_approx_ll_loss_jax(
         model_coeffs_a
     )
     
-    masked_residuals = jnp.where(time_mask_y, padded_y.flatten() - padded_pred_y.flatten(), 0.0)
+    masked_residuals = jnp.where(time_mask_y, padded_y - padded_pred_y, 0.0)
 
     pop_coeffs_j = {i:pop_coeffs[i] for i in pop_coeffs if i[0] in [i[0] for i in omegas_order]}
-    j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
+    j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
                                thetas=thetas, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
                                gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver=compiled_ivp_solver
                                )
@@ -293,14 +294,13 @@ def FO_approx_ll_loss_jax(
     J = jnp.where(time_mask_J, J_dense, 0.0) # time_mask_J shape  (n_subject, max_obs_per_subject, n_s)
     #J = 
     # Estimate the covariance matrix, then estimate neg log likelihood
-    neg2_ll = neg2_ll_chol(
-        J,
-        y_groups_idx,
-        y_groups_unique,
-        padded_y,
-        masked_residuals,
-        sigma2,
-        omegas2,
+    neg2_ll = neg2_ll_chol_jit(
+        J,           # Shape: (n_subjects, max_obs, n_effects)
+        masked_residuals,  # Shape: (n_subjects, max_obs)
+        time_mask_y,              # Shape: (n_subjects, max_obs)
+        sigma2,            # Shape: scalar
+        omegas2,           # Shape: (n_effects, n_effects)
+        unpadded_y_len,
     )
 
     # if predicting or debugging, solve for the optimal b_i given the first order apprx
@@ -308,31 +308,5 @@ def FO_approx_ll_loss_jax(
     # t0 as the intial condition but now t0 is in the data w/out a conc in the DV
     # col, this should make the resdiduals very wrong
     b_i_approx = jnp.zeros((n_individuals, n_subject_level_effects))
-    if solve_for_omegas:
-        for sub_idx, sub in enumerate(y_groups_unique):
-            filt = y_groups_idx == sub
-            J_sub = J[filt]
-            residuals_sub = masked_residuals[filt]
-            try:
-                # Ensure omegas2 is invertible (handle near-zero omegas)
-                # Add a small value to diagonal for stability if needed, or use pinv
-                min_omega_var = 1e-9  # Example threshold
-                stable_omegas2 = jnp.diag(jnp.maximum(jnp.diag(omegas2), min_omega_var))
-                omega_inv = jnp.linalg.inv(stable_omegas2)
 
-                # Corrected matrix A
-                A = J_sub.T @ J_sub + sigma2 * omega_inv
-                # Right-hand side
-                rhs = J_sub.T @ residuals_sub
-                # Solve
-                b_i_approx[sub_idx, :] = jnp.linalg.solve(A, rhs)
-
-            except jnp.linalg.LinAlgError:
-                print(
-                    f"Warning: Linear algebra error (likely singular matrix) for subject {sub}. Setting b_i to zero."
-                )
-
-            except Exception as e:
-                print(f"Error calculating b_i for subject {sub}: {e}")
-
-    return neg2_ll, b_i_approx, (padded_pred_y, padded_full_preds)
+    return neg2_ll, (b_i_approx, (padded_pred_y, padded_full_preds))
