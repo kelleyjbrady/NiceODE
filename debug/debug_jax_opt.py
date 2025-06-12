@@ -36,7 +36,7 @@ from niceode.nca import calculate_mrt
 from niceode.nca import prepare_section_aucs, calculate_auc_from_sections
 import jax.numpy as jnp
 from niceode.jax_utils import make_jittable_pk_coeff
-
+from functools import partial
 # Your JAX code will now reliably use the CPU
 print(f"JAX default backend: {jax.default_backend()}")
 # %%
@@ -112,10 +112,10 @@ me_mod_fo = CompartmentalModel(
             optimization_lower_bound=np.log(1e-4),
             optimization_upper_bound=np.log(1),
             # optimization_upper_bound = np.log(.005),
-            # subject_level_intercept=True,
-            # subject_level_intercept_sd_init_val = 0.3,
-            # subject_level_intercept_sd_upper_bound = 5,
-            # subject_level_intercept_sd_lower_bound=1e-6
+            subject_level_intercept=True,
+            subject_level_intercept_sd_init_val = 0.3,
+            subject_level_intercept_sd_upper_bound = 5,
+            subject_level_intercept_sd_lower_bound=1e-6
         ),
         PopulationCoeffcient(
             "vd",
@@ -198,12 +198,17 @@ n_subj_e = me_mod_fo.n_subject_level_intercept_sds
 unique_groups = me_mod_fo.unique_groups
 groups_idx = me_mod_fo.y_groups
 y = me_mod_fo.y
+unpadded_y_len = len(y)
 expected_len_out =  len(unique_groups)
 time_mask = me_mod_fo.time_mask
+time_mask_y = jnp.array(time_mask)
+time_mask_J = [time_mask.reshape((time_mask.shape[0], time_mask.shape[1], 1)) for n in range(n_subj_e)]
+time_mask_J = jnp.array(np.concatenate(time_mask_J, axis = 2))
 ode_t0_vals = jnp.array(me_mod_fo.ode_t0_vals.to_numpy())
 me_mod_fo._compile_jax_ivp_solvers()
 generate_pk_model_coeff_jax = make_jittable_pk_coeff(len(unique_groups))
 params_order = (i for i in init_params)
+
 #%%
 mask_df = []
 for row in range(time_mask.shape[0]):
@@ -223,22 +228,85 @@ tmp_y['time'] = me_mod_fo.data['TIME']
 
 masked_y = mask_df.merge(tmp_y, how = 'left', on = ['id', 'time'])
 
-padded_y = masked_y['y'].fillna(0.0).to_numpy()
+masked_y['y'] = masked_y['y'].fillna(0.0)
+padded_y = masked_y['y'].to_numpy().reshape(len(unique_groups), len(me_mod_fo.global_tp_eval))
 #%%
 
-FO_approx_ll_loss_jax(params = init_params,
-                      params_order = params_order, 
-                      theta_data = theta_data,
-                      y = y, 
-                      y_groups_idx = groups_idx,
-                      y_groups_unique = unique_groups, 
-                      n_population_coeff = n_pop_e, 
-                      n_subject_level_effects = n_subj_e,
-                      time_mask = time_mask,
-                      compiled_ivp_solver = me_mod_fo.jax_ivp_stiff_compiled_solver_,
-                      ode_t0_vals = ode_t0_vals,
-                      compiled_gen_ode_coeff = generate_pk_model_coeff_jax,
-                      solve_for_omegas = False
-                      )
+@partial(jax.jit, static_argnames = ("compiled_gen_ode_coeff", "compiled_ivp_solver_keys"))
+def ivp_predictor(pop_coeffs, thetas, theta_data, ode_t0_vals, compiled_gen_ode_coeff, compiled_ivp_solver_keys):
+    model_coeffs_i = compiled_gen_ode_coeff(
+        pop_coeffs, thetas, theta_data,
+    )
+    #model_coeffs = {i:model_coeffs_i[i[0]] for i in pop_coeffs_order}
+    
+    #model_coeffs_a = jnp.vstack([model_coeffs[i] for i in model_coeffs]).T
+    padded_full_preds, padded_pred_y = compiled_ivp_solver_keys(
+        ode_t0_vals,
+        model_coeffs_i
+    )
+    return padded_full_preds, padded_pred_y
+
+
+#%%
+@jax.jit
+def loss_wrapper(p):
+    
+    f = FO_approx_ll_loss_jax(
+    p,
+    params_order=params_order, 
+    theta_data=theta_data,
+    padded_y=jnp.array(padded_y),
+    unpadded_y_len=jnp.array(unpadded_y_len),
+    y_groups_idx=jnp.array(groups_idx),
+    y_groups_unique=jnp.array(unique_groups), 
+    n_population_coeff=n_pop_e,
+    n_subject_level_effects=n_subj_e,
+    time_mask_y=jnp.array(time_mask_y),
+    time_mask_J=jnp.array(time_mask_J),
+    compiled_ivp_solver_keys = me_mod_fo.jax_ivp_keys_stiff_compiled_solver_,
+    ode_t0_vals=jnp.array(ode_t0_vals),
+    compiled_gen_ode_coeff=generate_pk_model_coeff_jax,
+    #compiled_ivp_predictor = ivp_predictor,
+    solve_for_omegas=False
+    )
+    
+    return f
+
+#%%
+loss_p = partial(FO_approx_ll_loss_jax, 
+                 params_order=params_order, 
+                theta_data=theta_data,
+                padded_y=jnp.array(padded_y),
+                unpadded_y_len=jnp.array(unpadded_y_len),
+                y_groups_idx=jnp.array(groups_idx),
+                y_groups_unique=jnp.array(unique_groups), 
+                n_population_coeff=n_pop_e,
+                n_subject_level_effects=n_subj_e,
+                time_mask_y=jnp.array(time_mask_y),
+                time_mask_J=jnp.array(time_mask_J),
+                compiled_ivp_solver_keys = me_mod_fo.jax_ivp_keys_stiff_compiled_solver_,
+                ode_t0_vals=jnp.array(ode_t0_vals),
+                compiled_gen_ode_coeff=generate_pk_model_coeff_jax,
+                #compiled_ivp_predictor = ivp_predictor,
+                solve_for_omegas=False
+                 
+                 )
+
+#%%
+#calling the loss w/out value and grad works
+loss_f = jax.jit(loss_p)
+
+res = loss_f(init_params)
+
+
+#%%
+fo_value_and_grad = jax.value_and_grad(loss_p, argnums = 0, has_aux = True)
+#this fails
+(loss, aux_data), grads = fo_value_and_grad(init_params,)
+                     
+#%%
+neg2_ll, b_i_approx, padded_preds = res
+padded_pred_y, padded_full_preds = padded_preds
+
 
 # %%
