@@ -1434,11 +1434,17 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         # not sure if the section below needs to be in two places
         self.model_error2 = model_error2
         self.dep_vars2 = dep_vars2
+        #ensure each of the pop_coeffs has an entry in dep_vars
         for coef_obj in population_coeff:
             c = coef_obj.coeff_name
             if c not in (i for i in dep_vars):
                 dep_vars[c] = []
-        assert sorted([i.coeff_name for i in population_coeff]) == sorted([i for i in dep_vars])
+        #ensure depvars are in the correct order
+        sorted_dep_vars = {}
+        for tmp_obj in population_coeff:
+            sorted_dep_vars[tmp_obj.coeff_name] = deepcopy(dep_vars[tmp_obj.coeff_name])
+        dep_vars = deepcopy(sorted_dep_vars)
+        assert [i.coeff_name for i in population_coeff] == [i for i in dep_vars]
         # END section
         self.population_coeff = population_coeff
         self.dep_vars = dep_vars
