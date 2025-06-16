@@ -1414,13 +1414,20 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.pk_args_diffeq = get_function_args(self.pk_model_function)[
             2:
         ]  # this relys on defining the dif eqs as I have done
-        for arg_name in self.pk_args_diffeq:
-            if len(population_coeff) == 0:
-                population_coeff.append(PopulationCoeffcient(arg_name))
+        #ensure the pop coeffs exist and are in the same order as the diffeq
+        sorted_pk_args = [None for i in self.pk_args_diffeq]
+        known_pk_args = [(i.coeff_name, idx) for idx, i in enumerate(population_coeff)]
+        for arg_name_idx, arg_name in enumerate(self.pk_args_diffeq):
+            if arg_name in [i[0] for i in known_pk_args]:
+                pop_coeff_obj_idx = [i[1] for i in known_pk_args if i[0] == arg_name]
+                assert len(pop_coeff_obj_idx) == 1
+                pop_coeff_obj_idx = pop_coeff_obj_idx[0]
+                pop_coeff_obj = population_coeff[pop_coeff_obj_idx]
             else:
-                assigned_args = [obj.coeff_name for obj in population_coeff]
-                if arg_name not in assigned_args:
-                    population_coeff.append(PopulationCoeffcient(arg_name))
+                pop_coeff_obj = PopulationCoeffcient(arg_name)
+            sorted_pk_args[arg_name_idx] = deepcopy(pop_coeff_obj) 
+        population_coeff = deepcopy(sorted_pk_args)
+        
         self.no_me_loss_function = no_me_loss_function
         self.no_me_loss_needs_sigma = no_me_loss_needs_sigma
         self.me_loss_function = me_loss_function
