@@ -97,7 +97,7 @@ me_mod_fo = CompartmentalModel(
     time_col="TIME_x",
     population_coeff=[
         PopulationCoeffcient(
-            "ka",
+            "cl",
             optimization_init_val = 0.7,
             subject_level_intercept=True,
             optimization_lower_bound=np.log(1e-6),
@@ -107,7 +107,7 @@ me_mod_fo = CompartmentalModel(
             subject_level_intercept_sd_lower_bound=1e-6,
         ),
         PopulationCoeffcient(
-            "cl",
+            "ka",
             optimization_init_val = 0.1,
             optimization_lower_bound=np.log(1e-4),
             optimization_upper_bound=np.log(1),
@@ -231,6 +231,53 @@ masked_y = mask_df.merge(tmp_y, how = 'left', on = ['id', 'time'])
 masked_y['y'] = masked_y['y'].fillna(0.0)
 padded_y = masked_y['y'].to_numpy().reshape(len(unique_groups), len(me_mod_fo.global_tp_eval))
 #%%
+dfs = []
+td_df = pd.DataFrame(theta_data)
+theta_params = [i[0] for i in pd.DataFrame(td_df).columns]
+unique_pop_params = [i[0] for idx, i in enumerate(init_params) if idx < n_pop_e ]
+#test inserting in the middle and at the end in addtion to the front
+#unique_pop_params = unique_pop_params[:1]  + ['test'] + unique_pop_params[1:] 
+#unique_pop_params = unique_pop_params + ['test2']
+#%%
+td_df_alt = td_df.copy()
+last_seen_param = None
+#new_theta_full = np.copy(unique_theta_params)
+new_td_df = td_df.copy()
+for p_idx, p in enumerate(unique_pop_params):
+    if p not in np.unique(theta_params):
+        c_new = (p, f'{p}_zero_feature')
+        if last_seen_param is None:
+            insert_idx = 0
+        else:
+            insert_idx_tmp = [idx for idx, i in enumerate(theta_params) if i == last_seen_param ]
+            insert_idx = insert_idx_tmp[-1] + 1
+        d_new = np.zeros((td_df.shape[0], 1))
+        old_cols = list(new_td_df.columns)
+        oc_pre = old_cols[:insert_idx]
+        oc_post = old_cols[insert_idx:]
+        new_cols = oc_pre + [c_new] + oc_post 
+        new_tmp_pre = new_td_df.copy().to_numpy()[:, :insert_idx]
+        new_tmp_post = new_td_df.to_numpy()[:, insert_idx:]
+        new_tmp = np.concatenate([new_tmp_pre, d_new, new_tmp_post], axis = 1)
+        new_td_df = pd.DataFrame(new_tmp, columns = new_cols)
+        
+        theta_params = [i[0] for i in new_td_df.columns]
+    last_seen_param = p
+#%%
+td_tensor = []    
+for p_idx, p in enumerate(unique_pop_params):
+    tmp_df = new_td_df.copy()
+    other_cols = [i for i in tmp_df.columns if i[0] != p]
+    tmp_df[other_cols] = 0
+    td_tensor.append(tmp_df.to_numpy())
+
+td_tensor = np.stack(td_tensor, axis = 2)            
+            
+        
+        
+
+
+#%%v
 
 @partial(jax.jit, static_argnames = ("compiled_gen_ode_coeff", "compiled_ivp_solver_keys"))
 def ivp_predictor(pop_coeffs, thetas, theta_data, ode_t0_vals, compiled_gen_ode_coeff, compiled_ivp_solver_keys):
@@ -274,21 +321,21 @@ def loss_wrapper(p):
 
 #%%
 loss_p = partial(FO_approx_ll_loss_jax, 
-                 params_order=params_order, 
+                 params_order=params_order, #a static_argname
                 theta_data=theta_data,
                 padded_y=jnp.array(padded_y),
                 unpadded_y_len=jnp.array(unpadded_y_len),
                 y_groups_idx=jnp.array(groups_idx),
                 y_groups_unique=jnp.array(unique_groups), 
-                n_population_coeff=n_pop_e,
-                n_subject_level_effects=n_subj_e,
+                n_population_coeff=n_pop_e, #a static_argname
+                n_subject_level_effects=n_subj_e, #a static_argname
                 time_mask_y=jnp.array(time_mask_y),
                 time_mask_J=jnp.array(time_mask_J),
-                compiled_ivp_solver_keys = me_mod_fo.jax_ivp_keys_stiff_compiled_solver_,
+                compiled_ivp_solver_keys = me_mod_fo.jax_ivp_keys_stiff_compiled_solver_, #a static_argname
                 ode_t0_vals=jnp.array(ode_t0_vals),
-                compiled_gen_ode_coeff=generate_pk_model_coeff_jax,
+                compiled_gen_ode_coeff=generate_pk_model_coeff_jax, #a static_argname
                 #compiled_ivp_predictor = ivp_predictor,
-                solve_for_omegas=False
+                solve_for_omegas=False #a static_argname
                  
                  )
 
