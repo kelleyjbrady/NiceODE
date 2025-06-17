@@ -1378,6 +1378,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     ):
         #defaults related to ODE solving
         self.stiff_ode = None
+        self.jax_ivp_closed_stiff_compiled_solver_= None
+        self.jax_ivp_closed_stiff_solver_is_compiled = False
         self.jax_ivp_nonstiff_solver_is_compiled = False 
         self.jax_ivp_nonstiff_compiled_solver_ = None
         self.jax_ivp_stiff_solver_is_compiled = False 
@@ -2152,6 +2154,19 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return solution.ys, concentrations
     
     @staticmethod
+    def _gen_ode_coeff_solve_ivp_jax(y0, args,
+                       tspan=None,
+                       teval=None,
+                       dt0 = None,
+                       ode_func = None,
+                       mass_to_depvar = None,
+                       diffrax_solver=None, 
+                       diffrax_step_ctrl = None,    
+                       diffrax_max_steps = None):
+        
+        pop_coeffs_work, data_contribution = args
+    
+    @staticmethod
     def _solve_ivp_jax_worker_keys(y0, args,
                        tspan=None,
                        teval=None,
@@ -2201,125 +2216,175 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         #compile both types of solvers regardless of if we need them
         #consider moving this to __init__
-        if not (self.jax_ivp_nonstiff_solver_is_compiled):
-                diffrax_solver = Tsit5()
-                #Initial thoughts:
-                #when the data is quite noisy to begin with
-                #(eg. biomarker or drug level determinations)
-                #I bet rtol and atol can be much higher
-                #Later conclusion/hypothesis:
-                #Upon researching further, this is not where
-                #we should comprimise on precision, rather to speed
-                #things up the tol of the outer optimizer should be 
-                #increased as was done for the profiling optimizer. 
-                diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
-                dt0 = 0.1
+        if not (self.jax_ivp_closed_stiff_solver_is_compiled):
+            # Define all solver configuration variables here.
+            # They will be "closed over" by the inner function.
+            _ode_func = self.pk_model_class.diffrax_ode
+            _mass_to_depvar = self.pk_model_class.diffrax_mass_to_depvar
+            _tspan = jnp.asarray(self.global_tspan_init)
+            _teval = jnp.asarray(self.global_tp_eval if timepoints is None else timepoints)
+            _solver = Kvaerno5()
+            _step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
+            _dt0 = 0.1
+            _max_steps = 1000000
+            _adjoint = BacksolveAdjoint(solver=_solver, stepsize_controller=_step_ctrl)
+
+            # This is our new "worker" function. It only takes dynamic arguments.
+            # All other configuration is static because it's from the parent scope.
+            def _solver_for_vmap(y0, args):
+                ode_term = ODETerm(_ode_func)
                 
-                partial_solve_ivp = partial(
-                    self._solve_ivp_jax_worker,
-                    ode_func = self.pk_model_class.diffrax_ode,
-                    mass_to_depvar = self.pk_model_class.diffrax_mass_to_depvar,
-                    tspan=tspan_jax,
-                    teval=teval_jax,
-                    diffrax_solver=diffrax_solver,
-                    diffrax_step_ctrl = diffrax_step_ctrl,
-                    dt0 = dt0, 
-                    diffrax_max_steps = maxsteps
-                    
+                solution = diffeqsolve(
+                    terms=ode_term,
+                    solver=_solver,
+                    t0=_tspan[0],
+                    t1=_tspan[1],
+                    dt0=_dt0,
+                    y0=y0,
+                    args=args, # The dynamic ODE parameters
+                    max_steps=_max_steps,
+                    saveat=SaveAt(ts=_teval),
+                    stepsize_controller=_step_ctrl,
+                    adjoint=_adjoint,
                 )
                 
-                vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
-                jit_vmapped_solve = jax.jit(vmapped_solve)
-                self.jax_ivp_nonstiff_jittable_ = vmapped_solve
-                self.jax_ivp_nonstiff_compiled_solver_ = jit_vmapped_solve
-                self.jax_ivp_nonstiff_solver_is_compiled = True
-                print('Sucessfully complied non-stiff ODE solver')
+                # Convert mass to concentration
+                central_mass_trajectory = solution.ys[:, 0]
+                concentrations = _mass_to_depvar(
+                    central_mass_trajectory,
+                    args
+                )
+                return solution.ys, concentrations
+
+            # Vmap and JIT the new, clean function
+            vmapped_solve = jax.vmap(_solver_for_vmap, in_axes=(0, 0))
+            jit_vmapped_solve = jax.jit(vmapped_solve)
+            
+            self.jax_ivp_closed_stiff_jittable_ = vmapped_solve
+            self.jax_ivp_closed_stiff_compiled_solver_ = jit_vmapped_solve
+            self.jax_ivp_closed_stiff_solver_is_compiled = True
+            print('Successfully compiled closed stiff ODE solver')
+            
+            
+        if not (self.jax_ivp_nonstiff_solver_is_compiled):
+            diffrax_solver = Tsit5()
+            #Initial thoughts:
+            #when the data is quite noisy to begin with
+            #(eg. biomarker or drug level determinations)
+            #I bet rtol and atol can be much higher
+            #Later conclusion/hypothesis:
+            #Upon researching further, this is not where
+            #we should comprimise on precision, rather to speed
+            #things up the tol of the outer optimizer should be 
+            #increased as was done for the profiling optimizer. 
+            diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
+            dt0 = 0.1
+            
+            partial_solve_ivp = partial(
+                self._solve_ivp_jax_worker,
+                ode_func = self.pk_model_class.diffrax_ode,
+                mass_to_depvar = self.pk_model_class.diffrax_mass_to_depvar,
+                tspan=tspan_jax,
+                teval=teval_jax,
+                diffrax_solver=diffrax_solver,
+                diffrax_step_ctrl = diffrax_step_ctrl,
+                dt0 = dt0, 
+                diffrax_max_steps = maxsteps
+                
+            )
+            
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+            jit_vmapped_solve = jax.jit(vmapped_solve)
+            self.jax_ivp_nonstiff_jittable_ = vmapped_solve
+            self.jax_ivp_nonstiff_compiled_solver_ = jit_vmapped_solve
+            self.jax_ivp_nonstiff_solver_is_compiled = True
+            print('Sucessfully complied non-stiff ODE solver')
         
         if not (self.jax_ivp_stiff_solver_is_compiled):
-                diffrax_solver = Kvaerno5()
+            diffrax_solver = Kvaerno5()
+            
+            diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
+            dt0 = 0.1
+            
+            partial_solve_ivp = partial(
+                self._solve_ivp_jax_worker,
+                ode_func = self.pk_model_class.diffrax_ode,
+                mass_to_depvar = self.pk_model_class.diffrax_mass_to_depvar,
+                tspan=tspan_jax,
+                teval=teval_jax,
+                diffrax_solver=diffrax_solver,
+                diffrax_step_ctrl = diffrax_step_ctrl,
+                dt0 = dt0, 
+                diffrax_max_steps = maxsteps
                 
-                diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
-                dt0 = 0.1
-                
-                partial_solve_ivp = partial(
-                    self._solve_ivp_jax_worker,
-                    ode_func = self.pk_model_class.diffrax_ode,
-                    mass_to_depvar = self.pk_model_class.diffrax_mass_to_depvar,
-                    tspan=tspan_jax,
-                    teval=teval_jax,
-                    diffrax_solver=diffrax_solver,
-                    diffrax_step_ctrl = diffrax_step_ctrl,
-                    dt0 = dt0, 
-                    diffrax_max_steps = maxsteps
-                    
-                )
-                
-                vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
-                jit_vmapped_solve = jax.jit(vmapped_solve)
-                self.jax_ivp_stiff_jittable_ = vmapped_solve
-                self.jax_ivp_stiff_compiled_solver_ = jit_vmapped_solve
-                self.jax_ivp_stiff_solver_is_compiled = True
-                print('Sucessfully complied stiff ODE solver')
+            )
+            
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+            jit_vmapped_solve = jax.jit(vmapped_solve)
+            self.jax_ivp_stiff_jittable_ = vmapped_solve
+            self.jax_ivp_stiff_compiled_solver_ = jit_vmapped_solve
+            self.jax_ivp_stiff_solver_is_compiled = True
+            print('Sucessfully complied stiff ODE solver')
         
         if not (self.jax_ivp_keys_stiff_solver_is_compiled):
-                diffrax_solver = Kvaerno5()
+            diffrax_solver = Kvaerno5()
+            
+            diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
+            dt0 = 0.1
+            
+            partial_solve_ivp = partial(
+                self._solve_ivp_jax_worker_keys,
+                ode_func = self.pk_model_class.diffrax_ode_keys,
+                mass_to_depvar = self.pk_model_class.diffrax_mass_to_depvar_keys,
+                tspan=tspan_jax,
+                teval=teval_jax,
+                diffrax_solver=diffrax_solver,
+                diffrax_step_ctrl = diffrax_step_ctrl,
+                dt0 = dt0, 
+                diffrax_max_steps = maxsteps
                 
-                diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
-                dt0 = 0.1
-                
-                partial_solve_ivp = partial(
-                    self._solve_ivp_jax_worker_keys,
-                    ode_func = self.pk_model_class.diffrax_ode_keys,
-                    mass_to_depvar = self.pk_model_class.diffrax_mass_to_depvar_keys,
-                    tspan=tspan_jax,
-                    teval=teval_jax,
-                    diffrax_solver=diffrax_solver,
-                    diffrax_step_ctrl = diffrax_step_ctrl,
-                    dt0 = dt0, 
-                    diffrax_max_steps = maxsteps
-                    
-                )
-                
-                vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
-                jit_vmapped_solve = jax.jit(vmapped_solve)
-                self.jax_ivp_keys_stiff_jittable_ = vmapped_solve
-                self.jax_ivp_keys_stiff_compiled_solver_ = jit_vmapped_solve
-                self.jax_ivp_keys_stiff_solver_is_compiled = True
-                print('Sucessfully complied KEYS stiff ODE solver')
+            )
+            
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+            jit_vmapped_solve = jax.jit(vmapped_solve)
+            self.jax_ivp_keys_stiff_jittable_ = vmapped_solve
+            self.jax_ivp_keys_stiff_compiled_solver_ = jit_vmapped_solve
+            self.jax_ivp_keys_stiff_solver_is_compiled = True
+            print('Sucessfully complied KEYS stiff ODE solver')
         
         if not (self.jax_ivp_pymcstiff_solver_is_compiled):
-                diffrax_solver = Tsit5()
-                #Initial thoughts:
-                #when the data is quite noisy to begin with
-                #(eg. biomarker or drug level determinations)
-                #I bet rtol and atol can be much higher
-                #Later conclusion/hypothesis:
-                #Upon researching further, this is not where
-                #we should compromise on precision, rather to speed
-                #things up the tol of the outer optimizer should be 
-                #increased as was done for the profiling optimizer. 
-                diffrax_step_ctrl = diffrax.ConstantStepSize()
-                dt0 = 0.1
+            diffrax_solver = Tsit5()
+            #Initial thoughts:
+            #when the data is quite noisy to begin with
+            #(eg. biomarker or drug level determinations)
+            #I bet rtol and atol can be much higher
+            #Later conclusion/hypothesis:
+            #Upon researching further, this is not where
+            #we should compromise on precision, rather to speed
+            #things up the tol of the outer optimizer should be 
+            #increased as was done for the profiling optimizer. 
+            diffrax_step_ctrl = diffrax.ConstantStepSize()
+            dt0 = 0.1
+            
+            partial_solve_ivp = partial(
+                self._solve_ivp_jax_worker,
+                ode_func = self.pk_model_class.diffrax_ode,
+                mass_to_depvar = self.pk_model_class.diffrax_mass_to_depvar,
+                tspan=tspan_jax,
+                teval=teval_jax,
+                diffrax_solver=diffrax_solver,
+                diffrax_step_ctrl = diffrax_step_ctrl,
+                dt0 = dt0, 
+                diffrax_max_steps = maxsteps
                 
-                partial_solve_ivp = partial(
-                    self._solve_ivp_jax_worker,
-                    ode_func = self.pk_model_class.diffrax_ode,
-                    mass_to_depvar = self.pk_model_class.diffrax_mass_to_depvar,
-                    tspan=tspan_jax,
-                    teval=teval_jax,
-                    diffrax_solver=diffrax_solver,
-                    diffrax_step_ctrl = diffrax_step_ctrl,
-                    dt0 = dt0, 
-                    diffrax_max_steps = maxsteps
-                    
-                )
-                
-                vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
-                jit_vmapped_solve = jax.jit(vmapped_solve)
-                self.jax_ivp_pymcstiff_jittable_ = vmapped_solve
-                self.jax_ivp_pymcstiff_compiled_solver_ = jit_vmapped_solve
-                self.jax_ivp_pymcstiff_solver_is_compiled = True
-                print('Sucessfully complied stiff PyMC ODE solver')
+            )
+            
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+            jit_vmapped_solve = jax.jit(vmapped_solve)
+            self.jax_ivp_pymcstiff_jittable_ = vmapped_solve
+            self.jax_ivp_pymcstiff_compiled_solver_ = jit_vmapped_solve
+            self.jax_ivp_pymcstiff_solver_is_compiled = True
+            print('Sucessfully complied stiff PyMC ODE solver')
         
         
     
