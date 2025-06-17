@@ -40,6 +40,54 @@ def make_jittable_pk_coeff(expected_len_out):
         return model_coeffs
     return generate_pk_model_coeff_jax
 
+
+@jax.custom_vjp
+def estimate_jacobian_fo(jac_pop_coeffs, pop_coeffs, pop_coeffs_order, thetas, 
+                         theta_data, ode_t0_vals, gen_coeff_jit, 
+                         compiled_ivp_solver_arr, data_contribution):
+    """
+    This is the function we will decorate. It simply calls your original
+    Jacobian estimator. Its signature must match the original.
+    """
+    return _estimate_jacobian_jax(
+        jac_pop_coeffs=jac_pop_coeffs,
+        pop_coeffs=pop_coeffs,
+        pop_coeffs_order=pop_coeffs_order,
+        thetas=thetas,
+        theta_data=theta_data,
+        ode_t0_vals=ode_t0_vals,
+        gen_coeff_jit=gen_coeff_jit,
+        compiled_ivp_solver_arr=compiled_ivp_solver_arr,
+        data_contribution=data_contribution
+    )
+
+def estimate_jacobian_fo_fwd(jac_pop_coeffs, pop_coeffs, pop_coeffs_order, thetas, 
+                             theta_data, ode_t0_vals, gen_coeff_jit, 
+                             compiled_ivp_solver_arr, data_contribution):
+    """The forward pass for the VJP."""
+    # It calls the function and returns the result, plus residuals for the bwd pass.
+    # We don't need residuals, so we pass None.
+    primal_out = estimate_jacobian_fo(
+        jac_pop_coeffs, pop_coeffs, pop_coeffs_order, thetas, theta_data, 
+        ode_t0_vals, gen_coeff_jit, compiled_ivp_solver_arr, data_contribution
+    )
+    return primal_out, None
+
+def estimate_jacobian_fo_bwd(residuals, g):
+    """
+    The backward pass for the VJP. This is where we enforce the FO method.
+    """
+    # We need to return a tuple of gradients that has the same structure
+    # as the arguments to the primal function.
+    # The FO method dictates that the gradients with respect to all inputs
+    # of the jacobian calculator are zero.
+    # The primal had 9 arguments, so we return a tuple of 9 "None" values.
+    # None is JAX's way of representing a zero gradient that doesn't need
+    # to be carried around as an explicit zero-filled array.
+    return (None, None, None, None, None, None, None, None, None)
+
+
+
 def _predict_jax_jacobian(
     jac_pop_coeff_values, # Differentiable argument: A tuple of JAX arrays
     jac_pop_coeff_keys,   # Static argument: A tuple of string keys
@@ -138,6 +186,7 @@ def _estimate_jacobian_jax(
 
     return jacobian_dict
 
+estimate_jacobian_fo.defvjp(estimate_jacobian_fo_fwd, estimate_jacobian_fo_bwd)
 
 def neg2_ll_chol(J, y_groups_idx,
                  y_groups_unique,
@@ -392,7 +441,7 @@ def FO_approx_ll_loss_jax(
     #data_contribution = jax.lax.stop_gradient(data_contribution)
     pop_coeffs_j = {i:pop_coeffs[i] for i in pop_coeffs if i[0] in [i[0] for i in omegas_order]}
     #pop_coeffs_stopped = jax.tree_map(jax.lax.stop_gradient, pop_coeffs)
-    j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
+    j = estimate_jacobian_fo(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
                                thetas=thetas_dict, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
                                gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
                                data_contribution = data_contribution
