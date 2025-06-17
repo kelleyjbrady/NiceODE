@@ -6,22 +6,16 @@ packages = [
 ]
 description = "JAX project with CUDA support managed by Poetry"
 authors = ["Kelley Brady <kelleyjbrady@protonmail.com>"]
-#readme = "README.md"
+
 
 [tool.poetry.dependencies]
-python = ">=3.13,<3.14" # Match PYTHON_VERSION in Dockerfile
-# Specify JAX with CUDA 12 extra
-# Check PyPI for the latest compatible JAX version
-jax = { version = "^0.4.28", extras = ["cuda12"] }
-# Find cuda extras at https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-# Example: pip install -U "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-# Poetry needs the source URL specified if the package isn't directly on PyPI with the extra
-# Add other dependencies here
-# Example:
+python = ">=3.13,<3.14" 
+jax = {extras = ["cuda12-pip"], version = "^0.6.1"}
+
 pandas = "^2.2"
 numpy = "^2.2"
 scipy = "^1.15"
-diffrax = "^0.7"
+diffrax = "^0.7.0"
 numpyro = "^0.18"
 blackjax = "^1.2.5"
 pymc = "^5.21"
@@ -42,6 +36,7 @@ nbformat = "^5.10"
 rpy2 = "^3.5"
 mlflow = "^2.22.0"
 lightgbm = "^4.6.0"
+equinox = "^0.12.2"
 
 
 
