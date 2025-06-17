@@ -97,7 +97,7 @@ me_mod_fo = CompartmentalModel(
     time_col="TIME_x",
     population_coeff=[
         PopulationCoeffcient(
-            "cl",
+            "ka",
             optimization_init_val = 0.7,
             subject_level_intercept=True,
             optimization_lower_bound=np.log(1e-6),
@@ -107,7 +107,7 @@ me_mod_fo = CompartmentalModel(
             subject_level_intercept_sd_lower_bound=1e-6,
         ),
         PopulationCoeffcient(
-            "ka",
+            "cl",
             optimization_init_val = 0.1,
             optimization_lower_bound=np.log(1e-4),
             optimization_upper_bound=np.log(1),
@@ -231,10 +231,22 @@ masked_y = mask_df.merge(tmp_y, how = 'left', on = ['id', 'time'])
 masked_y['y'] = masked_y['y'].fillna(0.0)
 padded_y = masked_y['y'].to_numpy().reshape(len(unique_groups), len(me_mod_fo.global_tp_eval))
 #%%
+pop_coeff_names = [i for idx, i in enumerate(init_params) if idx < n_pop_e ]
+start_idx = n_pop_e
+end_idx = start_idx + 1
+sigma_names = [i for idx, i in enumerate(init_params) if idx >= start_idx and idx < end_idx ]
+start_idx = end_idx
+end_idx = start_idx + n_subj_e
+omega_names =   [i for idx, i in enumerate(init_params) if idx >= start_idx and idx < end_idx ]
+start_idx = end_idx
+theta_names = [i for idx, i in enumerate(init_params) if idx >= start_idx ]
+
+#%%
 dfs = []
 td_df = pd.DataFrame(theta_data)
 theta_params = [i[0] for i in pd.DataFrame(td_df).columns]
 unique_pop_params = [i[0] for idx, i in enumerate(init_params) if idx < n_pop_e ]
+
 #test inserting in the middle and at the end in addtion to the front
 #unique_pop_params = unique_pop_params[:1]  + ['test'] + unique_pop_params[1:] 
 #unique_pop_params = unique_pop_params + ['test2']
@@ -270,14 +282,14 @@ for p_idx, p in enumerate(unique_pop_params):
     other_cols = [i for i in tmp_df.columns if i[0] != p]
     tmp_df[other_cols] = 0
     td_tensor.append(tmp_df.to_numpy())
-
+td_tensor_cols = tuple(tmp_df.columns)
 td_tensor = np.stack(td_tensor, axis = 2)            
-            
-        
+#%%
+
         
 
 
-#%%v
+#%%
 
 @partial(jax.jit, static_argnames = ("compiled_gen_ode_coeff", "compiled_ivp_solver_keys"))
 def ivp_predictor(pop_coeffs, thetas, theta_data, ode_t0_vals, compiled_gen_ode_coeff, compiled_ivp_solver_keys):
@@ -295,59 +307,82 @@ def ivp_predictor(pop_coeffs, thetas, theta_data, ode_t0_vals, compiled_gen_ode_
 
 
 #%%
-@jax.jit
-def loss_wrapper(p):
-    
-    f = FO_approx_ll_loss_jax(
-    p,
-    params_order=params_order, 
-    theta_data=theta_data,
-    padded_y=jnp.array(padded_y),
-    unpadded_y_len=jnp.array(unpadded_y_len),
-    y_groups_idx=jnp.array(groups_idx),
-    y_groups_unique=jnp.array(unique_groups), 
-    n_population_coeff=n_pop_e,
-    n_subject_level_effects=n_subj_e,
-    time_mask_y=jnp.array(time_mask_y),
-    time_mask_J=jnp.array(time_mask_J),
-    compiled_ivp_solver_keys = me_mod_fo.jax_ivp_keys_stiff_compiled_solver_,
-    ode_t0_vals=jnp.array(ode_t0_vals),
-    compiled_gen_ode_coeff=generate_pk_model_coeff_jax,
-    #compiled_ivp_predictor = ivp_predictor,
-    solve_for_omegas=False
-    )
-    
-    return f
-
-#%%
 loss_p = partial(FO_approx_ll_loss_jax, 
                  params_order=params_order, #a static_argname
-                theta_data=theta_data,
-                padded_y=jnp.array(padded_y),
-                unpadded_y_len=jnp.array(unpadded_y_len),
-                y_groups_idx=jnp.array(groups_idx),
-                y_groups_unique=jnp.array(unique_groups), 
-                n_population_coeff=n_pop_e, #a static_argname
-                n_subject_level_effects=n_subj_e, #a static_argname
-                time_mask_y=jnp.array(time_mask_y),
-                time_mask_J=jnp.array(time_mask_J),
-                compiled_ivp_solver_keys = me_mod_fo.jax_ivp_keys_stiff_compiled_solver_, #a static_argname
-                ode_t0_vals=jnp.array(ode_t0_vals),
-                compiled_gen_ode_coeff=generate_pk_model_coeff_jax, #a static_argname
-                #compiled_ivp_predictor = ivp_predictor,
-                solve_for_omegas=False #a static_argname
+                theta_data=theta_data, #pytree, not currently used
+                theta_data_tensor = td_tensor, #tensor representation of theta_data (n_subjects, n_dep_vars_across_all_ode_coeff, n_ode_coeff)
+                theta_data_tensor_names = td_tensor_cols, #names of the theta_data_tensor for debugging, static
+                padded_y=jnp.array(padded_y), #y padded with zeros such that all time:conc profiles have the same timepoints & length (n_subs, n_timepoints_global)
+                unpadded_y_len=jnp.array(unpadded_y_len), #true y vector (n_timepoints_across_all_subs)
+                y_groups_idx=jnp.array(groups_idx), #which elements in unpadded_y correspond to each subject 
+                y_groups_unique=jnp.array(unique_groups), #unique subjects in y
+                n_population_coeff=n_pop_e, #number of population effects,  a static_argname
+                pop_coeff_names = tuple(pop_coeff_names), #names of the population effects, static
+                n_subject_level_effects=n_subj_e, #number of subject level effects,  a static_argname
+                subject_level_effect_names = tuple(omega_names), #names of subject level effects
+                sigma_names = tuple(sigma_names), #names of model error 'effects'
+                n_thetas = len(theta_names), #number of 'fixed' effects across all ode parameters
+                theta_names = tuple(theta_names), #name of the 'fixed' effects
+                time_mask_y=jnp.array(time_mask_y), #boolean mask for setting elements of predicted y to zero if an element is padded in padded_y (n_subs, n_timeponts, global)
+                time_mask_J=jnp.array(time_mask_J), #boolean mask for settings elements of the jacobian to zero if an elements correspond to a padded element in padded_y
+                compiled_ivp_solver_keys = me_mod_fo.jax_ivp_keys_stiff_compiled_solver_, #diffrax ivp solver using pytrees to unpack, a static_argname
+                compiled_ivp_solver_arr = me_mod_fo.jax_ivp_closed_stiff_compiled_solver_, #diffrax ode solver using position based unpacking, static
+                ode_t0_vals=jnp.array(ode_t0_vals), #initial conditions for ivp solver, (n_subs, n_ode_outputs)
+                compiled_gen_ode_coeff=generate_pk_model_coeff_jax, #old version of ode coeff generation, before tensor ops introduced, a static_argname
+                solve_for_omegas=False #not currently used, a static_argname
                  
                  )
+#%%
+#this works
+#res_nojit = loss_p(init_params)
 
 #%%
-#calling the loss w/out value and grad works
-loss_f = jax.jit(loss_p)
+#fo_value_and_grad = jax.value_and_grad(loss_p, argnums = 0, has_aux = True)
+#error here
+#(loss, aux_data), grads = fo_value_and_grad(init_params,)
+#%%
+def loss_wrapper_for_grad(p_to_diff):
+    """
+    A wrapper that takes only the parameters to be differentiated
+    and calls the main loss function with all the other static arguments.
+    """
+    return FO_approx_ll_loss_jax(
+        params=p_to_diff,  # The argument we are differentiating
 
-res = loss_f(init_params)
+        # All other arguments are passed explicitly from the parent scope
+        params_order=params_order,
+        theta_data=theta_data,
+        theta_data_tensor=td_tensor,
+        theta_data_tensor_names=td_tensor_cols,
+        padded_y=jnp.array(padded_y),
+        unpadded_y_len=jnp.array(unpadded_y_len),
+        y_groups_idx=jnp.array(groups_idx),
+        y_groups_unique=jnp.array(unique_groups),
+        n_population_coeff=n_pop_e,
+        pop_coeff_names=tuple(pop_coeff_names),
+        n_subject_level_effects=n_subj_e,
+        subject_level_effect_names=tuple(omega_names),
+        sigma_names=tuple(sigma_names),
+        n_thetas=len(theta_names),
+        theta_names=tuple(theta_names),
+        time_mask_y=jnp.array(time_mask_y),
+        time_mask_J=jnp.array(time_mask_J),
+        compiled_ivp_solver_arr=me_mod_fo.jax_ivp_closed_stiff_compiled_solver_,
+        ode_t0_vals=jnp.array(ode_t0_vals),
+
+        # You may not need these legacy arguments if they aren't used
+        compiled_ivp_solver_keys=me_mod_fo.jax_ivp_keys_stiff_compiled_solver_,
+        compiled_gen_ode_coeff=generate_pk_model_coeff_jax,
+        solve_for_omegas=False
+    )
+
+#%%
+init_params = {i:jnp.array(init_params[i].item()) for i in init_params}
+res_nojit = loss_wrapper_for_grad(init_params)
 
 
 #%%
-fo_value_and_grad = jax.value_and_grad(loss_p, argnums = 0, has_aux = True)
+fo_value_and_grad = jax.value_and_grad(loss_wrapper_for_grad, argnums = 0, has_aux = True)
 #this fails
 (loss, aux_data), grads = fo_value_and_grad(init_params,)
                      

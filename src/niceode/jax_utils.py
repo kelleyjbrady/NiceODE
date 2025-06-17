@@ -6,7 +6,7 @@ from functools import partial
 
 
 def make_jittable_pk_coeff(expected_len_out):
-    @jax.jit
+    #@jax.jit
     def generate_pk_model_coeff_jax(pop_coeffs, thetas, theta_data):
 
 
@@ -71,15 +71,24 @@ def _predict_jax_jacobian(
     #model_coeffs_jit = {i: model_coeffs_jit[i[0]] for i in pop_coeffs_order}
     #model_coeffs_jit_a = jnp.vstack([model_coeffs_jit[i] for i in model_coeffs_jit]).T
     
+    # --- DEBUGGING ---
+    # Print the shapes and dtypes of the arguments going into the solver.
+    # The label is important for finding the output in the console.
+    jax.debug.print("--- Jacobian's diffeqsolve input ---")
+    jax.debug.print("y0 shape: {x}", x=ode_t0_vals.shape)
+    jax.debug.print("args (model_coeffs_i) shape: {x}", x=model_coeffs_i.shape)
+    # --- END DEBUGGING ---
+    
+    
     _full_preds, pred_y = compiled_ivp_solver_arr(
         ode_t0_vals,
         model_coeffs_i
     )
     return pred_y
 
-@partial(jax.jit, static_argnames=(
-    "pop_coeffs_order", "gen_coeff_jit", "compiled_ivp_solver_arr"
-))
+#@partial(jax.jit, static_argnames=(
+#    "pop_coeffs_order", "gen_coeff_jit", "compiled_ivp_solver_arr"
+#))
 def _estimate_jacobian_jax(
     jac_pop_coeffs, # The original dictionary of coefficients
     pop_coeffs,
@@ -211,7 +220,7 @@ def _calculate_per_subject_likelihood_terms(
 
     return log_det_Vi, quadratic_term
 
-@jax.jit
+#@jax.jit
 def neg2_ll_chol_jit(
     J_dense,           # Shape: (n_subjects, max_obs, n_effects)
     masked_residuals,  # Shape: (n_subjects, max_obs)
@@ -247,21 +256,21 @@ def neg2_ll_chol_jit(
     return neg2_ll
 
 
-@partial(jax.jit, static_argnames = ("params_order",
-                                     "n_population_coeff", 
-                                    "n_subject_level_effects",
-                                    "compiled_ivp_solver_keys",
-                                    "compiled_ivp_solver_arr",
-                                    "compiled_gen_ode_coeff",
-                                    #"compiled_ivp_predictor",
-                                    "solve_for_omegas", 
-                                    "pop_coeff_names",
-                                    "subject_level_effect_names",
-                                    "sigma_names",
-                                    "n_thetas",
-                                    "theta_names",
-                                    "theta_data_tensor_names"
-                                     ))
+#@partial(jax.jit, static_argnames = ("params_order",
+#                                     "n_population_coeff", 
+#                                    "n_subject_level_effects",
+#                                    "compiled_ivp_solver_keys",
+#                                    "compiled_ivp_solver_arr",
+#                                    "compiled_gen_ode_coeff",
+#                                    #"compiled_ivp_predictor",
+#                                    "solve_for_omegas", 
+#                                    "pop_coeff_names",
+#                                    "subject_level_effect_names",
+#                                    "sigma_names",
+#                                    "n_thetas",
+#                                    "theta_names",
+#                                    "theta_data_tensor_names"
+#                                     ))
 def FO_approx_ll_loss_jax(
     params,
     params_order,
@@ -290,62 +299,59 @@ def FO_approx_ll_loss_jax(
 ):
     # unpack some variables locally for clarity
     
-    theta_data = jax.lax.stop_gradient(theta_data)
-    theta_data_tensor = jax.lax.stop_gradient(theta_data_tensor)
-    padded_y = jax.lax.stop_gradient(padded_y)
-    unpadded_y_len = jax.lax.stop_gradient(unpadded_y_len)
-    y_groups_idx = jax.lax.stop_gradient(y_groups_idx)
-    y_groups_unique = jax.lax.stop_gradient(y_groups_unique)
-    time_mask_y = jax.lax.stop_gradient(time_mask_y)
-    time_mask_J = jax.lax.stop_gradient(time_mask_J)
-    ode_t0_vals = jax.lax.stop_gradient(ode_t0_vals)
+    #theta_data = jax.lax.stop_gradient(theta_data)
+    #theta_data_tensor = jax.lax.stop_gradient(theta_data_tensor)
+    #padded_y = jax.lax.stop_gradient(padded_y)
+    #unpadded_y_len = jax.lax.stop_gradient(unpadded_y_len)
+    #y_groups_idx = jax.lax.stop_gradient(y_groups_idx)
+    #y_groups_unique = jax.lax.stop_gradient(y_groups_unique)
+    #time_mask_y = jax.lax.stop_gradient(time_mask_y)
+    #time_mask_J = jax.lax.stop_gradient(time_mask_J)
+    #ode_t0_vals = jax.lax.stop_gradient(ode_t0_vals)
     
     
     params_order = list(params_order)
     params = {i:params[i] for i in params_order}
-    pop_coeffs = {i:params[i] 
-                      for idx, i in enumerate(params) 
-                      if idx < n_population_coeff}
-    pop_coeffs_order = tuple(params_order[:n_population_coeff])
-    pop_coeffs_work = jnp.array([pop_coeffs[i] for i in pop_coeffs]).flatten()
+    
+    pop_coeff_keys = tuple(params_order[:n_population_coeff])
+    pop_coeffs = {k:params[k] 
+                      for k in pop_coeff_keys}
+    pop_coeffs_order = pop_coeff_keys
+    pop_coeffs_work = jnp.array([pop_coeffs[k] for k in pop_coeff_keys]).flatten()
       
     start_idx = n_population_coeff
     end_idx = start_idx + 1
-    sigma = {i:params[i] 
-                    for idx, i in enumerate(params) 
-                    if idx >= start_idx and idx < end_idx}
-    sigma_order = params_order[start_idx:end_idx]
+    sigma_keys = tuple(params_order[start_idx:end_idx])
+    sigma = {k: params[k] for k in sigma_keys}
     
     start_idx = end_idx
     end_idx = start_idx + n_subject_level_effects
-    omegas = {i:params[i] 
-                    for idx, i in enumerate(params) 
-                    if idx >= start_idx and idx < end_idx}
-    omegas_order = params_order[start_idx:end_idx]
+    omegas_keys = tuple(params_order[start_idx:end_idx])
+    omegas = {k: params[k] for k in omegas_keys}
+    omegas_order = omegas_keys
     
     start_idx = end_idx
-    thetas_dict = {i:params[i] 
-                    for idx, i in enumerate(params) 
-                    if idx >= start_idx}
+    thetas_keys = tuple(params_order[start_idx:])
+    thetas_dict = {k: params[k] for k in thetas_keys}
     thetas = jnp.array([thetas_dict[i] for i in thetas_dict]).flatten()
-    thetas_order = params_order[start_idx:]
+    #thetas_order = thetas_keys
     
     thetas_work = jnp.zeros(len(theta_data_tensor_names))
     for p_idx, p in enumerate(theta_data_tensor_names):
-        if p in thetas_order:
-            thetas_work = thetas_work.at[p_idx].set(thetas_dict[p][0])
+        if p in thetas_keys:
+            thetas_work = thetas_work.at[p_idx].set(thetas_dict[p])
         
 
     # omegas are SD, we want Variance, thus **2 below
     # FO assumes that there is no cov btwn the random effects, thus off diags are zero
     #this is not actually FO's assumption, but a simplification,
-    omegas = jnp.array([omegas[i] for i in omegas]).flatten()
+    omegas_values = jnp.array([omegas[k] for k in omegas_keys]).flatten()
     omegas2 = jnp.diag(
-        omegas**2
-    )  
+        omegas_values**2
+    ) 
      
-    sigma = jnp.array([sigma[i] for i in sigma]).flatten()
-    sigma2 = sigma**2
+    sigma_values = jnp.array([sigma[k] for k in sigma_keys]).flatten()
+    sigma2 = sigma_values**2
     n_individuals = len(y_groups_unique)
 
     # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
@@ -353,6 +359,20 @@ def FO_approx_ll_loss_jax(
     #   pop_coeffs, thetas_dict, theta_data,
     #)
     data_contribution = thetas_work @ theta_data_tensor
+    
+    # ==================== DEBUGGING BLOCK ====================
+    # Insert this block right before the line that fails.
+    jax.debug.print("--- Inspecting shapes before addition ---")
+    jax.debug.print("pop_coeffs dictionary: {x}", x=pop_coeffs)
+    
+    # Let's inspect the list that creates pop_coeffs_work
+    pop_coeffs_vals_list = [pop_coeffs[i] for i in pop_coeffs]
+    jax.debug.print("List of values from pop_coeffs: {x}", x=pop_coeffs_vals_list)
+
+    jax.debug.print("Shape of pop_coeffs_work: {x}", x=pop_coeffs_work.shape)
+    jax.debug.print("Shape of data_contribution: {x}", x=data_contribution.shape)
+    # =========================================================
+    
     model_coeffs_i = jnp.exp(data_contribution + pop_coeffs_work) + 1e-6
     #model_coeffs_i_dict = {pop_coeffs_order[i][0]:model_coeffs_i[:,i] for i in range(model_coeffs_i.shape[1])}
     #model_coeffs_a = jnp.vstack([model_coeffs[i] for i in model_coeffs]).T
@@ -369,17 +389,17 @@ def FO_approx_ll_loss_jax(
     
     
     masked_residuals = jnp.where(time_mask_y, padded_y - padded_pred_y, 0.0)
-    data_contribution = jax.lax.stop_gradient(data_contribution)
+    #data_contribution = jax.lax.stop_gradient(data_contribution)
     pop_coeffs_j = {i:pop_coeffs[i] for i in pop_coeffs if i[0] in [i[0] for i in omegas_order]}
-    pop_coeffs_stopped = jax.tree_map(jax.lax.stop_gradient, pop_coeffs)
-    j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs_stopped, pop_coeffs_order=pop_coeffs_order,
+    #pop_coeffs_stopped = jax.tree_map(jax.lax.stop_gradient, pop_coeffs)
+    j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
                                thetas=thetas_dict, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
                                gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
                                data_contribution = data_contribution
                                )
-    j = jax.lax.stop_gradient(j)
+    #j = jax.lax.stop_gradient(j)
     # We create a dense J by stacking, then apply the mask to zero-out rows.
-    J_dense = jnp.concatenate([j[key] for key in pop_coeffs_j],axis = 2) #shape (n_subject, max_obs_per_subject, n_s)
+    J_dense = jnp.stack([j[key] for key in pop_coeffs_j],axis = 2) #shape (n_subject, max_obs_per_subject, n_s)
     
     J = jnp.where(time_mask_J, J_dense, 0.0) # time_mask_J shape  (n_subject, max_obs_per_subject, n_s)
     #J = 
