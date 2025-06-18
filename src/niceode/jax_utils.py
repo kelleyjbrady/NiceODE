@@ -41,60 +41,6 @@ def make_jittable_pk_coeff(expected_len_out):
     return generate_pk_model_coeff_jax
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4, 5, 6, 7, 8))
-def estimate_jacobian_fo(
-    jac_pop_coeffs,           # Arg 0
-    pop_coeffs,               # Arg 1
-    pop_coeffs_order,         # Arg 2
-    thetas,                   # Arg 3
-    theta_data,               # Arg 4
-    ode_t0_vals,              # Arg 5
-    gen_coeff_jit,            # Arg 6
-    compiled_ivp_solver_arr,  # Arg 7
-    data_contribution         # Arg 8
-):
-    """
-    This function has its VJP defined. JAX knows args 1-8 are static.
-    """
-    return _estimate_jacobian_jax(
-        jac_pop_coeffs, pop_coeffs, pop_coeffs_order, thetas, theta_data,
-        ode_t0_vals, gen_coeff_jit, compiled_ivp_solver_arr, data_contribution
-    )
-
-# 2. Define the forward pass for `nondiff_argnums`
-def estimate_jacobian_fo_fwd(nondiff_args, diff_args):
-    """
-    JAX automatically separates the arguments for us.
-    nondiff_args is a tuple of args (1-8).
-    diff_args is a tuple of args (0,).
-    """
-    # We must reconstruct the original argument order to call the function.
-    # The `diff_args` are always first.
-    jac_pop_coeffs, = diff_args
-    pop_coeffs, pop_coeffs_order, thetas, theta_data, ode_t0_vals, \
-    gen_coeff_jit, compiled_ivp_solver_arr, data_contribution = nondiff_args
-    
-    primal_out = _estimate_jacobian_jax(
-        jac_pop_coeffs, pop_coeffs, pop_coeffs_order, thetas, theta_data,
-        ode_t0_vals, gen_coeff_jit, compiled_ivp_solver_arr, data_contribution
-    )
-    # We don't need residuals, so we pass None.
-    # The fwd pass must also pass nondiff_args to the bwd pass.
-    return primal_out, (nondiff_args, None)
-
-# 3. Define the backward pass for `nondiff_argnums`
-def estimate_jacobian_fo_bwd(res, g):
-    """
-    The `res` now contains the nondiff_args and our residuals (which is None).
-    `g` is the incoming gradient for the output.
-    """
-    nondiff_args, residuals = res
-    # The bwd pass must return a tuple of gradients for the DYNAMIC inputs only.
-    # There is only one dynamic input (arg 0), so we return a tuple of length 1.
-    return (None,)
-
-
-
 def _predict_jax_jacobian(
     jac_pop_coeff_values, # Differentiable argument: A tuple of JAX arrays
     jac_pop_coeff_keys,   # Static argument: A tuple of string keys
@@ -118,7 +64,8 @@ def _predict_jax_jacobian(
 
     # The rest of the function proceeds as before.
     combined_pop_coeffs = {**pop_coeffs, **jac_pop_coeffs}
-    pop_coeffs_work = jnp.array([combined_pop_coeffs[i] for i in pop_coeffs_order]).flatten()
+    arrays_to_stack = tuple(combined_pop_coeffs[k] for k in pop_coeffs_order)
+    pop_coeffs_work = jnp.stack(arrays_to_stack).flatten()
     #model_coeffs_jit = gen_coeff_jit(
     #    pop_coeffs, thetas, theta_data,
     #)
@@ -143,9 +90,9 @@ def _predict_jax_jacobian(
 
 #@partial(jax.jit, static_argnames=(
 #    "pop_coeffs_order", "gen_coeff_jit", "compiled_ivp_solver_arr"
-#))
+#)) #this decorator was from the old function, possibly not relevant to the new one
 def _estimate_jacobian_jax(
-    jac_pop_coeffs, # The original dictionary of coefficients
+    jac_pop_coeffs, # The dictionary of coefficients to differentiate
     pop_coeffs,
     pop_coeffs_order,
     thetas,
@@ -156,44 +103,60 @@ def _estimate_jacobian_jax(
     data_contribution,
 ):
     """
-    Estimates the Jacobian by differentiating with respect to array values,
-    not the dictionary structure, to ensure compatibility with second-order gradients.
+    Estimates the Jacobian using a properly defined custom_vjp to enforce
+    the FO method's gradient behavior.
     """
-    # Deconstruct the dictionary into differentiable values (JAX arrays) and
-    # static keys (strings). This is the key step for stable differentiation.
     jac_keys = tuple(jac_pop_coeffs.keys())
     jac_values = tuple(jac_pop_coeffs.values())
 
-    # Create a partial function where only the values will be the dynamic,
-    # differentiable argument. All other arguments, including the keys, are
-    # treated as static for the purpose of this differentiation.
-    predict_fn_partial = partial(
-        _predict_jax_jacobian,
-        jac_pop_coeff_keys=jac_keys, # Pass keys as a static argument
-        pop_coeffs=pop_coeffs,
-        pop_coeffs_order=pop_coeffs_order,
-        thetas=thetas,
-        theta_data=theta_data,
-        ode_t0_vals=ode_t0_vals,
-        gen_coeff_jit=gen_coeff_jit,
-        compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
-        data_contribution = data_contribution,
-    )
-    
-    # Calculate the jacobian of the partial function with respect to its first
-    # argument, which is now `jac_pop_coeff_values` (a tuple of arrays).
-    jac_fn = jax.jacobian(predict_fn_partial, argnums=0)
+    # Create a closure with all non-differentiated arguments using partial.
+    # This safely separates static configuration from the dynamic values.
+    def predict_for_jacobian(jac_pop_coeff_values_tuple):
+        # We explicitly call the original prediction function, passing all
+        # the closed-over variables from the parent scope.
+        return _predict_jax_jacobian(
+            jac_pop_coeff_values=jac_pop_coeff_values_tuple,
+            jac_pop_coeff_keys=jac_keys,
+            pop_coeffs=pop_coeffs,
+            pop_coeffs_order=pop_coeffs_order,
+            thetas=thetas,
+            theta_data=theta_data,
+            ode_t0_vals=ode_t0_vals,
+            gen_coeff_jit=gen_coeff_jit,
+            compiled_ivp_solver_arr=compiled_ivp_solver_arr,
+            data_contribution=data_contribution,
+        )
 
-    # Execute the jacobian function on the differentiable values.
-    jacobian_as_pytree = jac_fn(jac_values)
-    
-    # The output `jacobian_as_pytree` has the same pytree structure as the input
-    # `jac_values` (a tuple). We can now safely reconstruct the dictionary.
+    # Apply the custom VJP to a local function that only takes the values
+    # we want to differentiate. This is the most robust pattern.
+    @jax.custom_vjp
+    def jacobian_with_fo_grad(values_to_diff):
+        jac_fn = jax.jacobian(predict_for_jacobian, argnums=0)
+        return jac_fn(values_to_diff)
+
+    # Define the forward and backward passes for the VJP
+    def jacobian_fwd(values_to_diff):
+        # The .fun attribute unwraps the function from the VJP decorator
+        # to avoid infinite recursion.
+        return jacobian_with_fo_grad.fun(values_to_diff), None
+
+    def jacobian_bwd(residuals, g):
+        # The primal function took one argument (a tuple of values).
+        # We must return a tuple containing one element: the gradient for that argument.
+        # jax.tree_map is a robust way to create a matching pytree of Nones (zeros).
+        zero_grads = jax.tree_map(lambda x: None, jac_values)
+        return (zero_grads,)
+
+    # Register the forward/backward rules with our local function
+    jacobian_with_fo_grad.defvjp(jacobian_fwd, jacobian_bwd)
+
+    # Execute our VJP-wrapped jacobian calculation
+    jacobian_as_pytree = jacobian_with_fo_grad(jac_values)
+
+    # Reconstruct the final dictionary
     jacobian_dict = dict(zip(jac_keys, jacobian_as_pytree))
-
     return jacobian_dict
 
-estimate_jacobian_fo.defvjp(estimate_jacobian_fo_fwd, estimate_jacobian_fo_bwd)
 
 def neg2_ll_chol(J, y_groups_idx,
                  y_groups_unique,
@@ -448,7 +411,7 @@ def FO_approx_ll_loss_jax(
     #data_contribution = jax.lax.stop_gradient(data_contribution)
     pop_coeffs_j = {i:pop_coeffs[i] for i in pop_coeffs if i[0] in [i[0] for i in omegas_order]}
     #pop_coeffs_stopped = jax.tree_map(jax.lax.stop_gradient, pop_coeffs)
-    j = estimate_jacobian_fo(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
+    j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
                                thetas=thetas_dict, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
                                gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
                                data_contribution = data_contribution
