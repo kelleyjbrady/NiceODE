@@ -37,6 +37,7 @@ from niceode.nca import prepare_section_aucs, calculate_auc_from_sections
 import jax.numpy as jnp
 from niceode.jax_utils import make_jittable_pk_coeff
 from functools import partial
+from copy import deepcopy
 # Your JAX code will now reliably use the CPU
 print(f"JAX default backend: {jax.default_backend()}")
 # %%
@@ -207,7 +208,7 @@ time_mask_J = jnp.array(np.concatenate(time_mask_J, axis = 2))
 ode_t0_vals = jnp.array(me_mod_fo.ode_t0_vals.to_numpy())
 me_mod_fo._compile_jax_ivp_solvers()
 generate_pk_model_coeff_jax = make_jittable_pk_coeff(len(unique_groups))
-params_order = (i for i in init_params)
+params_order = tuple([i for i in init_params]) #this is the issue for sure!
 
 #%%
 mask_df = []
@@ -341,6 +342,34 @@ loss_p = partial(FO_approx_ll_loss_jax,
 #error here
 #(loss, aux_data), grads = fo_value_and_grad(init_params,)
 #%%
+loss_kwargs = {
+    "params_order":params_order,
+    "theta_data":theta_data,
+    "theta_data_tensor":td_tensor,
+    "theta_data_tensor_names":td_tensor_cols,
+    "padded_y":jnp.array(padded_y),
+    "unpadded_y_len":jnp.array(unpadded_y_len),
+    "y_groups_idx":jnp.array(groups_idx),
+    "y_groups_unique":jnp.array(unique_groups),
+    "n_population_coeff":n_pop_e,
+    "pop_coeff_names":tuple(pop_coeff_names),
+    "n_subject_level_effects":n_subj_e,
+    "subject_level_effect_names":tuple(omega_names),
+    "sigma_names":tuple(sigma_names),
+    "n_thetas":len(theta_names),
+    "theta_names":tuple(theta_names),
+    "time_mask_y":jnp.array(time_mask_y),
+    "time_mask_J":jnp.array(time_mask_J),
+    "compiled_ivp_solver_arr":me_mod_fo.jax_ivp_closed_stiff_compiled_solver_,
+    "ode_t0_vals":jnp.array(ode_t0_vals),
+
+    # You may not need these legacy arguments if they aren't used
+    "compiled_ivp_solver_keys":me_mod_fo.jax_ivp_keys_stiff_compiled_solver_,
+    "compiled_gen_ode_coeff":generate_pk_model_coeff_jax,
+    "solve_for_omegas":False
+}
+
+kwargs_cp = deepcopy(loss_kwargs)
 def loss_wrapper_for_grad(p_to_diff):
     """
     A wrapper that takes only the parameters to be differentiated
@@ -350,45 +379,37 @@ def loss_wrapper_for_grad(p_to_diff):
         params=p_to_diff,  # The argument we are differentiating
 
         # All other arguments are passed explicitly from the parent scope
-        params_order=params_order,
-        theta_data=theta_data,
-        theta_data_tensor=td_tensor,
-        theta_data_tensor_names=td_tensor_cols,
-        padded_y=jnp.array(padded_y),
-        unpadded_y_len=jnp.array(unpadded_y_len),
-        y_groups_idx=jnp.array(groups_idx),
-        y_groups_unique=jnp.array(unique_groups),
-        n_population_coeff=n_pop_e,
-        pop_coeff_names=tuple(pop_coeff_names),
-        n_subject_level_effects=n_subj_e,
-        subject_level_effect_names=tuple(omega_names),
-        sigma_names=tuple(sigma_names),
-        n_thetas=len(theta_names),
-        theta_names=tuple(theta_names),
-        time_mask_y=jnp.array(time_mask_y),
-        time_mask_J=jnp.array(time_mask_J),
-        compiled_ivp_solver_arr=me_mod_fo.jax_ivp_closed_stiff_compiled_solver_,
-        ode_t0_vals=jnp.array(ode_t0_vals),
-
-        # You may not need these legacy arguments if they aren't used
-        compiled_ivp_solver_keys=me_mod_fo.jax_ivp_keys_stiff_compiled_solver_,
-        compiled_gen_ode_coeff=generate_pk_model_coeff_jax,
-        solve_for_omegas=False
+        **loss_kwargs
     )
-
-#%%
 init_params = {i:jnp.array(init_params[i].item()) for i in init_params}
+init_params_cp = deepcopy(init_params)
+#%%
 res_nojit = loss_wrapper_for_grad(init_params)
+#%%
+res_nojit2 = loss_wrapper_for_grad(init_params)
+#%%
+continue_exec = True
+if continue_exec:
+    # 1. Generate the jaxpr for the FORWARD pass
+    print("--- Generating Jaxpr for Forward Pass ---")
+    try:
+        fwd_jaxpr = jax.make_jaxpr(loss_wrapper_for_grad)(init_params)
+        print(fwd_jaxpr)
+    except Exception as e:
+        print(f"Failed to create forward pass jaxpr: {e}")
+    #%%
+    init_params = {i:jnp.array(init_params[i].item()) for i in init_params}
+    res_nojit = loss_wrapper_for_grad(init_params)
 
 
-#%%
-fo_value_and_grad = jax.value_and_grad(loss_wrapper_for_grad, argnums = 0, has_aux = True)
-#this fails
-(loss, aux_data), grads = fo_value_and_grad(init_params,)
-                     
-#%%
-neg2_ll, b_i_approx, padded_preds = res
-padded_pred_y, padded_full_preds = padded_preds
+    #%%
+    fo_value_and_grad = jax.value_and_grad(loss_wrapper_for_grad, argnums = 0, has_aux = True)
+    #this fails
+    (loss, aux_data), grads = fo_value_and_grad(init_params,)
+                        
+    #%%
+    neg2_ll, b_i_approx, padded_preds = res
+    padded_pred_y, padded_full_preds = padded_preds
 
 
 # %%
