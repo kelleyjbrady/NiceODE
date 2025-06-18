@@ -41,50 +41,57 @@ def make_jittable_pk_coeff(expected_len_out):
     return generate_pk_model_coeff_jax
 
 
-@jax.custom_vjp
-def estimate_jacobian_fo(jac_pop_coeffs, pop_coeffs, pop_coeffs_order, thetas, 
-                         theta_data, ode_t0_vals, gen_coeff_jit, 
-                         compiled_ivp_solver_arr, data_contribution):
+@partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4, 5, 6, 7, 8))
+def estimate_jacobian_fo(
+    jac_pop_coeffs,           # Arg 0
+    pop_coeffs,               # Arg 1
+    pop_coeffs_order,         # Arg 2
+    thetas,                   # Arg 3
+    theta_data,               # Arg 4
+    ode_t0_vals,              # Arg 5
+    gen_coeff_jit,            # Arg 6
+    compiled_ivp_solver_arr,  # Arg 7
+    data_contribution         # Arg 8
+):
     """
-    This is the function we will decorate. It simply calls your original
-    Jacobian estimator. Its signature must match the original.
+    This function has its VJP defined. JAX knows args 1-8 are static.
     """
     return _estimate_jacobian_jax(
-        jac_pop_coeffs=jac_pop_coeffs,
-        pop_coeffs=pop_coeffs,
-        pop_coeffs_order=pop_coeffs_order,
-        thetas=thetas,
-        theta_data=theta_data,
-        ode_t0_vals=ode_t0_vals,
-        gen_coeff_jit=gen_coeff_jit,
-        compiled_ivp_solver_arr=compiled_ivp_solver_arr,
-        data_contribution=data_contribution
-    )
-
-def estimate_jacobian_fo_fwd(jac_pop_coeffs, pop_coeffs, pop_coeffs_order, thetas, 
-                             theta_data, ode_t0_vals, gen_coeff_jit, 
-                             compiled_ivp_solver_arr, data_contribution):
-    """The forward pass for the VJP."""
-    # It calls the function and returns the result, plus residuals for the bwd pass.
-    # We don't need residuals, so we pass None.
-    primal_out = estimate_jacobian_fo(
-        jac_pop_coeffs, pop_coeffs, pop_coeffs_order, thetas, theta_data, 
+        jac_pop_coeffs, pop_coeffs, pop_coeffs_order, thetas, theta_data,
         ode_t0_vals, gen_coeff_jit, compiled_ivp_solver_arr, data_contribution
     )
-    return primal_out, None
 
-def estimate_jacobian_fo_bwd(residuals, g):
+# 2. Define the forward pass for `nondiff_argnums`
+def estimate_jacobian_fo_fwd(nondiff_args, diff_args):
     """
-    The backward pass for the VJP. This is where we enforce the FO method.
+    JAX automatically separates the arguments for us.
+    nondiff_args is a tuple of args (1-8).
+    diff_args is a tuple of args (0,).
     """
-    # We need to return a tuple of gradients that has the same structure
-    # as the arguments to the primal function.
-    # The FO method dictates that the gradients with respect to all inputs
-    # of the jacobian calculator are zero.
-    # The primal had 9 arguments, so we return a tuple of 9 "None" values.
-    # None is JAX's way of representing a zero gradient that doesn't need
-    # to be carried around as an explicit zero-filled array.
-    return (None, None, None, None, None, None, None, None, None)
+    # We must reconstruct the original argument order to call the function.
+    # The `diff_args` are always first.
+    jac_pop_coeffs, = diff_args
+    pop_coeffs, pop_coeffs_order, thetas, theta_data, ode_t0_vals, \
+    gen_coeff_jit, compiled_ivp_solver_arr, data_contribution = nondiff_args
+    
+    primal_out = _estimate_jacobian_jax(
+        jac_pop_coeffs, pop_coeffs, pop_coeffs_order, thetas, theta_data,
+        ode_t0_vals, gen_coeff_jit, compiled_ivp_solver_arr, data_contribution
+    )
+    # We don't need residuals, so we pass None.
+    # The fwd pass must also pass nondiff_args to the bwd pass.
+    return primal_out, (nondiff_args, None)
+
+# 3. Define the backward pass for `nondiff_argnums`
+def estimate_jacobian_fo_bwd(res, g):
+    """
+    The `res` now contains the nondiff_args and our residuals (which is None).
+    `g` is the incoming gradient for the output.
+    """
+    nondiff_args, residuals = res
+    # The bwd pass must return a tuple of gradients for the DYNAMIC inputs only.
+    # There is only one dynamic input (arg 0), so we return a tuple of length 1.
+    return (None,)
 
 
 
@@ -110,8 +117,8 @@ def _predict_jax_jacobian(
     jac_pop_coeffs = dict(zip(jac_pop_coeff_keys, jac_pop_coeff_values))
 
     # The rest of the function proceeds as before.
-    pop_coeffs.update(jac_pop_coeffs)
-    pop_coeffs_work = jnp.array([pop_coeffs[i] for i in pop_coeffs_order]).flatten()
+    combined_pop_coeffs = {**pop_coeffs, **jac_pop_coeffs}
+    pop_coeffs_work = jnp.array([combined_pop_coeffs[i] for i in pop_coeffs_order]).flatten()
     #model_coeffs_jit = gen_coeff_jit(
     #    pop_coeffs, thetas, theta_data,
     #)
@@ -359,29 +366,29 @@ def FO_approx_ll_loss_jax(
     #ode_t0_vals = jax.lax.stop_gradient(ode_t0_vals)
     
     
-    params_order = list(params_order)
-    params = {i:params[i] for i in params_order}
+    params_order_work = list(params_order)
+    params_work = {i:params[i] for i in params_order_work}
     
-    pop_coeff_keys = tuple(params_order[:n_population_coeff])
-    pop_coeffs = {k:params[k] 
+    pop_coeff_keys = tuple(params_order_work[:n_population_coeff])
+    pop_coeffs = {k:params_work[k] 
                       for k in pop_coeff_keys}
     pop_coeffs_order = pop_coeff_keys
     pop_coeffs_work = jnp.array([pop_coeffs[k] for k in pop_coeff_keys]).flatten()
       
     start_idx = n_population_coeff
     end_idx = start_idx + 1
-    sigma_keys = tuple(params_order[start_idx:end_idx])
-    sigma = {k: params[k] for k in sigma_keys}
+    sigma_keys = tuple(params_order_work[start_idx:end_idx])
+    sigma = {k: params_work[k] for k in sigma_keys}
     
     start_idx = end_idx
     end_idx = start_idx + n_subject_level_effects
-    omegas_keys = tuple(params_order[start_idx:end_idx])
-    omegas = {k: params[k] for k in omegas_keys}
+    omegas_keys = tuple(params_order_work[start_idx:end_idx])
+    omegas = {k: params_work[k] for k in omegas_keys}
     omegas_order = omegas_keys
     
     start_idx = end_idx
-    thetas_keys = tuple(params_order[start_idx:])
-    thetas_dict = {k: params[k] for k in thetas_keys}
+    thetas_keys = tuple(params_order_work[start_idx:])
+    thetas_dict = {k: params_work[k] for k in thetas_keys}
     thetas = jnp.array([thetas_dict[i] for i in thetas_dict]).flatten()
     #thetas_order = thetas_keys
     
