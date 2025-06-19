@@ -53,6 +53,16 @@ from .model_assesment import construct_profile_ci
 import re
 
 
+from jax import lax
+
+
+# Assuming these are imported from diffrax
+from diffrax import (
+   
+    RESULTS,
+    AbstractStepSizeController # For type hinting
+)
+
 def debug_print(print_obj, debug=False):
     if debug:
         if isinstance(print_obj, str):
@@ -982,8 +992,7 @@ def FOCE_approx_ll_loss(
     model_coeffs = model_obj._generate_pk_model_coeff_vectorized(
         combined_coeffs, thetas, theta_data
     )
-    # would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`)
-    # prepopulated with partial
+
     preds, full_preds = model_obj._solve_ivp(
         model_coeffs,
         parallel=False,
@@ -1386,6 +1395,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.jax_ivp_stiff_compiled_solver_ = None
         self.jax_ivp_pymcstiff_solver_is_compiled = False
         self.jax_ivp_pymcstiff_compiled_solver_ = None
+        self.jax_ivp_pymcnonstiff_compiled_solver_ = None
+        self.jax_ivp_pymcnonstiff_solver_is_compiled = False
         self.jax_ivp_keys_stiff_solver_is_compiled = False
         self.jax_ivp_keys_stiff_compiled_solver_ = None
         self.loss_summary_name = loss_summary_name
@@ -2154,6 +2165,91 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return solution.ys, concentrations
     
     @staticmethod
+    def _solve_ivp_jax_worker_pymc(
+        y0, 
+        args,
+        tspan=None,
+        teval=None,
+        dt0=None,
+        ode_func=None,
+        mass_to_depvar=None,
+        diffrax_solver=None,
+        diffrax_step_ctrl: AbstractStepSizeController = None,
+        diffrax_max_steps=None
+    ):
+        """
+        A JAX-based IVP solver worker that fails gracefully for PyMC.
+
+        If the diffeqsolve operation fails (e.g., by hitting max_steps), this
+        function does not raise an error. Instead, it returns arrays of the
+        correct shape filled with NaNs.
+
+        When PyMC receives a NaN in the `mu` of a likelihood distribution,
+        it assigns a log-probability of -inf, correctly rejecting the
+        problematic sample without crashing the chain.
+
+        This function is designed to be JIT-compiled with JAX.
+        """
+        # First, run the solver unconditionally. We will check its result later.
+        ode_term = ODETerm(ode_func)
+        adjoint = BacksolveAdjoint(
+            solver=diffrax_solver,
+            stepsize_controller=diffrax_step_ctrl,
+        )
+        
+        solution = diffeqsolve(
+            terms=ode_term,
+            solver=diffrax_solver,
+            t0=tspan[0],
+            t1=tspan[1],
+            dt0=dt0,
+            y0=y0,
+            args=args,
+            max_steps=diffrax_max_steps,
+            saveat=SaveAt(ts=teval),
+            stepsize_controller=diffrax_step_ctrl,
+            adjoint=adjoint,
+        )
+
+        # --- Graceful Failure Logic using jax.lax.cond ---
+
+        def handle_success(operand):
+            """Processes a successful solution."""
+            sol, op_args = operand
+            central_mass_trajectory = sol.ys[:, 0]
+            concentrations = mass_to_depvar(
+                central_mass_trajectory,
+                op_args
+            )
+            return sol.ys, concentrations
+
+        def handle_failure(operand):
+            """Returns NaN arrays with the correct shape on failure."""
+            sol, op_args = operand
+            # Create NaN arrays with the same shape as the expected output
+            nan_ys = jnp.full_like(sol.ys, jnp.nan)
+            
+            # For concentrations, we need to compute a dummy version to get its shape,
+            # then fill it with NaNs.
+            dummy_concs = mass_to_depvar(sol.ys[:, 0], op_args)
+            nan_concs = jnp.full_like(dummy_concs, jnp.nan)
+            
+            return nan_ys, nan_concs
+
+        # The predicate checks if the solver result was NOT successful.
+        # This handles MaxStepsReached and any other solver failure.
+        predicate = solution.result != RESULTS.successful
+
+        # Conditionally execute the appropriate handler.
+        # This is the JIT-compatible equivalent of an if/else block.
+        return lax.cond(
+            predicate,
+            handle_failure,
+            handle_success,
+            operand=(solution, args)
+        )
+    
+    @staticmethod
     def _gen_ode_coeff_solve_ivp_jax(y0, args,
                        tspan=None,
                        teval=None,
@@ -2352,7 +2448,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             self.jax_ivp_keys_stiff_solver_is_compiled = True
             print('Sucessfully complied KEYS stiff ODE solver')
         
-        if not (self.jax_ivp_pymcstiff_solver_is_compiled):
+        if not (self.jax_ivp_pymcnonstiff_solver_is_compiled):
             diffrax_solver = Tsit5()
             #Initial thoughts:
             #when the data is quite noisy to begin with
@@ -2368,6 +2464,32 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             
             partial_solve_ivp = partial(
                 self._solve_ivp_jax_worker,
+                ode_func = self.pk_model_class.diffrax_ode,
+                mass_to_depvar = self.pk_model_class.diffrax_mass_to_depvar,
+                tspan=tspan_jax,
+                teval=teval_jax,
+                diffrax_solver=diffrax_solver,
+                diffrax_step_ctrl = diffrax_step_ctrl,
+                dt0 = dt0, 
+                diffrax_max_steps = maxsteps
+                
+            )
+            
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+            jit_vmapped_solve = jax.jit(vmapped_solve)
+            self.jax_ivp_pymcnonstiff_jittable_ = vmapped_solve
+            self.jax_ivp_pymcnonstiff_compiled_solver_ = jit_vmapped_solve
+            self.jax_ivp_pymcnonstiff_solver_is_compiled = True
+            print('Sucessfully complied non-stiff PyMC ODE solver')
+            
+        if not (self.jax_ivp_pymcstiff_solver_is_compiled):
+            diffrax_solver = Kvaerno5()
+            
+            diffrax_step_ctrl = PIDController(rtol=1e-6, atol=1e-8)
+            dt0 = 0.1
+            
+            partial_solve_ivp = partial(
+                self._solve_ivp_jax_worker_pymc,
                 ode_func = self.pk_model_class.diffrax_ode,
                 mass_to_depvar = self.pk_model_class.diffrax_mass_to_depvar,
                 tspan=tspan_jax,
@@ -2401,98 +2523,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         model_coeffs, ode_t0_vals = model_coeffs.to_numpy(), ode_t0_vals.to_numpy()
         maxsteps = 1000000
         
-        #compile both types of solvers regardless of if we need them
-        #consider moving this to __init__
-        if not (self.jax_ivp_nonstiff_solver_is_compiled):
-                diffrax_solver = Tsit5()
-                #Initial thoughts:
-                #when the data is quite noisy to begin with
-                #(eg. biomarker or drug level determinations)
-                #I bet rtol and atol can be much higher
-                #Later conclusion/hypothesis:
-                #Upon researching further, this is not where
-                #we should comprimise on precision, rather to speed
-                #things up the tol of the outer optimizer should be 
-                #increased as was done for the profiling optimizer. 
-                diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
-                dt0 = 0.1
-                
-                partial_solve_ivp = partial(
-                    self._solve_ivp_jax_worker,
-                    ode_class=self.pk_model_class,
-                    tspan=self.global_tspan_init,
-                    teval=self.global_tp_eval if timepoints is None else timepoints,
-                    diffrax_solver=diffrax_solver,
-                    diffrax_step_ctrl = diffrax_step_ctrl,
-                    dt0 = dt0, 
-                    diffrax_max_steps = maxsteps
-                    
-                )
-                
-                vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
-                jit_vmapped_solve = jax.jit(vmapped_solve)
-                self.jax_ivp_nonstiff_jittable_ = vmapped_solve
-                self.jax_ivp_nonstiff_compiled_solver_ = jit_vmapped_solve
-                self.jax_ivp_nonstiff_solver_is_compiled = True
-                print('Sucessfully complied non-stiff ODE solver')
-        
-        if not (self.jax_ivp_stiff_solver_is_compiled):
-                diffrax_solver = Kvaerno5()
-                
-                diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
-                dt0 = 0.1
-                
-                partial_solve_ivp = partial(
-                    self._solve_ivp_jax_worker,
-                    ode_class=self.pk_model_class,
-                    tspan=self.global_tspan_init,
-                    teval=self.global_tp_eval if timepoints is None else timepoints,
-                    diffrax_solver=diffrax_solver,
-                    diffrax_step_ctrl = diffrax_step_ctrl,
-                    dt0 = dt0, 
-                    diffrax_max_steps = maxsteps
-                    
-                )
-                
-                vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
-                jit_vmapped_solve = jax.jit(vmapped_solve)
-                self.jax_ivp_stiff_jittable_ = vmapped_solve
-                self.jax_ivp_stiff_compiled_solver_ = jit_vmapped_solve
-                self.jax_ivp_stiff_solver_is_compiled = True
-                print('Sucessfully complied stiff ODE solver')
-        
-        if not (self.jax_ivp_pymcstiff_solver_is_compiled):
-                diffrax_solver = Tsit5()
-                #Initial thoughts:
-                #when the data is quite noisy to begin with
-                #(eg. biomarker or drug level determinations)
-                #I bet rtol and atol can be much higher
-                #Later conclusion/hypothesis:
-                #Upon researching further, this is not where
-                #we should compromise on precision, rather to speed
-                #things up the tol of the outer optimizer should be 
-                #increased as was done for the profiling optimizer. 
-                diffrax_step_ctrl = diffrax.ConstantStepSize()
-                dt0 = 0.1
-                
-                partial_solve_ivp = partial(
-                    self._solve_ivp_jax_worker,
-                    ode_class=self.pk_model_class,
-                    tspan=self.global_tspan_init,
-                    teval=self.global_tp_eval if timepoints is None else timepoints,
-                    diffrax_solver=diffrax_solver,
-                    diffrax_step_ctrl = diffrax_step_ctrl,
-                    dt0 = dt0, 
-                    diffrax_max_steps = maxsteps
-                    
-                )
-                
-                vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
-                jit_vmapped_solve = jax.jit(vmapped_solve)
-                self.jax_ivp_pymcstiff_jittable_ = vmapped_solve
-                self.jax_ivp_pymcstiff_compiled_solver_ = jit_vmapped_solve
-                self.jax_ivp_pymcstiff_solver_is_compiled = True
-                print('Sucessfully complied stiff PyMC ODE solver')
+        self._compile_jax_ivp_solvers()
         
         #get the relevant solver
         if self.stiff_ode:
@@ -3042,8 +3073,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         fit_result_summary['lower_bound'] = [i[0] for i in self.bounds]
         fit_result_summary['upper_bound'] = [i[1] for i in self.bounds]
         self.preds_opt_ = []
-        debugging = True
-        if debugging:
+        debugging_jax = False
+        if debugging_jax:
             return init_params_jax, theta_data_jax
         objective_function = partial(
             self._objective_function2,
