@@ -28,7 +28,7 @@ def debug_print(print_obj, *args ):
 
 def make_pymc_model(model_obj, pm_subj_df, pm_df,
                     model_params, model_param_dep_vars,
-                    model_error = None,
+                    model_error = None, link_function = 'softplus'
                     ): 
     
     pm_df['tmp'] = 1
@@ -84,7 +84,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
             if coeff_name not in seen_coeff:
                 thetas[coeff_name] = {}
                 subject_data[coeff_name] = {}
-            thetas[coeff_name].update({theta_name:pm.Normal(f"theta_{coeff_name}_{theta_name}", mu = 0, sigma = 10)})
+            thetas[coeff_name].update({theta_name:pm.Normal(f"theta_{coeff_name}_{theta_name}", mu = 0, sigma = 3)})
             subject_data[coeff_name].update(
                 {theta_name:pm.Data(f"data_{coeff_name}_{theta_name}", pm_subj_df[theta_name].values,
                                         dims = 'subject'
@@ -144,17 +144,23 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 ##debug_print(f"Shape of pm_subj_df[{theta_name}][{sub_idx}]: {pm_subj_df[theta_name][sub_idx].shape}")
                 model_coeff = (model_coeff + (thetas[coeff_name][theta_name] * subject_data[coeff_name][theta_name]))
             #If there are subject effects, the params will have dims = 'subject'
+            if link_function == 'softplus':
+                coeffs = pm.math.log1pexp(model_coeff)
+            if link_function == 'exp':
+                coeffs = pm.math.exp(model_coeff)
+            #coeffs = pm.math.exp(model_coeff)
             if coeff_has_subject_intercept:
+                
                 pm_model_params.append(
                     pm.Deterministic(f"{coeff_name}_i",
-                                    pm.math.exp(model_coeff),
+                                    coeffs,
                                     dims = 'subject' )
                 )
             #if not, we need to repeat the params n_subject's time
             else:
                 pm_model_params.append(
                     pm.Deterministic(f"{coeff_name}_i",
-                                    pt.repeat(pm.math.exp(model_coeff), len(coords['subject']) ),
+                                    pt.repeat(coeffs, len(coords['subject']) ),
                                     dims = 'subject'
                                      )
                 )
@@ -212,7 +218,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         else:
             model_coeffs = theta_matrix
             
-            masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcstiff_jittable_)(
+            masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcnonstiff_jittable_)(
                 subject_init_y0,
                 model_coeffs
                 )
