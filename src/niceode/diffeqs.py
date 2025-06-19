@@ -542,7 +542,8 @@ class OneCompartmentAbsorption(PKBaseODE):
     @staticmethod
     def nondim_to_concentration(
         kappa_trajectory, # The dimensionless central mass trajectory
-        dimensional_params # A tuple of the original (ka, cl, vd)
+        dimensional_params, # A tuple of the original (ka, cl, vd)
+        dose_i #vector of doses for each subject
         ):
         """
         Converts the dimensionless central mass (κ) trajectory back to
@@ -554,15 +555,32 @@ class OneCompartmentAbsorption(PKBaseODE):
         
         # We need the initial dose D to get back to dimensional mass
         # Assuming D=1 here, but in a real model you'd pass D in.
-        Dose = 1.0 
+        #Dose = 1.0 
         
         # Convert dimensionless mass κ back to dimensional mass C
-        dimensional_mass_C = kappa_trajectory * Dose
+        dimensional_mass_C = kappa_trajectory * dose_i
         
         # Convert dimensional mass C to concentration
         concentration = dimensional_mass_C / vd
         
         return concentration
+    
+    @staticmethod
+    def get_nondim_defs(dimensional_params: dict):
+        """
+        Takes dimensional PyMC params and nondimensional initial conditions,
+        and returns the recipe for the nondimensional model.
+        """
+        ka = dimensional_params['ka']
+        cl = dimensional_params['cl']
+        vd = dimensional_params['vd']
+
+        nondim_param_formulas = {
+            'beta': cl / (vd * ka)
+        }
+        
+        # The function now returns the y0_nondim that was passed into it.
+        return nondim_param_formulas
     
     @staticmethod
     def diffrax_mass_to_depvar(pred_y_state0, args_tuple):
@@ -1720,6 +1738,8 @@ class TwoCompartmentAbsorption(PKBaseODE):
         # v1_safe = jnp.where(jnp.abs(v1) < 1e-9, 1e-9, v1)
         depvar_unit_result = pred_y_state0 / v1
         return depvar_unit_result
+    
+    
     
     @staticmethod
     def summary_calculations(args_tuple: tuple) -> dict:
