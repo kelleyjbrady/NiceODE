@@ -566,14 +566,13 @@ class OneCompartmentAbsorption(PKBaseODE):
         return concentration
     
     @staticmethod
-    def get_nondim_defs(dimensional_params: dict):
+    def get_nondim_defs(dimensional_params: list):
         """
         Takes dimensional PyMC params and nondimensional initial conditions,
         and returns the recipe for the nondimensional model.
         """
-        ka = dimensional_params['ka']
-        cl = dimensional_params['cl']
-        vd = dimensional_params['vd']
+        ka, cl, vd = dimensional_params
+
 
         nondim_param_formulas = {
             'beta': cl / (vd * ka)

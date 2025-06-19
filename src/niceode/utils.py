@@ -1356,6 +1356,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         model_name: str = None,
         subject_id_col: str = "SUBJID",
         conc_at_time_col: str = "DV",
+        dose_col:str = 'AMT',
         time_col="TIME",
         solve_ode_at_time_col: str = None,
         pk_model_class: Type[PKBaseODE] = None,
@@ -1399,6 +1400,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.jax_ivp_pymcnonstiff_solver_is_compiled = False
         self.jax_ivp_keys_stiff_solver_is_compiled = False
         self.jax_ivp_keys_stiff_compiled_solver_ = None
+        self.jax_ivp_pymcnonstiff_nondim_compiled_solver_ = None
+        self.jax_ivp_pymcnonstiff_nondim_solver_is_compiled = False
         self.loss_summary_name = loss_summary_name
         self.init_vals_pd_cols = InitValsPdCols()
         self.b_i_approx = None
@@ -1411,7 +1414,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.pk_model_class = pk_model_class()
         #the ode within the pk_model_class
         self.pk_model_function = self.pk_model_class.ode
-        
+        self.dose_col = dose_col
         dep_vars = {} if dep_vars is None else dep_vars
         population_coeff = [] if population_coeff is None else population_coeff
         self.model_error_sigma = model_error_sigma  # perhaps update this to do a check and set the attr to None if this param is not needed
@@ -2014,9 +2017,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.subject_y0_idx = np.array(first_pred_t_df.index.values, dtype=np.int64)
         ode_init_val_cols = [i.column_name for i in self.ode_t0_cols]
         #initial conditions for the ODE solver
-        self.ode_t0_vals = subject_data[ode_init_val_cols].reset_index(drop=True).copy()
+        ode_t0_vals = subject_data[ode_init_val_cols].reset_index(drop=True)
+        self.ode_t0_vals = ode_t0_vals.copy()
         self._ode_t0_vals = (subject_data[ode_init_val_cols + [self.time_col]]
                              .reset_index(drop=True).copy())
+        ode_t0_vals_nondim = ode_t0_vals.copy()
+        ode_t0_vals_nondim[self.dose_col] = 1.0
+        self.ode_t0_vals_nondim = ode_t0_vals_nondim.copy()
+        self.dose_t0 = ode_t0_vals[self.dose_col].copy()
         ode_saveat_min_time = self._subject_y0[self.time_col].to_numpy()
         ode_init_cond_time = self._ode_t0_vals[self.time_col].to_numpy()
         self.ode_t0_vals_are_subject_y0 = np.all(
@@ -2165,6 +2173,46 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return solution.ys, concentrations
     
     @staticmethod
+    def _solve_ivp_jax_worker_nondim(y0, args,
+                       tspan=None,
+                       teval=None,
+                       dt0 = None,
+                       ode_func = None,
+                       mass_to_depvar = None,
+                       diffrax_solver=None, 
+                       diffrax_step_ctrl = None,    
+                       diffrax_max_steps = None, 
+                       dose_t0 = None
+                       ):
+        
+        ode_term = ODETerm(ode_func)
+        adjoint = BacksolveAdjoint(solver = diffrax_solver, 
+                                   stepsize_controller=diffrax_step_ctrl, 
+                                   )
+        solution = diffeqsolve(
+        terms = ode_term,
+        solver = diffrax_solver,
+        t0 = tspan[0],
+        t1 = tspan[1],
+        dt0 = dt0,
+        y0 = y0,
+        args=args,
+        max_steps=diffrax_max_steps,
+        saveat=SaveAt(ts=teval), # Specify time points for output
+        stepsize_controller=diffrax_step_ctrl, 
+        adjoint=adjoint
+        )
+        
+        central_mass_trajectory = solution.ys[:, 0]
+        concentrations = mass_to_depvar(
+        central_mass_trajectory, 
+        args, # Pass the same parameter tuple
+        dose_t0
+    )
+        return solution.ys, concentrations
+    
+    
+    @staticmethod
     def _solve_ivp_jax_worker_pymc(
         y0, 
         args,
@@ -2306,7 +2354,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         ode_t0_vals = self.ode_t0_vals if ode_t0_vals is None else ode_t0_vals
         ode_t0_vals =  ode_t0_vals.to_numpy()
         maxsteps = 1000000
-        
+        dose_t0 = jnp.array(self.dose_t0.to_numpy())
         tspan_jax = jnp.asarray(self.global_tspan_init)
         teval_jax = jnp.asarray(self.global_tp_eval if timepoints is None else timepoints)
         
@@ -2481,6 +2529,41 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             self.jax_ivp_pymcnonstiff_compiled_solver_ = jit_vmapped_solve
             self.jax_ivp_pymcnonstiff_solver_is_compiled = True
             print('Sucessfully complied non-stiff PyMC ODE solver')
+        
+        if not (self.jax_ivp_pymcnonstiff_nondim_solver_is_compiled):
+            diffrax_solver = Tsit5()
+            #Initial thoughts:
+            #when the data is quite noisy to begin with
+            #(eg. biomarker or drug level determinations)
+            #I bet rtol and atol can be much higher
+            #Later conclusion/hypothesis:
+            #Upon researching further, this is not where
+            #we should compromise on precision, rather to speed
+            #things up the tol of the outer optimizer should be 
+            #increased as was done for the profiling optimizer. 
+            diffrax_step_ctrl = diffrax.ConstantStepSize()
+            dt0 = 0.1
+            
+            partial_solve_ivp = partial(
+                self._solve_ivp_jax_worker_nondim,
+                ode_func = self.pk_model_class.nondim_diffrax_ode,
+                mass_to_depvar = self.pk_model_class.nondim_to_concentration,
+                tspan=tspan_jax,
+                teval=teval_jax,
+                diffrax_solver=diffrax_solver,
+                diffrax_step_ctrl = diffrax_step_ctrl,
+                dt0 = dt0, 
+                diffrax_max_steps = maxsteps,
+                dose_t0 = dose_t0
+                
+            )
+            
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+            jit_vmapped_solve = jax.jit(vmapped_solve)
+            self.jax_ivp_pymcnonstiff_nondim_jittable_ = vmapped_solve
+            self.jax_ivp_pymcnonstiff_nondim_compiled_solver_ = jit_vmapped_solve
+            self.jax_ivp_pymcnonstiff_nondim_solver_is_compiled = True
+            print('Sucessfully complied non-dimensional non-stiff PyMC ODE solver')
             
         if not (self.jax_ivp_pymcstiff_solver_is_compiled):
             diffrax_solver = Kvaerno5()

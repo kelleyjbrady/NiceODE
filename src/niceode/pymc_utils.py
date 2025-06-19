@@ -37,6 +37,8 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
     all_sub_tp_alt = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'TIME')    
     all_sub_tp = np.tile(all_sub_tp_alt.columns, (len(time_mask_df),1))
     timepoints = np.array(all_sub_tp_alt.columns)
+    dose_t0 = model_obj.dose_t0.to_numpy()
+    nondim_ode_t0_vals = model_obj.ode_t0_vals_nondim.to_numpy()
     n_ode_params = len(model_params)
     model_obj = deepcopy(model_obj)
     model_obj.stiff_ode = True
@@ -70,7 +72,10 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         tp_data_vector = pm.Data('timepoints_vector', timepoints.flatten(), dims = 'global_time')
         subject_init_conc = pm.Data('c0', pm_subj_df['DV_scale'].values, dims = 'subject')
         subject_init_y0 = pm.Data('y0', model_obj.ode_t0_vals.to_numpy(), dims = ('subject', 'ode_output'))
-
+        subject_init_y0_nondim = pm.Data('y0_nondim',
+                                         nondim_ode_t0_vals,
+                                         dims = ('subject', 'ode_output'))
+        dose_t0 = pm.Data('dose_t0', dose_t0, dims = 'subject')
 
         subject_data = {}
         thetas = {}
@@ -99,6 +104,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         coeff_intercept_i = {}
         z_coeff = {}
         pm_model_params = []
+        nondim_params_list = []
         #prepare the PK model parameters and subject level effects if they exisit
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
@@ -168,7 +174,16 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 )
         #debug_print(f"Shape of intial conc: {subject_init_conc_eval.shape}")
         #this should be called something other than theta, this is the inputs to the PK model ODE
-        theta_matrix = pt.concatenate([param.reshape((1, -1)) for param in pm_model_params], axis=0).T
+        nondimensional = False
+        if nondimensional:
+            nondim_params = model_obj.ode_class.get_nondim_defs(pm_model_params)
+            for name, vals in nondim_params:
+                nondim_params_list.append(
+                    pm.Deterministic(name, vals, dims="subject")
+                )
+            theta_matrix = pt.concatenate([param.reshape((1, -1)) for param in nondim_params_list], axis=0).T  
+        else:
+            theta_matrix = pt.concatenate([param.reshape((1, -1)) for param in pm_model_params], axis=0).T
         
         #debug_print("Shape of theta_matrix:", theta_matrix_eval.shape)
         #debug_print("Shape of tp_data:",  tp_data_eval.shape)
@@ -219,11 +234,18 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
             sol = pm.Deterministic("sol", sol)
         else:
             model_coeffs = theta_matrix
-            
-            masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcnonstiff_jittable_)(
-                subject_init_y0,
-                model_coeffs
-                )
+            if nondimensional:
+                
+                masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcnonstiff_nondim_jittable_)(
+                    subject_init_y0_nondim,
+                    model_coeffs
+                    )
+                
+            else:
+                masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcnonstiff_jittable_)(
+                    subject_init_y0,
+                    model_coeffs
+                    )
             sol_full = masses
             
             sol_full = sol_full[:,:,0].set(concs)
