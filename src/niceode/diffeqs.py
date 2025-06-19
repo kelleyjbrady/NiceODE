@@ -522,7 +522,48 @@ class OneCompartmentAbsorption(PKBaseODE):
         dCMdt = ka * gut_mass - (cl / vd) * central_mass
         dGdt = -ka * gut_mass
         return jnp.array([dCMdt, dGdt])
+    
+    @staticmethod
+    def nondim_diffrax_ode(t, y, args_tuple):
+        """
+        Nondimensionalized JAX-compatible ODE function.
+        t: dimensionless time τ
+        y: [central_mass_nondim (κ), gut_mass_nondim (γ)]
+        args_tuple: (beta,) where beta = cl / (vd * ka)
+        """
+        beta, = args_tuple  # The only parameter is the dimensionless beta
+        kappa, gamma = y[0], y[1]
 
+        d_kappa_d_tau = gamma - beta * kappa
+        d_gamma_d_tau = -gamma
+        
+        return jnp.array([d_kappa_d_tau, d_gamma_d_tau])
+
+    @staticmethod
+    def nondim_to_concentration(
+        kappa_trajectory, # The dimensionless central mass trajectory
+        dimensional_params # A tuple of the original (ka, cl, vd)
+        ):
+        """
+        Converts the dimensionless central mass (κ) trajectory back to
+        dimensional concentration.
+        
+        This happens *after* the ODE solve.
+        """
+        ka, cl, vd = dimensional_params
+        
+        # We need the initial dose D to get back to dimensional mass
+        # Assuming D=1 here, but in a real model you'd pass D in.
+        Dose = 1.0 
+        
+        # Convert dimensionless mass κ back to dimensional mass C
+        dimensional_mass_C = kappa_trajectory * Dose
+        
+        # Convert dimensional mass C to concentration
+        concentration = dimensional_mass_C / vd
+        
+        return concentration
+    
     @staticmethod
     def diffrax_mass_to_depvar(pred_y_state0, args_tuple):
         """
