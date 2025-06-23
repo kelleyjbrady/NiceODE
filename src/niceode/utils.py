@@ -2173,22 +2173,26 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return solution.ys, concentrations
     
     @staticmethod
-    def _solve_ivp_jax_worker_nondim(y0, args,
-                       tspan=None,
-                       teval=None,
-                       dt0 = None,
+    def _solve_ivp_jax_worker_nondim(y0,
+                                     nondim_args,
+                                     dim_args,
+                                     dose_t0, 
+                                     dt0 = None,
+                                     teval = None, 
+                                     tspan = None,
                        ode_func = None,
                        mass_to_depvar = None,
                        diffrax_solver=None, 
                        diffrax_step_ctrl = None,    
                        diffrax_max_steps = None, 
-                       dose_t0 = None
                        ):
-        
+        #smallest_time_delta = jnp.min(jnp.diff(teval.flatten()))
+        #dt0 = smallest_time_delta / 10
         ode_term = ODETerm(ode_func)
         adjoint = BacksolveAdjoint(solver = diffrax_solver, 
                                    stepsize_controller=diffrax_step_ctrl, 
                                    )
+        #tspan = teval
         solution = diffeqsolve(
         terms = ode_term,
         solver = diffrax_solver,
@@ -2196,7 +2200,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         t1 = tspan[1],
         dt0 = dt0,
         y0 = y0,
-        args=args,
+        args=nondim_args,
         max_steps=diffrax_max_steps,
         saveat=SaveAt(ts=teval), # Specify time points for output
         stepsize_controller=diffrax_step_ctrl, 
@@ -2206,7 +2210,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         central_mass_trajectory = solution.ys[:, 0]
         concentrations = mass_to_depvar(
         central_mass_trajectory, 
-        args, # Pass the same parameter tuple
+        dim_args, # Pass the same parameter tuple
         dose_t0
     )
         return solution.ys, concentrations
@@ -2542,23 +2546,22 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             #things up the tol of the outer optimizer should be 
             #increased as was done for the profiling optimizer. 
             diffrax_step_ctrl = diffrax.ConstantStepSize()
-            dt0 = 0.1
+            dt0 = 0.1 #dynamically defined within the worker
             
             partial_solve_ivp = partial(
                 self._solve_ivp_jax_worker_nondim,
                 ode_func = self.pk_model_class.nondim_diffrax_ode,
                 mass_to_depvar = self.pk_model_class.nondim_to_concentration,
-                tspan=tspan_jax,
-                teval=teval_jax,
                 diffrax_solver=diffrax_solver,
                 diffrax_step_ctrl = diffrax_step_ctrl,
-                dt0 = dt0, 
                 diffrax_max_steps = maxsteps,
-                dose_t0 = dose_t0
+                dt0 = dt0, 
+                tspan=tspan_jax,
+                teval=teval_jax,
                 
             )
             
-            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0, 0, 0, ) )
             jit_vmapped_solve = jax.jit(vmapped_solve)
             self.jax_ivp_pymcnonstiff_nondim_jittable_ = vmapped_solve
             self.jax_ivp_pymcnonstiff_nondim_compiled_solver_ = jit_vmapped_solve

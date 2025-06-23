@@ -23,6 +23,7 @@ import pymc as pm
 from datetime import datetime
 
 import os
+import arviz as az
 os.environ["JAX_TRACEBACK_FILTERING"] = "off"
 
 now_str = datetime.now().strftime("%d%m%Y-%H%M%S")
@@ -39,6 +40,7 @@ me_mod_fo =  CompartmentalModel(
     model_name = "debug_cp1805_abs_kaME-clME-vdME_FO_nodep_dermal",
           ode_t0_cols=[ ODEInitVals('DV_scale'), ODEInitVals('AMT_scale'),],
           conc_at_time_col = 'DV_scale',
+          dose_col='AMT_scale',
           subject_id_col = 'ID_x', 
           time_col = 'TIME_x',
           population_coeff=[
@@ -111,7 +113,7 @@ model_params['init_val_softplus'] = np.log(np.exp(model_params['init_val_true_sc
 #%%
 #Assume 20% CV for a nice wide but informative prior 
 prior_cv = 0.3
-softplus = True
+softplus = False
 if softplus:
     f = model_params['init_val_true_scale'] < 0.5
     model_params.loc[f, 'sigma'] = np.sqrt(np.log( 1 +  prior_cv**2))
@@ -168,7 +170,7 @@ if error_model == 'additive':
 model = make_pymc_model(no_me_mod, no_me_mod.subject_data,
                         no_me_mod.data, model_params,  
                         model_param_dep_vars, model_error = pm_error,
-                        link_function = 'softplus'
+                        link_function = 'exp'
                         )
 #%%                       
 make_graph_viz = True

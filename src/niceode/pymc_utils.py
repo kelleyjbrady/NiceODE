@@ -172,18 +172,21 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                                     dims = 'subject'
                                      )
                 )
+        
         #debug_print(f"Shape of intial conc: {subject_init_conc_eval.shape}")
         #this should be called something other than theta, this is the inputs to the PK model ODE
-        nondimensional = False
+        nondimensional = True
         if nondimensional:
-            nondim_params = model_obj.ode_class.get_nondim_defs(pm_model_params)
-            for name, vals in nondim_params:
+            nondim_time = model_obj.pk_model_class.get_nondim_time(pm_model_params, tp_data) #tau, (n_subject, n_timepoints_global)
+            nondim_time = pm.Deterministic('tau', nondim_time, dims = ('subject', "global_time" ))
+            nondim_params = model_obj.pk_model_class.get_nondim_defs(pm_model_params)
+            for name in nondim_params:
                 nondim_params_list.append(
-                    pm.Deterministic(name, vals, dims="subject")
+                    pm.Deterministic(name, nondim_params[name], dims="subject")
                 )
-            theta_matrix = pt.concatenate([param.reshape((1, -1)) for param in nondim_params_list], axis=0).T  
-        else:
-            theta_matrix = pt.concatenate([param.reshape((1, -1)) for param in pm_model_params], axis=0).T
+            theta_matrix_nondim = pt.concatenate([param.reshape((1, -1)) for param in nondim_params_list], axis=0).T  
+        
+        theta_matrix = pt.concatenate([param.reshape((1, -1)) for param in pm_model_params], axis=0).T
         
         #debug_print("Shape of theta_matrix:", theta_matrix_eval.shape)
         #debug_print("Shape of tp_data:",  tp_data_eval.shape)
@@ -235,10 +238,15 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         else:
             model_coeffs = theta_matrix
             if nondimensional:
+                nondim_model_coeffs = theta_matrix_nondim
+                
                 
                 masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcnonstiff_nondim_jittable_)(
                     subject_init_y0_nondim,
-                    model_coeffs
+                    nondim_model_coeffs,
+                    model_coeffs, 
+                    dose_t0, 
+                    #nondim_time, 
                     )
                 
             else:

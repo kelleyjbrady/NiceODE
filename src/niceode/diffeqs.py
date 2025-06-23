@@ -575,12 +575,20 @@ class OneCompartmentAbsorption(PKBaseODE):
 
 
         nondim_param_formulas = {
-            'beta': cl / (vd * ka)
+            'beta_i': cl / (vd * ka)
         }
         
         # The function now returns the y0_nondim that was passed into it.
         return nondim_param_formulas
     
+    @staticmethod
+    def get_nondim_time(dimensional_params, dimensional_time ):
+        
+        ka, cl, vd = dimensional_params
+        ka = ka.reshape((-1,1))
+        tau = dimensional_time / ka
+        
+        return tau
     @staticmethod
     def diffrax_mass_to_depvar(pred_y_state0, args_tuple):
         """
