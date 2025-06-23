@@ -179,6 +179,12 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         if nondimensional:
             nondim_time = model_obj.pk_model_class.get_nondim_time(pm_model_params, tp_data) #tau, (n_subject, n_timepoints_global)
             nondim_time = pm.Deterministic('tau', nondim_time, dims = ('subject', "global_time" ))
+            nondim_ivp_dt0 = (pt.min(pt.diff(nondim_time, axis = 1), axis = 1) * .1).flatten()
+            nondim_ivp_dt0 = pm.Deterministic('ivp_dt0', nondim_ivp_dt0, dims = "subject")
+            nondim_ivp_t1 = pt.max(nondim_time, axis = 1).flatten()
+            nondim_ivp_t1 = pm.Deterministic('ivp_t1', nondim_ivp_t1, dims = "subject")
+            nondim_ivp_t0 = pt.min(nondim_time, axis = 1).flatten()
+            nondim_ivp_t0 = pm.Deterministic('ivp_t0', nondim_ivp_t0, dims = "subject")
             nondim_params = model_obj.pk_model_class.get_nondim_defs(pm_model_params)
             for name in nondim_params:
                 nondim_params_list.append(
@@ -246,7 +252,10 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                     nondim_model_coeffs,
                     model_coeffs, 
                     dose_t0, 
-                    #nondim_time, 
+                    nondim_time, 
+                    nondim_ivp_dt0, 
+                    nondim_ivp_t0,
+                    nondim_ivp_t1
                     )
                 
             else:

@@ -2177,9 +2177,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                      nondim_args,
                                      dim_args,
                                      dose_t0, 
-                                     dt0 = None,
-                                     teval = None, 
-                                     tspan = None,
+                                     teval,
+                                     dt0,
+                                     t0, 
+                                     t1,
                        ode_func = None,
                        mass_to_depvar = None,
                        diffrax_solver=None, 
@@ -2196,8 +2197,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         solution = diffeqsolve(
         terms = ode_term,
         solver = diffrax_solver,
-        t0 = tspan[0],
-        t1 = tspan[1],
+        t0 = t0,
+        t1 = t1,
         dt0 = dt0,
         y0 = y0,
         args=nondim_args,
@@ -2555,13 +2556,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 diffrax_solver=diffrax_solver,
                 diffrax_step_ctrl = diffrax_step_ctrl,
                 diffrax_max_steps = maxsteps,
-                dt0 = dt0, 
-                tspan=tspan_jax,
-                teval=teval_jax,
+                #dt0 = dt0, 
+                #tspan=tspan_jax,
+                #teval=teval_jax,
                 
             )
             
-            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0, 0, 0, ) )
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0, 0, 0,
+                                                                 0,0,0,0 ) )
             jit_vmapped_solve = jax.jit(vmapped_solve)
             self.jax_ivp_pymcnonstiff_nondim_jittable_ = vmapped_solve
             self.jax_ivp_pymcnonstiff_nondim_compiled_solver_ = jit_vmapped_solve
