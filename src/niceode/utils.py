@@ -1402,6 +1402,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.jax_ivp_keys_stiff_compiled_solver_ = None
         self.jax_ivp_pymcnonstiff_nondim_compiled_solver_ = None
         self.jax_ivp_pymcnonstiff_nondim_solver_is_compiled = False
+        self.jax_ivp_pymcnonstiff_hybrid_compiled_solver_ = None
+        self.jax_ivp_pymcnonstiff_hybrid_solver_is_compiled = False
         self.loss_summary_name = loss_summary_name
         self.init_vals_pd_cols = InitValsPdCols()
         self.b_i_approx = None
@@ -2173,6 +2175,47 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return solution.ys, concentrations
     
     @staticmethod
+    def _solve_ivp_jax_worker_hybrid(y0,
+                                     hybrid_args,
+                                     dim_args,
+                                     dose_t0,
+                       tspan=None,
+                       teval=None,
+                       dt0 = None,
+                       ode_func = None,
+                       mass_to_depvar = None,
+                       diffrax_solver=None, 
+                       diffrax_step_ctrl = None,    
+                       diffrax_max_steps = None
+                       ):
+        
+        ode_term = ODETerm(ode_func)
+        #adjoint = BacksolveAdjoint(solver = diffrax_solver, 
+        #                           stepsize_controller=diffrax_step_ctrl, 
+        #                           )
+        solution = diffeqsolve(
+        terms = ode_term,
+        solver = diffrax_solver,
+        t0 = tspan[0],
+        t1 = tspan[1],
+        dt0 = dt0,
+        y0 = y0,
+        args=hybrid_args,
+        max_steps=diffrax_max_steps,
+        saveat=SaveAt(ts=teval), # Specify time points for output
+        stepsize_controller=diffrax_step_ctrl, 
+        #adjoint=adjoint
+        )
+        
+        central_mass_trajectory = solution.ys[:, 0]
+        concentrations = mass_to_depvar(
+        central_mass_trajectory, 
+        dim_args, # Pass the same parameter tuple
+        dose_t0
+    )
+        return solution.ys, concentrations
+    
+    @staticmethod
     def _solve_ivp_jax_worker_nondim(y0,
                                      nondim_args,
                                      dim_args,
@@ -2190,9 +2233,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         #smallest_time_delta = jnp.min(jnp.diff(teval.flatten()))
         #dt0 = smallest_time_delta / 10
         ode_term = ODETerm(ode_func)
-        adjoint = BacksolveAdjoint(solver = diffrax_solver, 
-                                   stepsize_controller=diffrax_step_ctrl, 
-                                   )
+        #adjoint = BacksolveAdjoint(solver = diffrax_solver, 
+        #                           stepsize_controller=diffrax_step_ctrl, 
+        #                           )
         #tspan = teval
         solution = diffeqsolve(
         terms = ode_term,
@@ -2205,7 +2248,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         max_steps=diffrax_max_steps,
         saveat=SaveAt(ts=teval), # Specify time points for output
         stepsize_controller=diffrax_step_ctrl, 
-        adjoint=adjoint
+        #adjoint=adjoint
         )
         
         central_mass_trajectory = solution.ys[:, 0]
@@ -2534,6 +2577,41 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             self.jax_ivp_pymcnonstiff_compiled_solver_ = jit_vmapped_solve
             self.jax_ivp_pymcnonstiff_solver_is_compiled = True
             print('Sucessfully complied non-stiff PyMC ODE solver')
+        
+        if not (self.jax_ivp_pymcnonstiff_hybrid_solver_is_compiled):
+            diffrax_solver = Tsit5()
+            #Initial thoughts:
+            #when the data is quite noisy to begin with
+            #(eg. biomarker or drug level determinations)
+            #I bet rtol and atol can be much higher
+            #Later conclusion/hypothesis:
+            #Upon researching further, this is not where
+            #we should compromise on precision, rather to speed
+            #things up the tol of the outer optimizer should be 
+            #increased as was done for the profiling optimizer. 
+            diffrax_step_ctrl = diffrax.ConstantStepSize()
+            dt0 = 0.1
+            
+            partial_solve_ivp = partial(
+                self._solve_ivp_jax_worker_hybrid,
+                ode_func = self.pk_model_class.hybrid_nondim_diffrax_ode,
+                mass_to_depvar = self.pk_model_class.nondim_to_concentration,
+                tspan=tspan_jax,
+                teval=teval_jax,
+                diffrax_solver=diffrax_solver,
+                diffrax_step_ctrl = diffrax_step_ctrl,
+                dt0 = dt0, 
+                diffrax_max_steps = maxsteps
+                
+            )
+            
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,0,0) )
+            jit_vmapped_solve = jax.jit(vmapped_solve)
+            self.jax_ivp_pymcnonstiff_hybrid_jittable_ = vmapped_solve
+            self.jax_ivp_pymcnonstiff_hybrid_compiled_solver_ = jit_vmapped_solve
+            self.jax_ivp_pymcnonstiff_hybrid_solver_is_compiled = True
+            print('Sucessfully complied hybrid-dimensional non-stiff PyMC ODE solver')
+        
         
         if not (self.jax_ivp_pymcnonstiff_nondim_solver_is_compiled):
             diffrax_solver = Tsit5()

@@ -105,6 +105,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         z_coeff = {}
         pm_model_params = []
         nondim_params_list = []
+        hybrid_params_list = []
         #prepare the PK model parameters and subject level effects if they exisit
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
@@ -176,15 +177,24 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         #debug_print(f"Shape of intial conc: {subject_init_conc_eval.shape}")
         #this should be called something other than theta, this is the inputs to the PK model ODE
         nondimensional = True
+        hybrid_dim = False
+        if hybrid_dim:
+            hybrid_params = model_obj.pk_model_class.get_hybrid_nondim_defs(pm_model_params)
+            for name in hybrid_params:
+                hybrid_params_list.append(
+                    pm.Deterministic(name, hybrid_params[name], dims="subject")
+                )
+            theta_matrix_hybrid = pt.concatenate([param.reshape((1, -1)) for param in hybrid_params_list], axis=0).T
         if nondimensional:
             nondim_time = model_obj.pk_model_class.get_nondim_time(pm_model_params, tp_data) #tau, (n_subject, n_timepoints_global)
             nondim_time = pm.Deterministic('tau', nondim_time, dims = ('subject', "global_time" ))
             nondim_ivp_dt0 = (pt.min(pt.diff(nondim_time, axis = 1), axis = 1) * .1).flatten()
-            nondim_ivp_dt0 = pm.Deterministic('ivp_dt0', nondim_ivp_dt0, dims = "subject")
-            nondim_ivp_t1 = pt.max(nondim_time, axis = 1).flatten()
-            nondim_ivp_t1 = pm.Deterministic('ivp_t1', nondim_ivp_t1, dims = "subject")
-            nondim_ivp_t0 = pt.min(nondim_time, axis = 1).flatten()
-            nondim_ivp_t0 = pm.Deterministic('ivp_t0', nondim_ivp_t0, dims = "subject")
+            #nondim_ivp_dt0 = pm.Deterministic('ivp_dt0', nondim_ivp_dt0, dims = "subject")
+            nondim_ivp_t1 = pt.repeat(pt.max(nondim_time), len(coords['subject'])).flatten()
+            #nondim_ivp_t1 = pm.Deterministic('ivp_t1', nondim_ivp_t1, dims = "subject")
+            nondim_ivp_t0 = pt.repeat(0.0, len(coords['subject'])).flatten()
+            #nondim_ivp_t0 = pt.min(nondim_time, axis = 1).flatten()
+            #nondim_ivp_t0 = pm.Deterministic('ivp_t0', nondim_ivp_t0, dims = "subject")
             nondim_params = model_obj.pk_model_class.get_nondim_defs(pm_model_params)
             for name in nondim_params:
                 nondim_params_list.append(
@@ -257,7 +267,17 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                     nondim_ivp_t0,
                     nondim_ivp_t1
                     )
+            
+            if hybrid_dim:
+                hybrid_model_coeffs = theta_matrix_hybrid
                 
+                masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcnonstiff_hybrid_jittable_)(
+                    subject_init_y0_nondim,
+                    hybrid_model_coeffs,
+                    model_coeffs, 
+                    dose_t0, 
+
+                    )
             else:
                 masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcnonstiff_jittable_)(
                     subject_init_y0,
