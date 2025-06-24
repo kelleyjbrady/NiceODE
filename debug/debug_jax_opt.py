@@ -2,6 +2,7 @@
 import os
 os.environ['JAX_PLATFORMS'] = 'cpu'
 os.environ['JAX_ENABLE_X64']='True'
+os.environ['JAX_CHECK_TRACER_LEAKS'] = 'True'
 import jax
 
 import pandas as pd
@@ -388,7 +389,7 @@ res_nojit = loss_wrapper_for_grad(init_params)
 #%%
 res_nojit2 = loss_wrapper_for_grad(init_params)
 #%%
-continue_exec = True
+continue_exec = False
 if continue_exec:
     # 1. Generate the jaxpr for the FORWARD pass
     print("--- Generating Jaxpr for Forward Pass ---")
@@ -402,10 +403,10 @@ if continue_exec:
     res_nojit = loss_wrapper_for_grad(init_params)
 
 
-    #%%
-    fo_value_and_grad = jax.value_and_grad(loss_wrapper_for_grad, argnums = 0, has_aux = True)
-    #this fails
-    (loss, aux_data), grads = fo_value_and_grad(init_params,)
+#%%
+fo_value_and_grad = jax.value_and_grad(loss_wrapper_for_grad, argnums = 0, has_aux = True)
+#this fails
+(loss, aux_data), grads = fo_value_and_grad(init_params,)
                         
     #%%
     neg2_ll, b_i_approx, padded_preds = res

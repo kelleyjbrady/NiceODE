@@ -26,10 +26,92 @@ def debug_print(print_obj, *args ):
             print(print_obj)
 
 
-def make_pymc_model(model_obj, pm_subj_df, pm_df,
-                    model_params, model_param_dep_vars,
-                    model_error = None, link_function = 'softplus'
+def make_pymc_model(model_obj,
+                    pm_subj_df,
+                    pm_df,
+                    model_params,
+                    model_param_dep_vars,
+                    model_error = None,
+                    link_function = 'exp'
                     ): 
+    use_internal_prep = False
+    if use_internal_prep:
+        #prepare data for pymc from previous fit
+        init_summary = model_obj.init_vals_pd.copy()
+        model_params = init_summary.loc[init_summary['population_coeff'], :]
+        model_param_dep_vars = init_summary.loc[(init_summary['population_coeff'] == False)
+                                                    & (init_summary['model_error'] == False), :]
+        model_error = init_summary.loc[init_summary['model_error'], :]
+        
+        best_fit_df = model_obj.fit_result_summary_.reset_index().copy()
+        
+        pop_coeff_f1 = best_fit_df['population_coeff']
+
+        best_model_params = best_fit_df.loc[pop_coeff_f1, 
+                                            ['model_coeff', 'best_fit_param_val']]
+        model_params = model_params.merge(best_model_params, how = 'left', on = 'model_coeff')
+        model_params['init_val'] = model_params['best_fit_param_val'].copy()
+        model_params['init_val_log_scale'] = model_params['init_val'].copy()
+        model_params['init_val_true_scale'] = np.exp(model_params['init_val'])
+        model_params['init_val_softplus'] = np.log(np.exp(model_params['init_val_true_scale']) - 1)
+        
+        #Assume 20% CV for a nice wide but informative prior 
+        prior_cv = 0.3
+        softplus = False
+        if softplus:
+            f = model_params['init_val_true_scale'] < 0.5
+            model_params.loc[f, 'sigma'] = np.sqrt(np.log( 1 +  prior_cv**2))
+            f = model_params['init_val_true_scale'] > 10
+            model_params.loc[f, 'sigma'] = model_params.loc[f, 'init_val_true_scale'] * prior_cv
+            f1 = model_params['init_val_true_scale'] <= 10
+            f2 = model_params['init_val_true_scale'] >= 0.5
+            model_params.loc[f1 & f2, 'sigma'] = model_params.loc[f1 & f2, 'init_val_softplus'] * prior_cv
+            model_params['init_val'] = model_params['init_val_softplus'].copy()
+        else:
+            model_params['sigma'] = np.sqrt(np.log( 1 +  prior_cv**2))
+        
+        b_i_approx = model_obj.b_i_approx.copy()
+        b_i_approx.columns = [i[0] for i in b_i_approx.columns.to_flat_index()]
+        best_me_params = best_fit_df.loc[best_fit_df['subject_level_intercept']]
+        best_me_params = best_me_params.rename(columns = {'best_fit_param_val':'best_fit_param_val_me'})
+        best_me_params = best_me_params[['model_coeff',
+                                        'subject_level_intercept_name',
+                                        'best_fit_param_val_me']]
+        model_params = model_params.merge(best_me_params,
+                                        how = 'left',
+                                        on = ['model_coeff',
+                                                'subject_level_intercept_name'])
+        if softplus:
+            f = model_params['init_val_true_scale'] < 0.5
+            model_params.loc[f, 'subject_level_intercept_sd_init_val'] = model_params.loc[f, 'best_fit_param_val_me'].copy()
+            f = model_params['init_val_true_scale'] > 10
+            model_params.loc[f, 'subject_level_intercept_sd_init_val'] = (model_params.loc[f, 'best_fit_param_val_me'] 
+                                            * model_params.loc[f, 'init_val_true_scale'])
+            f1 = model_params['init_val_true_scale'] <= 10
+            f2 = model_params['init_val_true_scale'] >= 0.5
+            model_params.loc[f1 & f2, 'subject_level_intercept_sd_init_val'] = (model_params.loc[f1 & f2, 'init_val_softplus'] 
+                                                * model_params.loc[f1 & f2, 'best_fit_param_val_me'])
+        else:
+            model_params['subject_level_intercept_sd_init_val'] = model_params['best_fit_param_val_me'].copy()
+        #Assume 20% CV for a nice wide but informative prior
+        #tmp_c = 'subject_level_intercept_sd_init_val'
+        #model_params['sigma_subject_level_intercept_sd_init_val'] = np.log(np.exp(model_params[tmp_c]) * .2
+        #                                                                   
+        #                                                                   )
+        
+
+
+        model_error = best_fit_df.loc[best_fit_df['model_error']
+                                    , 'best_fit_param_val'].to_numpy()[0]
+
+        #find a nice reference for this approxmiationFalse
+        error_model = 'additive'
+        if error_model == 'proportional':
+            pm_error = model_error / np.mean(model_obj.data['DV_scale'])
+        if error_model == 'additive':
+            pm_error = model_error
+    
+    
     
     pm_df['tmp'] = 1
     time_mask_df = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'tmp').fillna(0)
@@ -116,7 +198,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
             #if the ODE parameter (row['model_coeff']) has subject level effects, include them in the ODE parameter
             if coeff_has_subject_intercept:
                 #one average subject level effect 
-                coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 3)
+                coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 2)
                 #one sd of subject level effect
                 coeff_intercept_sigma[coeff_name] = pm.HalfNormal(f"{coeff_name}_intercept_sigma",
                                                                   sigma = row['subject_level_intercept_sd_init_val'], initval= row['subject_level_intercept_sd_init_val'])
@@ -257,7 +339,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 nondim_model_coeffs = theta_matrix_nondim
                 
                 
-                masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcnonstiff_nondim_jittable_)(
+                masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcstiff_nondim_jittable_)(
                     subject_init_y0_nondim,
                     nondim_model_coeffs,
                     model_coeffs, 
@@ -298,7 +380,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
             #sol_full = sol_full[time_mask_data_f]
             sol = pm.Deterministic("sol", sol)                   
 
-        error_model = 'additive'
+        error_model = 'combined'
         if error_model == 'additive':
             model_error = 1 if model_error is None else model_error
             sigma_obs = pm.HalfNormal("sigma_additive", sigma=model_error)
