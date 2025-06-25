@@ -14,6 +14,7 @@ import pandas as pd
 from pytensor import scan
 import icomo
 from copy import deepcopy
+from typing import Literal
 
 
 
@@ -26,17 +27,117 @@ def debug_print(print_obj, *args ):
             print(print_obj)
 
 
-def make_pymc_model(model_obj, pm_subj_df, pm_df,
-                    model_params, model_param_dep_vars,
-                    model_error = None, link_function = 'softplus'
+def make_pymc_model(model_obj,
+                    pm_subj_df = None,
+                    pm_df = None,
+                    model_params = None,
+                    model_param_dep_vars = None,
+                    model_error = None,
+                    link_function:Literal['exp', 'softplus'] = 'exp',
+                    error_model:Literal['additive', 'proportional', 'combined'] = 'combined',
+                    pop_effect_prior_cv:float = 0.3,
+                    use_existing_fit = True,
                     ): 
+    req_kwargs_are_none = [i is None for i in 
+                           (pm_subj_df, pm_df, model_params, model_param_dep_vars) ]
+    if all(req_kwargs_are_none):
+        use_internal_prep = True
+    else:
+        use_internal_prep = False
+    if use_internal_prep:
+        #prepare data for pymc from previous fit
+        init_summary = model_obj.init_vals_pd.copy()
+        model_params = init_summary.loc[init_summary['population_coeff'], :].copy()
+        model_param_dep_vars = init_summary.loc[(init_summary['population_coeff'] == False)
+                                                    & (init_summary['model_error'] == False), :].copy()
+        model_error = init_summary.loc[init_summary['model_error'], :].copy()
+        if use_existing_fit:
+            best_fit_df = model_obj.fit_result_summary_.reset_index().copy()
+            
+            pop_coeff_f1 = best_fit_df['population_coeff']
+
+            best_model_params = best_fit_df.loc[pop_coeff_f1, 
+                                                ['model_coeff', 'best_fit_param_val']]
+            model_params = model_params.merge(best_model_params, how = 'left', on = 'model_coeff')
+            init_val_src = 'best_fit_param_val'
+        else:
+            init_val_src = 'init_val'
+        model_params['init_val'] = model_params[init_val_src].copy()
+        model_params['init_val_log_scale'] = model_params['init_val'].copy()
+        model_params['init_val_true_scale'] = np.exp(model_params['init_val'])
+        model_params['init_val_softplus'] = np.log(np.exp(model_params['init_val_true_scale']) - 1)
+         
+        prior_cv = pop_effect_prior_cv
+        softplus = False
+        if softplus:
+            f = model_params['init_val_true_scale'] < 0.5
+            model_params.loc[f, 'sigma'] = np.sqrt(np.log( 1 +  prior_cv**2))
+            f = model_params['init_val_true_scale'] > 10
+            model_params.loc[f, 'sigma'] = model_params.loc[f, 'init_val_true_scale'] * prior_cv
+            f1 = model_params['init_val_true_scale'] <= 10
+            f2 = model_params['init_val_true_scale'] >= 0.5
+            model_params.loc[f1 & f2, 'sigma'] = model_params.loc[f1 & f2, 'init_val_softplus'] * prior_cv
+            model_params['init_val'] = model_params['init_val_softplus'].copy()
+        else:
+            model_params['sigma'] = np.sqrt(np.log( 1 +  prior_cv**2))
+
+        if use_existing_fit:
+            best_me_params = best_fit_df.loc[best_fit_df['subject_level_intercept']]
+            best_me_params = best_me_params.rename(columns = {'best_fit_param_val':'best_fit_param_val_me'})
+            best_me_params = best_me_params[['model_coeff',
+                                            'subject_level_intercept_name',
+                                            'best_fit_param_val_me']]
+            model_params = model_params.merge(best_me_params,
+                                            how = 'left',
+                                            on = ['model_coeff',
+                                                    'subject_level_intercept_name'])
+            me_init_src = 'best_fit_param_val_me'
+        else:
+            me_init_src = 'subject_level_intercept_sd_init_val'
+        if softplus:
+            f = model_params['init_val_true_scale'] < 0.5
+            model_params.loc[f, 'subject_level_intercept_sd_init_val'] = model_params.loc[f, me_init_src].copy()
+            f = model_params['init_val_true_scale'] > 10
+            model_params.loc[f, 'subject_level_intercept_sd_init_val'] = (model_params.loc[f, me_init_src] 
+                                            * model_params.loc[f, 'init_val_true_scale'])
+            f1 = model_params['init_val_true_scale'] <= 10
+            f2 = model_params['init_val_true_scale'] >= 0.5
+            model_params.loc[f1 & f2, 'subject_level_intercept_sd_init_val'] = (model_params.loc[f1 & f2, 'init_val_softplus'] 
+                                                * model_params.loc[f1 & f2, me_init_src])
+        else:
+            model_params['subject_level_intercept_sd_init_val'] = model_params[me_init_src].copy()
+        #Assume 20% CV for a nice wide but informative prior
+        #tmp_c = 'subject_level_intercept_sd_init_val'
+        #model_params['sigma_subject_level_intercept_sd_init_val'] = np.log(np.exp(model_params[tmp_c]) * .2
+        #                                                                   
+        #                                                                   )
+        
+
+        if use_existing_fit:
+            model_error = best_fit_df.loc[best_fit_df['model_error']
+                                        , 'best_fit_param_val'].to_numpy()[0]
+
+            #find a nice reference for this approxmiationFalse
+            if error_model == 'proportional':
+                pm_error = model_error / np.mean(model_obj.data[model_obj.conc_at_time_col])
+            if error_model == 'additive':
+                pm_error = model_error
+        else:
+            pm_error = None
+
+        pm_subj_df = model_obj.subject_data.copy()
+        pm_df = model_obj.data.copy()
+        model_params = model_params.copy()
+        model_param_dep_vars = model_param_dep_vars.copy()
+    
     
     pm_df['tmp'] = 1
-    time_mask_df = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'tmp').fillna(0)
-    time_mask = time_mask_df.to_numpy().astype(bool)
-    all_sub_tp_alt = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'TIME')    
-    all_sub_tp = np.tile(all_sub_tp_alt.columns, (len(time_mask_df),1))
-    timepoints = np.array(all_sub_tp_alt.columns)
+    #time_mask_df = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'tmp').fillna(0)
+    #time_mask = time_mask_df.to_numpy().astype(bool)
+    time_mask = np.copy(model_obj.time_mask)
+    #all_sub_tp_alt = pm_df.pivot( index = 'SUBJID', columns = 'TIME', values = 'TIME')    
+    all_sub_tp = np.tile(model_obj.global_tp_eval, (len(time_mask),1))
+    timepoints = model_obj.global_tp_eval
     dose_t0 = model_obj.dose_t0.to_numpy()
     nondim_ode_t0_vals = model_obj.ode_t0_vals_nondim.to_numpy()
     n_ode_params = len(model_params)
@@ -45,7 +146,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
     t1 = model_obj.global_tf_eval
     t0 = model_obj.global_t0_eval 
     dt0 = 0.1
-    coords = {'subject':list(pm_subj_df['SUBJID'].values), 
+    coords = {'subject':list(pm_subj_df[model_obj.groupby_col].values), 
           'obs_id': list(pm_df.index.values), 
           'global_time':timepoints, 
           'ode_output':list(model_obj.ode_t0_vals.columns)
@@ -65,12 +166,12 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
     pt_printing = True
     with pm.Model(coords=coords) as model:
         
-        data_obs = pm.Data('dv', pm_df['DV_scale'].values, dims = 'obs_id')
+        data_obs = pm.Data('dv', pm_df[model_obj.conc_at_time_col].values, dims = 'obs_id')
         #debug_print(data_obs.shape.eval())
         time_mask_data = pm.Data('time_mask', time_mask, dims = ('subject', 'global_time'))
         tp_data = pm.Data('timepoints', all_sub_tp, dims = ('subject', 'global_time'))
         tp_data_vector = pm.Data('timepoints_vector', timepoints.flatten(), dims = 'global_time')
-        subject_init_conc = pm.Data('c0', pm_subj_df['DV_scale'].values, dims = 'subject')
+        #subject_init_conc = pm.Data('c0', pm_subj_df[model_obj.conc_at_time_col].values, dims = 'subject')
         subject_init_y0 = pm.Data('y0', model_obj.ode_t0_vals.to_numpy(), dims = ('subject', 'ode_output'))
         subject_init_y0_nondim = pm.Data('y0_nondim',
                                          nondim_ode_t0_vals,
@@ -105,6 +206,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         z_coeff = {}
         pm_model_params = []
         nondim_params_list = []
+        hybrid_params_list = []
         #prepare the PK model parameters and subject level effects if they exisit
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
@@ -115,7 +217,7 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
             #if the ODE parameter (row['model_coeff']) has subject level effects, include them in the ODE parameter
             if coeff_has_subject_intercept:
                 #one average subject level effect 
-                coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 3)
+                coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 2)
                 #one sd of subject level effect
                 coeff_intercept_sigma[coeff_name] = pm.HalfNormal(f"{coeff_name}_intercept_sigma",
                                                                   sigma = row['subject_level_intercept_sd_init_val'], initval= row['subject_level_intercept_sd_init_val'])
@@ -176,9 +278,24 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
         #debug_print(f"Shape of intial conc: {subject_init_conc_eval.shape}")
         #this should be called something other than theta, this is the inputs to the PK model ODE
         nondimensional = True
+        hybrid_dim = False
+        if hybrid_dim:
+            hybrid_params = model_obj.pk_model_class.get_hybrid_nondim_defs(pm_model_params)
+            for name in hybrid_params:
+                hybrid_params_list.append(
+                    pm.Deterministic(name, hybrid_params[name], dims="subject")
+                )
+            theta_matrix_hybrid = pt.concatenate([param.reshape((1, -1)) for param in hybrid_params_list], axis=0).T
         if nondimensional:
             nondim_time = model_obj.pk_model_class.get_nondim_time(pm_model_params, tp_data) #tau, (n_subject, n_timepoints_global)
             nondim_time = pm.Deterministic('tau', nondim_time, dims = ('subject', "global_time" ))
+            nondim_ivp_dt0 = (pt.min(pt.diff(nondim_time, axis = 1), axis = 1) * .1).flatten()
+            #nondim_ivp_dt0 = pm.Deterministic('ivp_dt0', nondim_ivp_dt0, dims = "subject")
+            nondim_ivp_t1 = pt.repeat(pt.max(nondim_time), len(coords['subject'])).flatten()
+            #nondim_ivp_t1 = pm.Deterministic('ivp_t1', nondim_ivp_t1, dims = "subject")
+            nondim_ivp_t0 = pt.repeat(0.0, len(coords['subject'])).flatten()
+            #nondim_ivp_t0 = pt.min(nondim_time, axis = 1).flatten()
+            #nondim_ivp_t0 = pm.Deterministic('ivp_t0', nondim_ivp_t0, dims = "subject")
             nondim_params = model_obj.pk_model_class.get_nondim_defs(pm_model_params)
             for name in nondim_params:
                 nondim_params_list.append(
@@ -241,14 +358,27 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
                 nondim_model_coeffs = theta_matrix_nondim
                 
                 
-                masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcnonstiff_nondim_jittable_)(
+                masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcstiff_nondim_jittable_)(
                     subject_init_y0_nondim,
                     nondim_model_coeffs,
                     model_coeffs, 
                     dose_t0, 
-                    #nondim_time, 
+                    nondim_time, 
+                    nondim_ivp_dt0, 
+                    nondim_ivp_t0,
+                    nondim_ivp_t1
                     )
+            
+            if hybrid_dim:
+                hybrid_model_coeffs = theta_matrix_hybrid
                 
+                masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcnonstiff_hybrid_jittable_)(
+                    subject_init_y0_nondim,
+                    hybrid_model_coeffs,
+                    model_coeffs, 
+                    dose_t0, 
+
+                    )
             else:
                 masses, concs = icomo.jax2pytensor(model_obj.jax_ivp_pymcnonstiff_jittable_)(
                     subject_init_y0,
@@ -269,13 +399,13 @@ def make_pymc_model(model_obj, pm_subj_df, pm_df,
             #sol_full = sol_full[time_mask_data_f]
             sol = pm.Deterministic("sol", sol)                   
 
-        error_model = 'additive'
+        #error_model = 'combined'
         if error_model == 'additive':
-            model_error = 1 if model_error is None else model_error
+            model_error = 1 if pm_error is None else pm_error
             sigma_obs = pm.HalfNormal("sigma_additive", sigma=model_error)
             pm.Normal("obs", mu=sol, sigma=sigma_obs, observed=data_obs)
         elif error_model == 'proportional':
-            model_error = 1 if model_error is None else model_error
+            model_error = 1 if pm_error is None else pm_error
             sigma_obs = pm.HalfNormal("sigma_proportional", sigma=model_error)
             #this requires censoring the intial per subject vals if the t0 y is zero
             pm.LogNormal("obs", mu=pt.log(sol), sigma=sigma_obs, observed=data_obs)

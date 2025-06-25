@@ -36,6 +36,7 @@ A. Upton of the University of California, San Francisco:
 ## Load libraries
 library(nlmixr2)
 str(theo_sd)
+#rite.csv(theo_sd, 'theo_nlmixr2.csv')
 ```
 
 We can try fitting a simple one-compartment PK model to this small
@@ -70,7 +71,7 @@ f <- nlmixr(one.cmt)
 We can now run the model...
 
 ```{r}
-fit <- nlmixr(one.cmt, theo_sd, est="focei",
+fit <- nlmixr(one.cmt, theo_sd, est="foce",
               control=list(print=0))
 
 print(fit)
@@ -105,7 +106,15 @@ one.compartment <- function() {
 We can try the Stochastic Approximation EM (SAEM) method to this model:
 
 ```{r}
-fit2 <- nlmixr(one.compartment, theo_sd,  est="saem",
+fit2 <- nlmixr(one.compartment, theo_sd,  est="fo",
+               control=list(print=0))
+print(fit2)
+```
+
+
+```{r}
+
+fit2 <- nlmixr(one.compartment, theo_sd,  est="foce",
                control=list(print=0))
 print(fit2)
 ```

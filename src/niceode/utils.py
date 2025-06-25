@@ -33,6 +33,7 @@ import uuid
 import mlflow
 import multiprocessing
 import jax.numpy as jnp
+from itertools import product
 
 from mlflow.data.pandas_dataset import from_pandas
 from .mlflow_utils import (get_class_source_without_docstrings,
@@ -1402,6 +1403,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.jax_ivp_keys_stiff_compiled_solver_ = None
         self.jax_ivp_pymcnonstiff_nondim_compiled_solver_ = None
         self.jax_ivp_pymcnonstiff_nondim_solver_is_compiled = False
+        self.jax_ivp_pymcnonstiff_hybrid_compiled_solver_ = None
+        self.jax_ivp_pymcnonstiff_hybrid_solver_is_compiled = False
+        self.jax_ivp_pymcstiff_nondim_compiled_solver_ = None
+        self.jax_ivp_pymcstiff_nondim_solver_is_compiled = False
         self.loss_summary_name = loss_summary_name
         self.init_vals_pd_cols = InitValsPdCols()
         self.b_i_approx = None
@@ -2057,12 +2062,16 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         subject_level_intercept_init_vals = subject_level_intercept_info[
             1
         ]  # this is so bad, fast tho
+        #self.subject_level_intercept_init_vals are the previously solved for b_i for use in FOCE
         self.subject_level_intercept_init_vals = (
             subject_level_intercept_init_vals.copy()
         )
+        #These are the omegas
         self.n_subject_level_intercept_sds = len(subject_level_intercept_sds.columns)
-
         self.subject_level_intercept_sds = deepcopy(subject_level_intercept_sds)
+        
+        self.subject_level_lower_chol = self._construct_init_omega_lower_chol(
+            self.subject_level_intercept_sds)
         self.init_pop_coeffs = deepcopy(pop_coeffs)
         self.init_thetas = deepcopy(thetas)
         # this is too many things to return in this manner
@@ -2073,7 +2082,108 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             theta_data.copy(),
         )
     
+    def _construct_init_omega_lower_chol(self, subject_level_effect_sd):
+        n_eff = self.n_subject_level_intercept_sds
+        self.n_lower_omega_lower_chol = n_eff * (n_eff + 1) / 2
+        diag_eff = np.diag(subject_level_effect_sd.to_numpy().flatten())
+        diag_eff = np.sqrt(diag_eff)
+        flat_lower_diag_idx = np.tril_indices_from(diag_eff)
+        flat_lower_diag = diag_eff[flat_lower_diag_idx]
+        rows, cols = flat_lower_diag_idx
+        row_names = subject_level_effect_sd.columns[rows]
+        col_names = subject_level_effect_sd.columns[cols]
+        cell_names = tuple(zip(row_names, col_names))
+        flat_lower_diag = pd.Series(flat_lower_diag)
+        flat_lower_diag.index = pd.MultiIndex.from_tuples(cell_names)
+        return flat_lower_diag
 
+    def _assemble_pred_matrices_jax(self, init_params, theta_data):
+        n_pop_e = self.n_population_coeff
+        n_subj_e = self.n_subject_level_intercept_sds
+        unique_groups = self.unique_groups
+        groups_idx = self.y_groups
+        y = self.y
+        unpadded_y_len = len(y)
+        expected_len_out =  len(unique_groups)
+        time_mask = self.time_mask
+        time_mask_y = jnp.array(time_mask)
+        time_mask_J = [time_mask.reshape((time_mask.shape[0], time_mask.shape[1], 1)) for n in range(n_subj_e)]
+        time_mask_J = jnp.array(np.concatenate(time_mask_J, axis = 2))
+        ode_t0_vals = jnp.array(self.ode_t0_vals.to_numpy())
+        #self._compile_jax_ivp_solvers()
+        #generate_pk_model_coeff_jax = make_jittable_pk_coeff(len(unique_groups))
+        params_order = tuple([i for i in init_params])
+        
+        
+        mask_df = []
+        for row in range(time_mask.shape[0]):
+            inner_df = pd.DataFrame()
+            id = unique_groups[row]
+            dat = time_mask[row]
+            inner_df['mask'] = dat
+            inner_df['id'] = id
+            inner_df['time'] = self.global_tp_eval
+            mask_df.append(inner_df)
+        mask_df = pd.concat(mask_df)
+        
+        tmp_y = pd.DataFrame()
+        tmp_y['y'] = y
+        tmp_y['id'] = groups_idx
+        tmp_y['time'] = self.data['TIME']
+
+        masked_y = mask_df.merge(tmp_y, how = 'left', on = ['id', 'time'])
+
+        masked_y['y'] = masked_y['y'].fillna(0.0)
+        padded_y = masked_y['y'].to_numpy().reshape(len(unique_groups), len(self.global_tp_eval))
+        
+        pop_coeff_names = [i for idx, i in enumerate(init_params) if idx < n_pop_e ]
+        start_idx = n_pop_e
+        end_idx = start_idx + 1
+        sigma_names = [i for idx, i in enumerate(init_params) if idx >= start_idx and idx < end_idx ]
+        start_idx = end_idx
+        end_idx = start_idx + n_subj_e
+        omega_names =   [i for idx, i in enumerate(init_params) if idx >= start_idx and idx < end_idx ]
+        start_idx = end_idx
+        theta_names = [i for idx, i in enumerate(init_params) if idx >= start_idx ]
+        
+        dfs = []
+        td_df = pd.DataFrame(theta_data)
+        theta_params = [i[0] for i in pd.DataFrame(td_df).columns]
+        unique_pop_params = [i[0] for idx, i in enumerate(init_params) if idx < n_pop_e ]
+        
+        td_df_alt = td_df.copy()
+        last_seen_param = None
+        #new_theta_full = np.copy(unique_theta_params)
+        new_td_df = td_df.copy()
+        for p_idx, p in enumerate(unique_pop_params):
+            if p not in np.unique(theta_params):
+                c_new = (p, f'{p}_zero_feature')
+                if last_seen_param is None:
+                    insert_idx = 0
+                else:
+                    insert_idx_tmp = [idx for idx, i in enumerate(theta_params) if i == last_seen_param ]
+                    insert_idx = insert_idx_tmp[-1] + 1
+                d_new = np.zeros((td_df.shape[0], 1))
+                old_cols = list(new_td_df.columns)
+                oc_pre = old_cols[:insert_idx]
+                oc_post = old_cols[insert_idx:]
+                new_cols = oc_pre + [c_new] + oc_post 
+                new_tmp_pre = new_td_df.copy().to_numpy()[:, :insert_idx]
+                new_tmp_post = new_td_df.to_numpy()[:, insert_idx:]
+                new_tmp = np.concatenate([new_tmp_pre, d_new, new_tmp_post], axis = 1)
+                new_td_df = pd.DataFrame(new_tmp, columns = new_cols)
+                
+                theta_params = [i[0] for i in new_td_df.columns]
+            last_seen_param = p
+            
+        td_tensor = []    
+        for p_idx, p in enumerate(unique_pop_params):
+            tmp_df = new_td_df.copy()
+            other_cols = [i for i in tmp_df.columns if i[0] != p]
+            tmp_df[other_cols] = 0
+            td_tensor.append(tmp_df.to_numpy())
+        td_tensor_cols = tuple(tmp_df.columns)
+        td_tensor = np.stack(td_tensor, axis = 2)   
     #@profile
     def _generate_pk_model_coeff_vectorized(
         self, pop_coeffs, thetas, theta_data, expected_len_out=None
@@ -2173,13 +2283,55 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return solution.ys, concentrations
     
     @staticmethod
+    def _solve_ivp_jax_worker_hybrid(y0,
+                                     hybrid_args,
+                                     dim_args,
+                                     dose_t0,
+                       tspan=None,
+                       teval=None,
+                       dt0 = None,
+                       ode_func = None,
+                       mass_to_depvar = None,
+                       diffrax_solver=None, 
+                       diffrax_step_ctrl = None,    
+                       diffrax_max_steps = None
+                       ):
+        
+        ode_term = ODETerm(ode_func)
+        #adjoint = BacksolveAdjoint(solver = diffrax_solver, 
+        #                           stepsize_controller=diffrax_step_ctrl, 
+        #                           )
+        solution = diffeqsolve(
+        terms = ode_term,
+        solver = diffrax_solver,
+        t0 = tspan[0],
+        t1 = tspan[1],
+        dt0 = dt0,
+        y0 = y0,
+        args=hybrid_args,
+        max_steps=diffrax_max_steps,
+        saveat=SaveAt(ts=teval), # Specify time points for output
+        stepsize_controller=diffrax_step_ctrl, 
+        #adjoint=adjoint
+        )
+        
+        central_mass_trajectory = solution.ys[:, 0]
+        concentrations = mass_to_depvar(
+        central_mass_trajectory, 
+        dim_args, # Pass the same parameter tuple
+        dose_t0
+    )
+        return solution.ys, concentrations
+    
+    @staticmethod
     def _solve_ivp_jax_worker_nondim(y0,
                                      nondim_args,
                                      dim_args,
                                      dose_t0, 
-                                     dt0 = None,
-                                     teval = None, 
-                                     tspan = None,
+                                     teval,
+                                     dt0,
+                                     t0, 
+                                     t1,
                        ode_func = None,
                        mass_to_depvar = None,
                        diffrax_solver=None, 
@@ -2189,22 +2341,22 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         #smallest_time_delta = jnp.min(jnp.diff(teval.flatten()))
         #dt0 = smallest_time_delta / 10
         ode_term = ODETerm(ode_func)
-        adjoint = BacksolveAdjoint(solver = diffrax_solver, 
-                                   stepsize_controller=diffrax_step_ctrl, 
-                                   )
+        #adjoint = BacksolveAdjoint(solver = diffrax_solver, 
+        #                           stepsize_controller=diffrax_step_ctrl, 
+        #                           )
         #tspan = teval
         solution = diffeqsolve(
         terms = ode_term,
         solver = diffrax_solver,
-        t0 = tspan[0],
-        t1 = tspan[1],
+        t0 = t0,
+        t1 = t1,
         dt0 = dt0,
         y0 = y0,
         args=nondim_args,
         max_steps=diffrax_max_steps,
         saveat=SaveAt(ts=teval), # Specify time points for output
         stepsize_controller=diffrax_step_ctrl, 
-        adjoint=adjoint
+        #adjoint=adjoint
         )
         
         central_mass_trajectory = solution.ys[:, 0]
@@ -2534,6 +2686,41 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             self.jax_ivp_pymcnonstiff_solver_is_compiled = True
             print('Sucessfully complied non-stiff PyMC ODE solver')
         
+        if not (self.jax_ivp_pymcnonstiff_hybrid_solver_is_compiled):
+            diffrax_solver = Tsit5()
+            #Initial thoughts:
+            #when the data is quite noisy to begin with
+            #(eg. biomarker or drug level determinations)
+            #I bet rtol and atol can be much higher
+            #Later conclusion/hypothesis:
+            #Upon researching further, this is not where
+            #we should compromise on precision, rather to speed
+            #things up the tol of the outer optimizer should be 
+            #increased as was done for the profiling optimizer. 
+            diffrax_step_ctrl = diffrax.ConstantStepSize()
+            dt0 = 0.1
+            
+            partial_solve_ivp = partial(
+                self._solve_ivp_jax_worker_hybrid,
+                ode_func = self.pk_model_class.hybrid_nondim_diffrax_ode,
+                mass_to_depvar = self.pk_model_class.nondim_to_concentration,
+                tspan=tspan_jax,
+                teval=teval_jax,
+                diffrax_solver=diffrax_solver,
+                diffrax_step_ctrl = diffrax_step_ctrl,
+                dt0 = dt0, 
+                diffrax_max_steps = maxsteps
+                
+            )
+            
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,0,0) )
+            jit_vmapped_solve = jax.jit(vmapped_solve)
+            self.jax_ivp_pymcnonstiff_hybrid_jittable_ = vmapped_solve
+            self.jax_ivp_pymcnonstiff_hybrid_compiled_solver_ = jit_vmapped_solve
+            self.jax_ivp_pymcnonstiff_hybrid_solver_is_compiled = True
+            print('Sucessfully complied hybrid-dimensional non-stiff PyMC ODE solver')
+        
+        
         if not (self.jax_ivp_pymcnonstiff_nondim_solver_is_compiled):
             diffrax_solver = Tsit5()
             #Initial thoughts:
@@ -2555,19 +2742,54 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 diffrax_solver=diffrax_solver,
                 diffrax_step_ctrl = diffrax_step_ctrl,
                 diffrax_max_steps = maxsteps,
-                dt0 = dt0, 
-                tspan=tspan_jax,
-                teval=teval_jax,
+                #dt0 = dt0, 
+                #tspan=tspan_jax,
+                #teval=teval_jax,
                 
             )
             
-            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0, 0, 0, ) )
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0, 0, 0,
+                                                                 0,0,0,0 ) )
             jit_vmapped_solve = jax.jit(vmapped_solve)
             self.jax_ivp_pymcnonstiff_nondim_jittable_ = vmapped_solve
             self.jax_ivp_pymcnonstiff_nondim_compiled_solver_ = jit_vmapped_solve
             self.jax_ivp_pymcnonstiff_nondim_solver_is_compiled = True
             print('Sucessfully complied non-dimensional non-stiff PyMC ODE solver')
+        
+        if not (self.jax_ivp_pymcstiff_nondim_solver_is_compiled):
+            diffrax_solver = Kvaerno5()
+            #Initial thoughts:
+            #when the data is quite noisy to begin with
+            #(eg. biomarker or drug level determinations)
+            #I bet rtol and atol can be much higher
+            #Later conclusion/hypothesis:
+            #Upon researching further, this is not where
+            #we should compromise on precision, rather to speed
+            #things up the tol of the outer optimizer should be 
+            #increased as was done for the profiling optimizer. 
+            diffrax_step_ctrl = PIDController(rtol=1e-5, atol=1e-5)
             
+            partial_solve_ivp = partial(
+                self._solve_ivp_jax_worker_nondim,
+                ode_func = self.pk_model_class.nondim_diffrax_ode,
+                mass_to_depvar = self.pk_model_class.nondim_to_concentration,
+                diffrax_solver=diffrax_solver,
+                diffrax_step_ctrl = diffrax_step_ctrl,
+                diffrax_max_steps = maxsteps,
+                #dt0 = dt0, 
+                #tspan=tspan_jax,
+                #teval=teval_jax,
+                
+            )
+            
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0, 0, 0,
+                                                                 0,0,0,0 ) )
+            jit_vmapped_solve = jax.jit(vmapped_solve)
+            self.jax_ivp_pymcstiff_nondim_jittable_ = vmapped_solve
+            self.jax_ivp_pymcstiff_nondim_compiled_solver_ = jit_vmapped_solve
+            self.jax_ivp_pymcstiff_nondim_solver_is_compiled = True
+            print('Sucessfully complied non-dimensional stiff PyMC ODE solver')
+          
         if not (self.jax_ivp_pymcstiff_solver_is_compiled):
             diffrax_solver = Kvaerno5()
             

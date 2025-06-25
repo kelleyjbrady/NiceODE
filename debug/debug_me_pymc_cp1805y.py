@@ -182,12 +182,12 @@ vars_list = list(model.values_to_rvs.keys())[:-1]
 
 #sampler = "DEMetropolisZ"
 chains = 4
-tune = 800
-total_draws = 2000
+tune = 2000
+total_draws = 6000
 draws = np.round(total_draws/chains, 0).astype(int)
 with model:
     #trace_DEMZ = pm.sample(step=[pm.DEMetropolisZ(vars_list)], cores = 1, tune = tune, draws = draws, chains = chains,)
-    trace_NUTS = pm.sample( tune = tune, draws = draws, chains = chains, nuts_sampler = 'numpyro' )
+    trace_NUTS = pm.sample( tune = tune, draws = draws, chains = chains, nuts_sampler = 'numpyro', target_accept = 0.92 )
     #trace_bj_nuts = pm.sampling.jax.sample_blackjax_nuts(tune = tune,
     #                                                     draws = draws, chains=chains,
     #                                                     chain_method='vectorized')

@@ -108,10 +108,10 @@ me_mod_fo = CompartmentalModel(
             optimization_lower_bound=np.log(1e-4),
             optimization_upper_bound=np.log(1),
             # optimization_upper_bound = np.log(.005),
-            # subject_level_intercept=True,
-            # subject_level_intercept_sd_init_val = 0.3,
-            # subject_level_intercept_sd_upper_bound = 5,
-            # subject_level_intercept_sd_lower_bound=1e-6
+            subject_level_intercept=True,
+            subject_level_intercept_sd_init_val = 0.3,
+            subject_level_intercept_sd_upper_bound = 5,
+            subject_level_intercept_sd_lower_bound=1e-6
         ),
         PopulationCoeffcient(
             "vd",

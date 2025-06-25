@@ -614,6 +614,45 @@ class OneCompartmentAbsorption(PKBaseODE):
         return depvar_unit_result
     
     @staticmethod
+    def get_hybrid_nondim_defs(dimensional_params: dict):
+        """
+        Returns the recipe for creating the dimensionless parameters
+        needed for the hybrid ODE system.
+        
+        For the 1-cpt model, this is only beta.
+        """
+        ka, cl, vd = dimensional_params
+
+        # The only NEW dimensionless parameter we need is beta.
+        # The 'ka' parameter will be passed in directly from the dimensional set.
+        hybrid_param_formulas = {
+            'ka_hybrid':ka,
+            'beta': cl / (vd * ka)
+        }
+        return hybrid_param_formulas
+
+    @staticmethod
+    def hybrid_nondim_diffrax_ode(t, y, args_tuple):
+        """
+        Partially non-dimensional JAX-compatible ODE function.
+        Derivatives are with respect to dimensional time 't'.
+
+        Args:
+            t: dimensional time
+            y: [central_mass_nondim (κ), gut_mass_nondim (γ)]
+            args_tuple: (ka, beta) - A mix of dimensional and dimensionless params
+        """
+        # Unpack the required parameters
+        ka, beta = args_tuple
+        kappa, gamma = y[0], y[1]
+
+        # The hybrid ODE system derived previously
+        d_kappa_dt = ka * (gamma - beta * kappa)
+        d_gamma_dt = -ka * gamma
+        
+        return jnp.array([d_kappa_dt, d_gamma_dt])
+    
+    @staticmethod
     def summary_calculations(args_tuple: tuple) -> dict:
         """
         Calculates summary PK statistics from one-compartment absorption model parameters.

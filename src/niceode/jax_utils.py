@@ -168,87 +168,69 @@ def _estimate_jacobian_finite_diff(
     gen_coeff_jit,
     compiled_ivp_solver_arr,
     data_contribution,
-    time_mask_y
+    time_mask_y,
 ):
     """
-    Estimates the Jacobian using finite differences (numdifftools),
-    integrated into JAX via pure_callback.
+    Final, correct version using finite differences and a non-recursive custom_jvp.
     """
-    # 1. Prepare for the callback by getting concrete values and shapes.
-    # We need the values of the parameters we're differentiating.
-    jac_keys = tuple(jac_pop_coeffs.keys())
-    jac_values_jax = tuple(jac_pop_coeffs.values())
-
-    # We need the expected shape of the output of our predictor function.
-    # To get this, we can run a quick shape evaluation.
-    # This assumes the number of predictions is constant.
-    n_outputs = ode_t0_vals.shape[0] * time_mask_y.shape[1] # Example shape logic
-    
-    # Let's get the shape of the predictions per subject
-    # This might need to be adjusted based on your exact output structure
-    # For now, let's assume it's (n_subjects, n_timepoints)
-    pred_shape = (ode_t0_vals.shape[0], time_mask_y.shape[1])
-    
-    # The Jacobian will have shape (n_outputs, n_params_to_diff)
-    # Since we have multiple subjects, the vmapped version is more complex.
-    # Let's define the shape of the final dictionary of Jacobians.
-    result_shape_dtype = jax.tree.map(
-        lambda x: jax.ShapeDtypeStruct(shape=pred_shape + x.shape, dtype=x.dtype),
-        jac_pop_coeffs
-    )
-
-    # 2. Define the pure Python/NumPy function to be called.
-    #    This function takes NumPy arrays and returns a NumPy array.
-    def numpy_predictor_for_fd(jac_pop_coeff_values_np):
-        # Convert NumPy inputs back to JAX arrays
-        jac_pop_coeff_values_jax = tuple(jnp.array(v) for v in jac_pop_coeff_values_np)
-        
-        # Call your original JAX prediction function
-        # This will execute in eager mode inside the callback
-        pred_y = _predict_jax_jacobian(
-            jac_pop_coeff_values=jac_pop_coeff_values_jax,
-            jac_pop_coeff_keys=jac_keys,
-            pop_coeffs=pop_coeffs,
-            pop_coeffs_order=pop_coeffs_order,
-            thetas=thetas,
-            theta_data=theta_data,
-            ode_t0_vals=ode_t0_vals,
-            gen_coeff_jit=gen_coeff_jit,
-            compiled_ivp_solver_arr=compiled_ivp_solver_arr,
-            data_contribution=data_contribution
+    # 1. Define a function that computes the Jacobian using pure_callback.
+    def get_jacobian_value(jac_values_tuple):
+        pred_shape = (ode_t0_vals.shape[0], time_mask_y.shape[1])
+        result_shape_dtype = jax.tree.map(
+            lambda x: jax.ShapeDtypeStruct(shape=pred_shape, dtype=x.dtype),
+            jac_pop_coeffs
         )
-        # Return the result as a NumPy array for numdifftools
-        return np.array(pred_y)
 
-    # 3. Define the main callback function
-    def get_jacobian_via_numpy(jac_values_tuple):
-        # Convert the input JAX arrays to NumPy arrays
-        jac_values_np = [np.array(v) for v in jac_values_tuple]
+        def get_jacobian_via_numpy(jac_values_tuple_np):
+            def func_for_fd(x_vector):
+                params_as_tuple = tuple(jnp.array(val) for val in x_vector)
+                pred_y = _predict_jax_jacobian(
+                    jac_pop_coeff_values=params_as_tuple,
+                    jac_pop_coeff_keys=tuple(jac_pop_coeffs.keys()),
+                    pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
+                    thetas=thetas, theta_data=theta_data, ode_t0_vals=ode_t0_vals,
+                    gen_coeff_jit=gen_coeff_jit, compiled_ivp_solver_arr=compiled_ivp_solver_arr,
+                    data_contribution=data_contribution
+                )
+                return np.array(pred_y.flatten())
 
-        # Use numdifftools.Jacobian, which takes a function and returns a new
-        # function that computes the Jacobian.
-        jacobian_calculator = nd.Jacobian(numpy_predictor_for_fd)
+            jac_values_np_vector = np.array([v.item() for v in jac_values_tuple_np])
+            full_jacobian_matrix_np = nd.Jacobian(func_for_fd)(jac_values_np_vector)
+            reshaped_jacobians = tuple(
+                col.reshape(pred_shape) for col in full_jacobian_matrix_np.T
+            )
+            return reshaped_jacobians
+
+        return jax.pure_callback(
+            get_jacobian_via_numpy, result_shape_dtype, jac_values_tuple
+        )
+
+    # 2. Define the VJP-wrapped function.
+    @jax.custom_jvp
+    def jacobian_fd_with_fo_grad(jac_values_tuple):
+        # The primal is still defined by calling the underlying implementation.
+        return get_jacobian_value(jac_values_tuple)
+
+    # 3. Define the JVP rule for this function.
+    @jacobian_fd_with_fo_grad.defjvp
+    def jacobian_fd_jvp_rule(primals, tangents):
+        jac_values_tuple, = primals
         
-        # Calculate the jacobian at the given parameter values
-        jacobian_result_np = jacobian_calculator(jac_values_np) # This is a tuple of numpy arrays
-        
-        # The output of nd.Jacobian is structured as (output_dims, input_dims)
-        # We need to reshape it to match what the original code expected:
-        # a dictionary where each entry has shape (n_subjects, n_timepoints, ...)
-        
-        # Note: This reshaping logic can be complex. For now, we assume a simple case.
-        # The key is that we return a tuple of numpy arrays.
-        return jacobian_result_np
+        # --- THE FIX ---
+        # Calculate the primal output by calling the NON-DECORATED logic directly.
+        primal_out = get_jacobian_value(jac_values_tuple)
 
-    # 4. Call the Python/NumPy function from JAX using pure_callback
-    jacobian_as_tuple_of_arrays = jax.pure_callback(
-        get_jacobian_via_numpy,
-        result_shape_dtype,  # Tell JAX what shape/dtype to expect
-        jac_values_jax         # Pass in the JAX arrays
-    )
+        # For the FO method, the derivative of the Jacobian is zero.
+        # The output tangent is a pytree of zeros with the same structure as the output.
+        tangent_out = jax.tree.map(jnp.zeros_like, primal_out)
+        
+        return primal_out, tangent_out
 
-    # Reconstruct the final dictionary
-    jacobian_dict = dict(zip(jac_keys, jacobian_as_tuple_of_arrays))
+    # 4. Execute the final, fully-defined function.
+    jac_values_jax = tuple(jac_pop_coeffs.values())
+    # This call will now trigger the corrected JVP rule during the grad trace.
+    jacobian_dict = jacobian_fd_with_fo_grad(jac_values_jax)
+
     return jacobian_dict
 
 
@@ -495,16 +477,16 @@ def FO_approx_ll_loss_jax(
     pop_coeffs_j = {i:pop_coeffs[i] for i in pop_coeffs if i[0] in [i[0] for i in omegas_order]}
 
     #this AD function does not work, leaving it though to make it easier to recall how to use it
-    # j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
-    #                           thetas=thetas_dict, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
-    #                           gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
-    #                           data_contribution = data_contribution
-    #                           )
-    j = _estimate_jacobian_finite_diff(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
-                          thetas=thetas_dict, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
-                             gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
-                             data_contribution = data_contribution, time_mask_y=time_mask_y
-                             )
+    j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
+                              thetas=thetas_dict, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
+                              gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
+                              data_contribution = data_contribution
+                              )
+    # j = _estimate_jacobian_finite_diff(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
+    #                       thetas=thetas_dict, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
+    #                          gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
+    #                          data_contribution = data_contribution, time_mask_y=time_mask_y
+    #                          )
     
     # We create a dense J by stacking, then apply the mask to zero-out rows.
     J_dense = jnp.stack([j[key] for key in pop_coeffs_j],axis = 2) #shape (n_subject, max_obs_per_subject, n_s)
