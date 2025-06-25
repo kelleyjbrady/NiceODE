@@ -80,6 +80,7 @@ me_mod_fo =  CompartmentalModel(
                                     no_me_loss_function=neg2_log_likelihood_loss, 
                                     no_me_loss_needs_sigma=True,
                                     #optimizer_tol=None, 
+                                    optimizer_tol=1e-6,
                                     pk_model_class=OneCompartmentAbsorption, 
                                     model_error_sigma=PopulationCoeffcient('sigma'
                                                                             ,log_transform_init_val=False

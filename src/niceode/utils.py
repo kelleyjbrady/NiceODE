@@ -1111,6 +1111,7 @@ def FO_approx_ll_loss(
     theta_data,
     model_obj,
     solve_for_omegas=False,
+    use_full_omega = True,
     
     **kwargs,
 ):
@@ -1118,17 +1119,27 @@ def FO_approx_ll_loss(
     y = np.copy(model_obj.y)
     y_groups_idx = np.copy(model_obj.y_groups)
     omegas_names = list(omegas.columns)
+    omega_diag_names = list(model_obj.subject_level_intercept_sds.columns)
     omegas = omegas.to_numpy(
-        dtype=np.float64
-    ).flatten()  # omegas as SD, we want Variance, thus **2 below
-    omegas2 = np.diag(
-        omegas**2
-    )  # FO assumes that there is no cov btwn the random effects, thus off diags are zero
-    #this is not actually FO's assumption, but a simplification, 
+            dtype=np.float64
+        ).flatten()
+    omegas_diag_size = model_obj.n_subject_level_intercept_sds
+    if use_full_omega:
+        update_idx = model_obj.omega_lower_chol_idx
+        omegas_lchol = np.zeros((omegas_diag_size, omegas_diag_size), dtype = np.float64)
+        for idx, np_idx in enumerate(update_idx):
+            omegas_lchol[np_idx] = omegas[idx]
+        omegas2 = omegas_lchol @ omegas_lchol.T
+    else:
+          # omegas as SD, we want Variance, thus **2 below
+        omegas2 = np.diag(
+            omegas**2
+        )  # FO assumes that there is no cov btwn the random effects, thus off diags are zero
+        #this is not actually FO's assumption, but a simplification, 
     sigma = sigma.to_numpy(dtype=np.float64)[0]
     sigma2 = sigma**2
     n_individuals = len(model_obj.unique_groups)
-    n_random_effects = len(omegas_names)
+    n_random_effects = omegas_diag_size
 
     # estimate model coeffs when the omegas are zero -- the first term of the taylor exapansion apprx
     model_coeffs = model_obj._generate_pk_model_coeff_vectorized(
@@ -1152,7 +1163,7 @@ def FO_approx_ll_loss(
         pop_coeffs,
         thetas,
         theta_data,
-        omegas_names,
+        omega_diag_names,
         y,
         model_obj,
         use_fprime=apprx_fprime_jac,
@@ -1204,9 +1215,9 @@ def FO_approx_ll_loss(
             try:
                 # Ensure omegas2 is invertible (handle near-zero omegas)
                 # Add a small value to diagonal for stability if needed, or use pinv
-                min_omega_var = 1e-9  # Example threshold
-                stable_omegas2 = np.diag(np.maximum(np.diag(omegas2), min_omega_var))
-                omega_inv = np.linalg.inv(stable_omegas2)
+                L = np.linalg.cholesky(omegas2)
+                L_inv = np.linalg.inv(L)
+                omega_inv = L_inv.T @ L_inv
 
                 # Corrected matrix A
                 A = J_sub.T @ J_sub + sigma2 * omega_inv
@@ -1386,6 +1397,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         minimize_method: Literal[*MINIMIZE_METHODS_NEW_CB] = "l-bfgs-b",
         batch_id: uuid.UUID = None,
         model_id: uuid.UUID = None,
+        use_full_omega = True
     ):
         #defaults related to ODE solving
         self.stiff_ode = None
@@ -1407,6 +1419,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.jax_ivp_pymcnonstiff_hybrid_solver_is_compiled = False
         self.jax_ivp_pymcstiff_nondim_compiled_solver_ = None
         self.jax_ivp_pymcstiff_nondim_solver_is_compiled = False
+        self.use_full_omega = use_full_omega
         self.loss_summary_name = loss_summary_name
         self.init_vals_pd_cols = InitValsPdCols()
         self.b_i_approx = None
@@ -1749,16 +1762,23 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             )
 
         # then omega2s
-        bounds.extend(
-            [
-                (
-                    obj.subject_level_intercept_sd_lower_bound,
-                    obj.subject_level_intercept_sd_upper_bound,
-                )
-                for obj in self.population_coeff
-                if obj.subject_level_intercept
-            ]
-        )
+        if self.use_full_omega:
+            n_eff = len([obj for obj in self.population_coeff
+                     if obj.subject_level_intercept])
+            n_lower_omega_lower_chol = int(n_eff * (n_eff + 1) / 2)
+            bounds.extend((None, None) for i in range(n_lower_omega_lower_chol))
+
+        else:
+            bounds.extend(
+                [
+                    (
+                        obj.subject_level_intercept_sd_lower_bound,
+                        obj.subject_level_intercept_sd_upper_bound,
+                    )
+                    for obj in self.population_coeff
+                    if obj.subject_level_intercept
+                ]
+            )
 
         # then dep var bounds
         for model_coeff in self.dep_vars:
@@ -1981,7 +2001,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         )
 
     #@profile
-    def _assemble_pred_matrices(self, data):
+    def _assemble_pred_matrices(self, data,):
         subject_id_c = self.groupby_col
         conc_at_time_c = self.conc_at_time_col
         time_col = deepcopy(self.time_col)
@@ -2075,26 +2095,31 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.init_pop_coeffs = deepcopy(pop_coeffs)
         self.init_thetas = deepcopy(thetas)
         # this is too many things to return in this manner
+        if self.use_full_omega:
+            omegas_out = self.subject_level_lower_chol.copy()
+        else:
+            omegas_out = self.subject_level_intercept_sds.copy()
         return (
             pop_coeffs.copy(),
-            subject_level_intercept_sds.copy(),
+            omegas_out.copy(),
             thetas.copy(),
             theta_data.copy(),
         )
     
     def _construct_init_omega_lower_chol(self, subject_level_effect_sd):
         n_eff = self.n_subject_level_intercept_sds
-        self.n_lower_omega_lower_chol = n_eff * (n_eff + 1) / 2
+        self.n_lower_omega_lower_chol = int(n_eff * (n_eff + 1) / 2)
         diag_eff = np.diag(subject_level_effect_sd.to_numpy().flatten())
         diag_eff = np.sqrt(diag_eff)
         flat_lower_diag_idx = np.tril_indices_from(diag_eff)
         flat_lower_diag = diag_eff[flat_lower_diag_idx]
         rows, cols = flat_lower_diag_idx
+        self.omega_lower_chol_idx = list(zip(rows, cols))
         row_names = subject_level_effect_sd.columns[rows]
         col_names = subject_level_effect_sd.columns[cols]
         cell_names = tuple(zip(row_names, col_names))
-        flat_lower_diag = pd.Series(flat_lower_diag)
-        flat_lower_diag.index = pd.MultiIndex.from_tuples(cell_names)
+        flat_lower_diag = pd.DataFrame(flat_lower_diag.reshape(1,-1))
+        flat_lower_diag.columns = pd.MultiIndex.from_tuples(cell_names)
         return flat_lower_diag
 
     def _assemble_pred_matrices_jax(self, init_params, theta_data):
@@ -2990,6 +3015,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         parallel=None,
         parallel_n_jobs=None,
         stiff_ode = False,
+        use_full_omega = None
     ):
         # If we do not need to unpack sigma (ie. when the loss is just SSE, MSE, Huber etc)
         if (self.n_subject_level_intercept_sds == 0) and (
@@ -3028,11 +3054,17 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 columns=self.init_pop_coeffs.columns[start_idx:end_idx],
             )
             start_idx = end_idx
-            end_idx = start_idx + self.n_subject_level_intercept_sds
+            if self.use_full_omega:
+                incrmnt = self.n_lower_omega_lower_chol
+                omega_labels = self.subject_level_lower_chol.columns
+            else:
+                incrmnt = self.n_subject_level_intercept_sds
+                omega_labels = self.subject_level_intercept_sds.columns
+            end_idx = start_idx + incrmnt
             omegas = pd.DataFrame(
                 params[start_idx:end_idx].reshape(1, -1),
                 dtype=pd.Float64Dtype(),
-                columns=self.subject_level_intercept_sds.columns,
+                columns=omega_labels,
             )
             start_idx = end_idx
             thetas = pd.DataFrame(
@@ -3063,6 +3095,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     self,
                     FO_b_i_apprx=subject_level_intercept_init_vals,
                     stiff_ode = stiff_ode,
+                    use_full_omega = use_full_omega
                 )
         # self.preds_opt_.append(preds)
         return error
@@ -3166,12 +3199,19 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 dtype=pd.Float64Dtype(),
                 columns=self.init_pop_coeffs.columns[start_idx:end_idx],
             )
+            if self.use_full_omega:
+                incrmnt = self.n_lower_omega_lower_chol
+                omega_labels = self.subject_level_lower_chol.columns
+            else:
+                incrmnt = self.n_subject_level_intercept_sds
+                omega_labels = self.subject_level_intercept_sds.columns
+            omega_diag_labels = self.subject_level_intercept_sds.columns
             start_idx = end_idx
-            end_idx = start_idx + self.n_subject_level_intercept_sds
+            end_idx = start_idx + incrmnt
             omegas = pd.DataFrame(
                 params[start_idx:end_idx].reshape(1, -1),
                 dtype=pd.Float64Dtype(),
-                columns=self.subject_level_intercept_sds.columns,
+                columns=omega_labels,
             )
             start_idx = end_idx
             thetas = pd.DataFrame(
@@ -3201,11 +3241,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         self,
                         FO_b_i_apprx=self.subject_level_intercept_init_vals,
                         solve_for_omegas=True,
+                        use_full_omega = self.use_full_omega
                     )
                 else:
                     b_i_approx = self.b_i_approx
                 b_i_approx = pd.DataFrame(
-                    b_i_approx, dtype=pd.Float64Dtype(), columns=omegas.columns
+                    b_i_approx, dtype=pd.Float64Dtype(), columns=omega_diag_labels
                 )
                 pop_coeffs_i = pd.DataFrame(
                     dtype=pd.Float64Dtype(), columns=pop_coeffs.columns
@@ -3278,7 +3319,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.stiff_ode = stiff_ode
         fit_id = uuid.uuid4() if fit_id is None else fit_id
         data = self._validate_data_chronology(data)
-        pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data)
+        pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data, )
         subject_level_intercept_init_vals = self.subject_level_intercept_init_vals
         sigma_check_1 = len(omegas.values) > 0
         sigma_check_2 = self.no_me_loss_needs_sigma
@@ -3333,22 +3374,38 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             omega_jax = omegas.to_dict(orient = 'list')
             omega_jax = {i:jnp.array(omega_jax[i]) for i in omega_jax}
             init_params_jax.update(omega_jax)
-            
-            param_names.extend(
-                [
-                    {
-                        "model_coeff": c_tuple[0],
-                        "log_name": c_tuple[1],
-                        "population_coeff": False,
-                        "model_error": False,
-                        "subject_level_intercept": True,
-                        "coeff_dep_var": False,
-                        "model_coeff_dep_var": None,
-                        "subject_level_intercept_name": c_tuple[1],
-                    }
-                    for c_tuple in omegas.columns.to_list()
-                ]
-            )
+            if self.use_full_omega:
+                param_names.extend(
+                    [
+                        {
+                            "model_coeff": f"lchol_omega_{c_tuple[0][0]}_{c_tuple[1][0]}",
+                            "log_name": f"lchol_omega_{c_tuple[0][1]}_{c_tuple[1][1]}",
+                            "population_coeff": False,
+                            "model_error": False,
+                            "subject_level_intercept": True,
+                            "coeff_dep_var": False,
+                            "model_coeff_dep_var": None,
+                            "subject_level_intercept_name": f"lchol_omega_{c_tuple[0][1]}_{c_tuple[1][1]}",
+                        }
+                        for c_tuple in omegas.columns.to_list()
+                    ]
+                )
+            else:
+                param_names.extend(
+                    [
+                        {
+                            "model_coeff": c_tuple[0],
+                            "log_name": c_tuple[1],
+                            "population_coeff": False,
+                            "model_error": False,
+                            "subject_level_intercept": True,
+                            "coeff_dep_var": False,
+                            "model_coeff_dep_var": None,
+                            "subject_level_intercept_name": c_tuple[1],
+                        }
+                        for c_tuple in omegas.columns.to_list()
+                    ]
+                )
         if len(thetas.values) > 0:
             init_params.append(thetas.values)
             theta_jax = thetas.to_dict(orient = 'list')
@@ -3389,6 +3446,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             subject_level_intercept_init_vals=subject_level_intercept_init_vals,
             parallel=parallel,
             parallel_n_jobs=parallel_n_jobs,
+            use_full_omega = self.use_full_omega,
         )
         self.fit_id = fit_id
         id_str = self._generate_fitted_model_name(ignore_fit_status=True)
