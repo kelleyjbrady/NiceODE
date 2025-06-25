@@ -635,3 +635,6 @@ check_args_arbit_lin_15.jb
 result_arbit_allo.jb
 check_test_5.jb
 gitmv.py
+plot_pair.png
+pymc_trace.png
+softplus_Trace.png
