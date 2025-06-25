@@ -57,17 +57,17 @@ me_mod_fo =  CompartmentalModel(
                                                     subject_level_intercept_sd_lower_bound=1e-6
                                                     ),
                                 PopulationCoeffcient('cl',
-                                                    optimization_init_val = np.exp(2.75),
+                                                    optimization_init_val = 3,
                                                     optimization_lower_bound = np.log(1e-4),
-                                                    optimization_upper_bound=np.log(4),
+                                                    optimization_upper_bound=np.log(25),
                                                     subject_level_intercept=True, 
                                                     subject_level_intercept_sd_init_val = 0.3, 
                                                     subject_level_intercept_sd_upper_bound = 5,
                                                     subject_level_intercept_sd_lower_bound=1e-6
                                                     ),
-                                PopulationCoeffcient('vd', optimization_init_val = np.exp(3.6)
+                                PopulationCoeffcient('vd', optimization_init_val = 35
                                                     , optimization_lower_bound = np.log(.1)
-                                                    ,optimization_upper_bound=np.log(6), 
+                                                    ,optimization_upper_bound=np.log(50), 
                                                     subject_level_intercept=True, 
                                                     subject_level_intercept_sd_init_val = 0.1, 
                                                     subject_level_intercept_sd_upper_bound = 5,
