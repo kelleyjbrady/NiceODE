@@ -33,6 +33,7 @@ import uuid
 import mlflow
 import multiprocessing
 import jax.numpy as jnp
+from itertools import product
 
 from mlflow.data.pandas_dataset import from_pandas
 from .mlflow_utils import (get_class_source_without_docstrings,
@@ -2061,12 +2062,16 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         subject_level_intercept_init_vals = subject_level_intercept_info[
             1
         ]  # this is so bad, fast tho
+        #self.subject_level_intercept_init_vals are the previously solved for b_i for use in FOCE
         self.subject_level_intercept_init_vals = (
             subject_level_intercept_init_vals.copy()
         )
+        #These are the omegas
         self.n_subject_level_intercept_sds = len(subject_level_intercept_sds.columns)
-
         self.subject_level_intercept_sds = deepcopy(subject_level_intercept_sds)
+        
+        self.subject_level_lower_chol = self._construct_init_omega_lower_chol(
+            self.subject_level_intercept_sds)
         self.init_pop_coeffs = deepcopy(pop_coeffs)
         self.init_thetas = deepcopy(thetas)
         # this is too many things to return in this manner
@@ -2077,6 +2082,21 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             theta_data.copy(),
         )
     
+    def _construct_init_omega_lower_chol(self, subject_level_effect_sd):
+        n_eff = self.n_subject_level_intercept_sds
+        self.n_lower_omega_lower_chol = n_eff * (n_eff + 1) / 2
+        diag_eff = np.diag(subject_level_effect_sd.to_numpy().flatten())
+        diag_eff = np.sqrt(diag_eff)
+        flat_lower_diag_idx = np.tril_indices_from(diag_eff)
+        flat_lower_diag = diag_eff[flat_lower_diag_idx]
+        rows, cols = flat_lower_diag_idx
+        row_names = subject_level_effect_sd.columns[rows]
+        col_names = subject_level_effect_sd.columns[cols]
+        cell_names = tuple(zip(row_names, col_names))
+        flat_lower_diag = pd.Series(flat_lower_diag)
+        flat_lower_diag.index = pd.MultiIndex.from_tuples(cell_names)
+        return flat_lower_diag
+
     def _assemble_pred_matrices_jax(self, init_params, theta_data):
         n_pop_e = self.n_population_coeff
         n_subj_e = self.n_subject_level_intercept_sds
