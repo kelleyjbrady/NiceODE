@@ -923,6 +923,7 @@ def FOCE_approx_ll_loss(
     debug_print=debug_print,
     focei = False,
     use_full_omega = True,
+    optimize_omega_on_log_scale = True,
     **kwargs,
 ):
     debug_print("Objective Call Start")
@@ -937,9 +938,15 @@ def FOCE_approx_ll_loss(
         omegas_lchol = np.zeros((omegas_diag_size, omegas_diag_size), dtype = np.float64)
         for idx, np_idx in enumerate(update_idx):
             omegas_lchol[np_idx] = omegas[idx]
+        if optimize_omega_on_log_scale:
+            omegas_diag = np.diag(omegas_lchol)
+            omegas_diag = np.exp(omegas_diag)
+            np.fill_diagonal(omegas_lchol, omegas_diag)
         omegas2 = omegas_lchol @ omegas_lchol.T
     else:
           # omegas as SD, we want Variance, thus **2 below
+        if optimize_omega_on_log_scale:
+            omegas = np.exp(omegas)
         omegas2 = np.diag(
             omegas**2
         )  # FO assumes that there is no cov btwn the random effects, thus off diags are zero
@@ -1131,6 +1138,7 @@ def FOCEi_approx_ll_loss(
     debug=None,
     debug_print=debug_print,
     use_full_omega = True,
+    optimize_omega_on_log_scale = True,
     **kwargs
 ):
 
@@ -1147,6 +1155,7 @@ def FOCEi_approx_ll_loss(
         debug_print=debug_print,
         focei = True,
         use_full_omega = use_full_omega,
+        optimize_omega_on_log_scale=optimize_omega_on_log_scale,
         **kwargs,)
     
     return res_collection
@@ -1161,7 +1170,7 @@ def FO_approx_ll_loss(
     model_obj,
     solve_for_omegas=False,
     use_full_omega = True,
-    
+    optimize_omega_on_log_scale = True,
     **kwargs,
 ):
     # unpack some variables locally for clarity
@@ -1178,9 +1187,15 @@ def FO_approx_ll_loss(
         omegas_lchol = np.zeros((omegas_diag_size, omegas_diag_size), dtype = np.float64)
         for idx, np_idx in enumerate(update_idx):
             omegas_lchol[np_idx] = omegas[idx]
+        if optimize_omega_on_log_scale:
+            omegas_diag = np.diag(omegas_lchol)
+            omegas_diag = np.exp(omegas_diag)
+            np.fill_diagonal(omegas_lchol, omegas_diag)
         omegas2 = omegas_lchol @ omegas_lchol.T
     else:
           # omegas as SD, we want Variance, thus **2 below
+        if optimize_omega_on_log_scale:
+            omegas = np.exp(omegas)
         omegas2 = np.diag(
             omegas**2
         )  # FO assumes that there is no cov btwn the random effects, thus off diags are zero
@@ -1447,6 +1462,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         batch_id: uuid.UUID = None,
         model_id: uuid.UUID = None,
         use_full_omega = True,
+        optimize_omega_on_logscale = True,
         stiff_ode = True
     ):
         #defaults related to ODE solving
@@ -1470,6 +1486,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.jax_ivp_pymcstiff_nondim_compiled_solver_ = None
         self.jax_ivp_pymcstiff_nondim_solver_is_compiled = False
         self.use_full_omega = use_full_omega
+        self.optimize_omega_on_logscale = optimize_omega_on_logscale
         self.loss_summary_name = loss_summary_name
         self.init_vals_pd_cols = InitValsPdCols()
         self.b_i_approx = None
@@ -2132,6 +2149,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         subject_level_intercept_init_vals = subject_level_intercept_info[
             1
         ]  # this is so bad, fast tho
+        if self.optimize_omega_on_logscale:
+            subject_level_intercept_sds = np.log(subject_level_intercept_sds)
         #self.subject_level_intercept_init_vals are the previously solved for b_i for use in FOCE
         self.subject_level_intercept_init_vals = (
             subject_level_intercept_init_vals.copy()
@@ -3061,7 +3080,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         subject_level_intercept_init_vals=None,
         parallel=None,
         parallel_n_jobs=None,
-        use_full_omega = None
+        use_full_omega = None, 
+        optimize_omega_on_log_scale = None,
     ):
         # If we do not need to unpack sigma (ie. when the loss is just SSE, MSE, Huber etc)
         if (self.n_subject_level_intercept_sds == 0) and (
@@ -3140,7 +3160,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     beta_data,
                     self,
                     FO_b_i_apprx=subject_level_intercept_init_vals,
-                    use_full_omega = use_full_omega
+                    use_full_omega = use_full_omega, 
+                    optimize_omega_on_log_scale = optimize_omega_on_log_scale
                 )
         # self.preds_opt_.append(preds)
         return error
@@ -3510,6 +3531,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             parallel=parallel,
             parallel_n_jobs=parallel_n_jobs,
             use_full_omega = self.use_full_omega,
+            optimize_omega_on_log_scale = self.optimize_omega_on_log_scale,
         )
         self.fit_id = fit_id
         id_str = self._generate_fitted_model_name(ignore_fit_status=True)
