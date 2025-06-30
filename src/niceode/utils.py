@@ -737,7 +737,7 @@ def _estimate_b_i(
     beta_data,
     sigma2,
     Omega2,
-    omega_names,
+    omega_diag_names,
     b_i_init,
     ode_t0_val,
     time_mask_i,
@@ -784,7 +784,7 @@ def _estimate_b_i(
             b_i.reshape(1, -1) if len(b_i) == 1 else b_i
         )  # not sure if this is necessary
         b_i_df = pd.DataFrame(
-            b_i.reshape(1, -1), dtype=pd.Float64Dtype(), columns=omega_names
+            b_i.reshape(1, -1), dtype=pd.Float64Dtype(), columns=omega_diag_names
         )
         b_i_df.columns = pd.MultiIndex.from_tuples(b_i_df.columns)
 
@@ -803,7 +803,7 @@ def _estimate_b_i(
         )
         # Solve the ODEs for this individual
         if np.any(np.isinf(model_coeffs_i.to_numpy().flatten())):
-            log_likelihood_data = 1e12
+            neg2_ll_data = 1e12
         else:
             preds_i, full_preds_i = model_obj._solve_ivp(
                 model_coeffs_i, ode_t0_val, time_mask_i, parallel=False
@@ -815,33 +815,46 @@ def _estimate_b_i(
             if error_model == 'additive':
                 n_t = len(y_i)
                 sum_sq_residuals = np.sum(residuals_i**2)
-                log_likelihood_data = -0.5 * (n_t * np.log(2 * np.pi) 
+                neg2_ll_data = (n_t * np.log(2 * np.pi) 
                                     + n_t * np.log(sigma2) 
                                     + sum_sq_residuals / sigma2)
-                assert len(log_likelihood_data) == 1
-                log_likelihood_data = log_likelihood_data[0]
+                assert len(neg2_ll_data) == 1
+                neg2_ll_data = neg2_ll_data[0]
             
-        diag_omega2 = np.diag(Omega2)
-        # This check is critical for the shrinkage problem!
-        if np.any(diag_omega2 <= 0):
-            return np.inf # Penalize non-positive definite Omega matrices
+        b_i_flat = b_i.flatten()
+        n_random_effects = len(b_i_flat)
 
-        sum_log_diag_omega2 = np.sum(np.log(diag_omega2))
-        b_i_flat = b_i.flatten() # Ensure b_i is 1D
-        prior_penalty = np.sum(b_i_flat**2 / diag_omega2)
+        try:
+            # 1. Decompose Omega2 into its Cholesky factor L.
+            # This serves as a robust check that Omega2 is valid (positive-definite).
+            L = np.linalg.cholesky(Omega2)
+            
+            # 2. Calculate the log-determinant from L.
+            log_det_omega2 = 2 * np.sum(np.log(np.diag(L)))
+            
+            # 3. Calculate the quadratic penalty term b_i.T * inv(Omega2) * b_i
+            # This is done by solving the linear system L*z = b_i for z, which is 
+            # equivalent to z = inv(L)*b_i. cho_solve is highly optimized for this.
+            z = cho_solve((L, True), b_i_flat) # The 'True' indicates L is lower-triangular
+            prior_penalty = b_i_flat @ z
 
-        log_likelihood_prior = -0.5 * (len(b_i_flat) * np.log(2 * np.pi) 
-                            + sum_log_diag_omega2 
-                            + prior_penalty)
+        except np.linalg.LinAlgError:
+            # This will trigger if the Omega2 from the outer loop is not positive-definite.
+            # This is the correct way to penalize an invalid Omega matrix.
+            return np.inf
+
+        neg2ll_prior = (n_random_effects * np.log(2 * np.pi) 
+                                      + log_det_omega2 
+                                      + prior_penalty)
         
         
-        debug_print(f"log_likelihood_data: {-log_likelihood_data}\n")
-        debug_print(f"log_likelihood_prior: {-log_likelihood_prior}\n")
+        debug_print(f"neg2 log_likelihood_data: {neg2_ll_data}\n")
+        debug_print(f"neg2 log_likelihood_prior: {neg2ll_prior}\n")
         debug_print(
-            f"total log_likelihood: {-log_likelihood_data - log_likelihood_prior}\n"
+            f"total neg2 log_likelihood: {neg2_ll_data + neg2ll_prior}\n"
         )
         debug_print("INNER OPTIMIZATION END ===================")
-        loss_out = -(log_likelihood_data + log_likelihood_prior)
+        loss_out = (neg2_ll_data + neg2ll_prior)
         return loss_out
 
     # y_i = model_obj.y[model_obj.y_groups == b_i_init.name] #b_i_init.name will contain subject id
@@ -897,22 +910,32 @@ def FOCE_approx_ll_loss(
     debug=None,
     debug_print=debug_print,
     focei = False,
+    use_full_omega = True,
     **kwargs,
 ):
     debug_print("Objective Call Start")
     y = np.copy(model_obj.y)
     y_groups_idx = np.copy(model_obj.y_groups)
     omegas_names = list(omegas.columns)
-    omegas = omegas.to_numpy(
-        dtype=np.float64
-    ).flatten()  # omegas as SD, we want Variance, thus **2 below
-    omegas2 = np.diag(
-        omegas**2
-    )  # FO assumes that there is no cov btwn the random effects, thus off diags are zero
+    omega_diag_names = list(model_obj.subject_level_intercept_sds.columns)
+    omegas_diag_size = model_obj.n_subject_level_intercept_sds
+    omegas = omegas.to_numpy(dtype = np.float64()).flatten()
+    if use_full_omega:
+        update_idx = model_obj.omega_lower_chol_idx
+        omegas_lchol = np.zeros((omegas_diag_size, omegas_diag_size), dtype = np.float64)
+        for idx, np_idx in enumerate(update_idx):
+            omegas_lchol[np_idx] = omegas[idx]
+        omegas2 = omegas_lchol @ omegas_lchol.T
+    else:
+          # omegas as SD, we want Variance, thus **2 below
+        omegas2 = np.diag(
+            omegas**2
+        )  # FO assumes that there is no cov btwn the random effects, thus off diags are zero
+        #this is not actually FO's assumption, but a simplification, 
     sigma = sigma.to_numpy(dtype=np.float64)[0]
     sigma2 = sigma**2
     n_individuals = len(model_obj.unique_groups)
-    n_random_effects = len(omegas_names)
+    n_random_effects = omegas_diag_size
     debug_print(
         "Inner Loop Optimizing b_i ================= INNER LOOP =================="
     )
@@ -930,11 +953,11 @@ def FOCE_approx_ll_loss(
         b_i_init = (
             FO_b_i_apprx.iloc[sub_idx, :].to_numpy().flatten()
             if FO_b_i_approx_exists
-            else np.zeros_like(omegas)
+            else np.zeros(n_random_effects)
         )
-        b_i_init_s = pd.Series(b_i_init, index=omegas_names, name=sub)
+        b_i_init_s = pd.Series(b_i_init, index=omega_diag_names, name=sub)
         b_i_init = pd.DataFrame(
-            b_i_init.reshape(1, -1), columns=omegas_names, dtype=pd.Float64Dtype()
+            b_i_init.reshape(1, -1), columns=omega_diag_names, dtype=pd.Float64Dtype()
         )
         b_i_init.columns = pd.MultiIndex.from_tuples(b_i_init.columns)
         thetas_i = thetas.iloc[sub_idx, :] if len(thetas) > 1 else thetas
@@ -966,7 +989,7 @@ def FOCE_approx_ll_loss(
             theta_data_i,
             sigma2,
             omegas2,
-            omegas_names,
+            omega_diag_names, 
             b_i_init,
             ode_t0_i,
             time_mask_i,
@@ -993,83 +1016,87 @@ def FOCE_approx_ll_loss(
     model_coeffs = model_obj._generate_pk_model_coeff_vectorized(
         combined_coeffs, thetas, theta_data
     )
+    if np.any(np.isinf(model_coeffs.to_numpy().flatten())):
+            neg2_ll = 1e12
+            preds = None
+            full_preds = None
+    else:
+        preds, full_preds = model_obj._solve_ivp(
+            model_coeffs,
+            parallel=False,
+        )
+        residuals = y - preds
 
-    preds, full_preds = model_obj._solve_ivp(
-        model_coeffs,
-        parallel=False,
-    )
-    residuals = y - preds
+        apprx_fprime_jac = False
+        central_diff_jac = True
+        J = estimate_jacobian(
+            combined_coeffs,
+            thetas,
+            theta_data,
+            omega_diag_names,
+            y,
+            model_obj,
+            use_fprime=apprx_fprime_jac,
+            use_cdiff=central_diff_jac,
+        )
 
-    apprx_fprime_jac = False
-    central_diff_jac = True
-    J = estimate_jacobian(
-        combined_coeffs,
-        thetas,
-        theta_data,
-        omegas_names,
-        y,
-        model_obj,
-        use_fprime=apprx_fprime_jac,
-        use_cdiff=central_diff_jac,
-    )
+        if model_obj.ode_t0_vals_are_subject_y0:
+            drop_idx = model_obj.subject_y0_idx
+            J = np.delete(J, drop_idx, axis=0)
+            residuals = np.delete(residuals, drop_idx)
+            y = np.delete(y, drop_idx)
+            y_groups_idx = np.delete(y_groups_idx, drop_idx)
 
-    if model_obj.ode_t0_vals_are_subject_y0:
-        drop_idx = model_obj.subject_y0_idx
-        J = np.delete(J, drop_idx, axis=0)
-        residuals = np.delete(residuals, drop_idx)
-        y = np.delete(y, drop_idx)
-        y_groups_idx = np.delete(y_groups_idx, drop_idx)
-
-    direct_det_cov = False
-    per_sub_direct_neg_ll = False
-    cholsky_cov = True
-    neg2_ll = estimate_neg_log_likelihood(
-        J,
-        y_groups_idx,
-        y,
-        residuals,
-        sigma2,
-        omegas2,
-        n_individuals,
-        n_random_effects,
-        model_obj,
-        cholsky_cov=cholsky_cov,
-        naive_cov_vec=direct_det_cov,
-        naive_cov_subj=per_sub_direct_neg_ll,
-    )
-    
-    if focei:
-        interaction_term = 0
-        calculation_successful = True 
-
-        # Loop through the inverse Hessians from your optimizer results
-        for hess_inv_i in b_i_hess_invs:
-            try:
-                # 1. Apply Cholesky directly to the INVERSE Hessian.
-                # This serves as our stability and convergence check.
-                L_inv_i = np.linalg.cholesky(hess_inv_i.todense())
-                
-                # 2. Calculate the log-determinant of the INVERSE Hessian.
-                logdet_H_inv_i = 2 * np.sum(np.log(np.diag(L_inv_i)))
-                
-                # 3. The log-determinant of H is the NEGATIVE of the above.
-                logdet_H_i = -logdet_H_inv_i
-                
-                interaction_term += logdet_H_i
-
-            except np.linalg.LinAlgError:
-                # This block executes if hess_inv_i is not positive-definite,
-                # indicating a failure in the inner optimization step.
-                calculation_successful = False
-                break
+        direct_det_cov = False
+        per_sub_direct_neg_ll = False
+        cholsky_cov = True
+        neg2_ll = estimate_neg_log_likelihood(
+            J,
+            y_groups_idx,
+            y,
+            residuals,
+            sigma2,
+            omegas2,
+            n_individuals,
+            n_random_effects,
+            model_obj,
+            cholsky_cov=cholsky_cov,
+            naive_cov_vec=direct_det_cov,
+            naive_cov_subj=per_sub_direct_neg_ll,
+        )
         
-    
-        neg2_ll = neg2_ll + interaction_term
-    debug_print(
-        "Objective Call Complete ============= OBEJECTIVE CALL COMPLETE ======================="
-    )
-    debug_print(f"Loss: {neg2_ll}\n")
-    debug_print(f"b_i_estimates: {b_i_estimates}\n")
+        if focei:
+            interaction_term = 0
+            calculation_successful = True 
+
+            # Loop through the inverse Hessians from your optimizer results
+            for hess_inv_i in b_i_hess_invs:
+                try:
+                    # 1. Apply Cholesky directly to the INVERSE Hessian.
+                    # This serves as our stability and convergence check.
+                    L_inv_i = np.linalg.cholesky(hess_inv_i.todense())
+                    
+                    # 2. Calculate the log-determinant of the INVERSE Hessian.
+                    logdet_H_inv_i = 2 * np.sum(np.log(np.diag(L_inv_i)))
+                    
+                    # 3. The log-determinant of H is the NEGATIVE of the above.
+                    logdet_H_i = -logdet_H_inv_i
+                    
+                    interaction_term += logdet_H_i
+
+                except np.linalg.LinAlgError as e:
+                    # This block executes if hess_inv_i is not positive-definite,
+                    # indicating a failure in the inner optimization step.
+                    calculation_successful = False
+                    raise e
+            
+        
+            neg2_ll = neg2_ll + interaction_term
+        debug_print(
+            "Objective Call Complete ============= OBEJECTIVE CALL COMPLETE ======================="
+        )
+        debug_print(f"Loss: {neg2_ll}\n")
+        debug_print(f"b_i_estimates: {b_i_estimates}\n")
     return neg2_ll, b_i_estimates, (preds, full_preds)
 
 def FOCEi_approx_ll_loss(
@@ -1083,6 +1110,7 @@ def FOCEi_approx_ll_loss(
     tqdm_bi=False,
     debug=None,
     debug_print=debug_print,
+    use_full_omega = True,
     **kwargs
 ):
 
@@ -1098,6 +1126,7 @@ def FOCEi_approx_ll_loss(
         debug=debug,
         debug_print=debug_print,
         focei = True,
+        use_full_omega = use_full_omega,
         **kwargs,)
     
     return res_collection
@@ -1397,10 +1426,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         minimize_method: Literal[*MINIMIZE_METHODS_NEW_CB] = "l-bfgs-b",
         batch_id: uuid.UUID = None,
         model_id: uuid.UUID = None,
-        use_full_omega = True
+        use_full_omega = True,
+        stiff_ode = True
     ):
         #defaults related to ODE solving
-        self.stiff_ode = None
+        self.stiff_ode = stiff_ode
         self.jax_ivp_closed_stiff_compiled_solver_= None
         self.jax_ivp_closed_stiff_solver_is_compiled = False
         self.jax_ivp_nonstiff_solver_is_compiled = False 
@@ -2628,7 +2658,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if not (self.jax_ivp_stiff_solver_is_compiled):
             diffrax_solver = Kvaerno5()
             
-            diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
+            diffrax_step_ctrl = PIDController(rtol=1e-6, atol=1e-6)
             dt0 = 0.1
             
             partial_solve_ivp = partial(
@@ -2848,7 +2878,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         ode_t0_vals=None,
         time_mask=None,
         timepoints=None,
-        stiff_ode = False,
         **kwargs):
         
         ode_t0_vals = self.ode_t0_vals if ode_t0_vals is None else ode_t0_vals
@@ -2887,7 +2916,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         parallel=False,
         parallel_n_jobs=None,
         timepoints=None,
-        stiff_ode = False,
     ):
         ode_t0_vals = self.ode_t0_vals if ode_t0_vals is None else ode_t0_vals
         time_mask = self.time_mask if time_mask is None else time_mask
@@ -2899,7 +2927,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             masses, concs = self._solve_ivp_jax(
                 model_coeffs = model_coeffs,
                 ode_t0_vals = ode_t0_vals, 
-                stiff_ode = stiff_ode
             )
             sol_full = np.array(masses, dtype = np.float64)
             sol_full[:,:,0] = concs
@@ -3014,7 +3041,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         subject_level_intercept_init_vals=None,
         parallel=None,
         parallel_n_jobs=None,
-        stiff_ode = False,
         use_full_omega = None
     ):
         # If we do not need to unpack sigma (ie. when the loss is just SSE, MSE, Huber etc)
@@ -3035,7 +3061,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 pop_coeffs, thetas, beta_data
             )
             preds, full_preds = self._solve_ivp(
-                model_coeffs, parallel=parallel, parallel_n_jobs=parallel_n_jobs, stiff_ode = stiff_ode
+                model_coeffs, parallel=parallel, parallel_n_jobs=parallel_n_jobs,
             )
             error = self.no_me_loss_function(self.y, preds, **self.no_me_loss_params)
         # If we DO need to unpack sigma, even without omegas, the unpacking logic is the same (ie. log-likelihood w/ or w/o mixed effects)
@@ -3080,7 +3106,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     pop_coeffs, thetas, beta_data
                 )
                 preds, full_preds = self._solve_ivp(
-                    model_coeffs, parallel=parallel, parallel_n_jobs=parallel_n_jobs, stiff_ode = stiff_ode
+                    model_coeffs, parallel=parallel, parallel_n_jobs=parallel_n_jobs,
                 )
                 error = self.no_me_loss_function(
                     self.y, preds, sigma, **self.no_me_loss_params
@@ -3094,7 +3120,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     beta_data,
                     self,
                     FO_b_i_apprx=subject_level_intercept_init_vals,
-                    stiff_ode = stiff_ode,
                     use_full_omega = use_full_omega
                 )
         # self.preds_opt_.append(preds)
@@ -3303,7 +3328,18 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             for each subject."""
             raise ValueError(error_str)
         return data
-
+    
+    def _record_params_idx(self, params, params_name, params_idx_start:int = None, params_idx:dict = None, ):
+        if params_idx is None:
+            params_idx = {}
+            params_idx_start = 0
+            params_idx_end = 0
+        params_idx_end = params_idx_start
+        params_idx_end = params_idx_end + params.to_numpy().flatten().shape[0]
+        params_idx[params_name] = (params_idx_start, params_idx_end)
+        return params_idx, params_idx_end
+        
+        
     #@profile
     def fit2(
         self,
@@ -3314,9 +3350,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         warm_start=False,
         fit_id: uuid.UUID = None,
         ci_level:np.float64 = 0.95, 
-        stiff_ode = False,
     ) -> Self:
-        self.stiff_ode = stiff_ode
         fit_id = uuid.uuid4() if fit_id is None else fit_id
         data = self._validate_data_chronology(data)
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data, )
@@ -3326,6 +3360,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if sigma_check_1 or sigma_check_2:
             sigma = pop_coeffs.iloc[:, [-1]]
             pop_coeffs = pop_coeffs.iloc[:, :-1]
+        
+        params_idx, next_start_idx = self._record_params_idx(pop_coeffs, 'pop')
+        
         init_params = [
             pop_coeffs.values,
         ]  # pop coeffs already includes sigma if needed, this is confusing
@@ -3366,6 +3403,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             )
             model_has_subj_level_effects = True
             mlflow_loss = self.me_loss_function
+            params_idx, next_start_idx = self._record_params_idx(sigma, 'sigma',
+                                         next_start_idx, params_idx)
         else:
             mlflow_loss = self.no_me_loss_function
             model_has_subj_level_effects = False
@@ -3406,6 +3445,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         for c_tuple in omegas.columns.to_list()
                     ]
                 )
+            params_idx, next_start_idx = self._record_params_idx(omegas, 'omega',
+                                         next_start_idx, params_idx)
         if len(thetas.values) > 0:
             init_params.append(thetas.values)
             theta_jax = thetas.to_dict(orient = 'list')
@@ -3426,6 +3467,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     for c_tuple in thetas.columns.to_list()
                 ]
             )
+            params_idx, next_start_idx = self._record_params_idx(thetas, 'theta',
+                                         next_start_idx, params_idx)
         theta_data_jax = theta_data.to_dict(orient = 'list')
         theta_data_jax = {i:jnp.array(theta_data_jax[i]) for i in theta_data_jax}
         #it would be possible to construct this when the class is initialized from 
