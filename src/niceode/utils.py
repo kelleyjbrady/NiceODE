@@ -593,23 +593,35 @@ def estimate_cov_chol(J, y_groups_idx, y, residuals, sigma2, omegas2, model_obj)
     # V_all = []
     log_det_V = 0
     L_all = []
-    for sub in model_obj.unique_groups:
-        filt = y_groups_idx == sub
-        J_sub = J[filt]
-        n_timepoints = len(J_sub)
-        R_i = sigma2 * np.eye(n_timepoints)  # Constant error
-        # Omega = np.diag(omegas**2) # Construct D matrix from omegas
-        V_i = R_i + J_sub @ omegas2 @ J_sub.T
+    try:
+        for sub in model_obj.unique_groups:
+            filt = y_groups_idx == sub
+            J_sub = J[filt]
+            n_timepoints = len(J_sub)
+            R_i = sigma2 * np.eye(n_timepoints)  # Constant error
+            # Omega = np.diag(omegas**2) # Construct D matrix from omegas
+            V_i = R_i + J_sub @ omegas2 @ J_sub.T
 
-        L_i, lower = cho_factor(V_i)  # Cholesky of each V_i
-        L_all.append(L_i)
-        log_det_V += 2 * np.sum(np.log(np.diag(L_i)))  # log|V_i|
+            L_i, lower = cho_factor(V_i)  # Cholesky of each V_i
+            L_all.append(L_i)
+            log_det_V += 2 * np.sum(np.log(np.diag(L_i)))  # log|V_i|
 
-    L_block = block_diag(*L_all)  # key change from before
-    V_inv_residuals = cho_solve((L_block, True), residuals)
-    neg2_ll_chol = (
-        log_det_V + residuals.T @ V_inv_residuals + len(y) * np.log(2 * np.pi)
-    )
+        L_block = block_diag(*L_all)  # key change from before
+        V_inv_residuals = cho_solve((L_block, True), residuals)
+        neg2_ll_chol = (
+            log_det_V + residuals.T @ V_inv_residuals + len(y) * np.log(2 * np.pi)
+        )
+        
+    except np.linalg.LinAlgError:
+        neg2_ll_chol = np.inf
+        print("Cholesky decomposition failed with args: ")
+        print(f"sub: {sub}")
+        print(f"J_sub: {J_sub}")
+        print(f"n_timepoints: {n_timepoints}")
+        print(f"R_i: {R_i}")
+        print(f"omegas2: {omegas2}")
+        print("Returning infinity.")
+
 
     return neg2_ll_chol
 
