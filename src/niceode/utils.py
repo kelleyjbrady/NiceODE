@@ -1016,6 +1016,7 @@ def FOCE_approx_ll_loss(
     model_coeffs = model_obj._generate_pk_model_coeff_vectorized(
         combined_coeffs, thetas, theta_data
     )
+    #check if the model coeffs are valid
     if np.any(np.isinf(model_coeffs.to_numpy().flatten())):
             neg2_ll = 1e12
             preds = None
@@ -1039,64 +1040,71 @@ def FOCE_approx_ll_loss(
             use_fprime=apprx_fprime_jac,
             use_cdiff=central_diff_jac,
         )
+        #check if the jacobian is valid
+        jcheck1 = not np.all(np.isfinite(J))
+        jcheck2 = np.all(J == 0)
+        if jcheck1 or jcheck2:
+            neg2_ll = 1e12
+            preds = None
+            full_preds = None
+        else:
+            if model_obj.ode_t0_vals_are_subject_y0:
+                drop_idx = model_obj.subject_y0_idx
+                J = np.delete(J, drop_idx, axis=0)
+                residuals = np.delete(residuals, drop_idx)
+                y = np.delete(y, drop_idx)
+                y_groups_idx = np.delete(y_groups_idx, drop_idx)
 
-        if model_obj.ode_t0_vals_are_subject_y0:
-            drop_idx = model_obj.subject_y0_idx
-            J = np.delete(J, drop_idx, axis=0)
-            residuals = np.delete(residuals, drop_idx)
-            y = np.delete(y, drop_idx)
-            y_groups_idx = np.delete(y_groups_idx, drop_idx)
-
-        direct_det_cov = False
-        per_sub_direct_neg_ll = False
-        cholsky_cov = True
-        neg2_ll = estimate_neg_log_likelihood(
-            J,
-            y_groups_idx,
-            y,
-            residuals,
-            sigma2,
-            omegas2,
-            n_individuals,
-            n_random_effects,
-            model_obj,
-            cholsky_cov=cholsky_cov,
-            naive_cov_vec=direct_det_cov,
-            naive_cov_subj=per_sub_direct_neg_ll,
-        )
-        
-        if focei:
-            interaction_term = 0
-            calculation_successful = True 
-
-            # Loop through the inverse Hessians from your optimizer results
-            for hess_inv_i in b_i_hess_invs:
-                try:
-                    # 1. Apply Cholesky directly to the INVERSE Hessian.
-                    # This serves as our stability and convergence check.
-                    L_inv_i = np.linalg.cholesky(hess_inv_i.todense())
-                    
-                    # 2. Calculate the log-determinant of the INVERSE Hessian.
-                    logdet_H_inv_i = 2 * np.sum(np.log(np.diag(L_inv_i)))
-                    
-                    # 3. The log-determinant of H is the NEGATIVE of the above.
-                    logdet_H_i = -logdet_H_inv_i
-                    
-                    interaction_term += logdet_H_i
-
-                except np.linalg.LinAlgError as e:
-                    # This block executes if hess_inv_i is not positive-definite,
-                    # indicating a failure in the inner optimization step.
-                    calculation_successful = False
-                    raise e
+            direct_det_cov = False
+            per_sub_direct_neg_ll = False
+            cholsky_cov = True
+            neg2_ll = estimate_neg_log_likelihood(
+                J,
+                y_groups_idx,
+                y,
+                residuals,
+                sigma2,
+                omegas2,
+                n_individuals,
+                n_random_effects,
+                model_obj,
+                cholsky_cov=cholsky_cov,
+                naive_cov_vec=direct_det_cov,
+                naive_cov_subj=per_sub_direct_neg_ll,
+            )
             
-        
-            neg2_ll = neg2_ll + interaction_term
-        debug_print(
-            "Objective Call Complete ============= OBEJECTIVE CALL COMPLETE ======================="
-        )
-        debug_print(f"Loss: {neg2_ll}\n")
-        debug_print(f"b_i_estimates: {b_i_estimates}\n")
+            if focei:
+                interaction_term = 0
+                calculation_successful = True 
+
+                # Loop through the inverse Hessians from your optimizer results
+                for hess_inv_i in b_i_hess_invs:
+                    try:
+                        # 1. Apply Cholesky directly to the INVERSE Hessian.
+                        # This serves as our stability and convergence check.
+                        L_inv_i = np.linalg.cholesky(hess_inv_i.todense())
+                        
+                        # 2. Calculate the log-determinant of the INVERSE Hessian.
+                        logdet_H_inv_i = 2 * np.sum(np.log(np.diag(L_inv_i)))
+                        
+                        # 3. The log-determinant of H is the NEGATIVE of the above.
+                        logdet_H_i = -logdet_H_inv_i
+                        
+                        interaction_term += logdet_H_i
+
+                    except np.linalg.LinAlgError as e:
+                        # This block executes if hess_inv_i is not positive-definite,
+                        # indicating a failure in the inner optimization step.
+                        calculation_successful = False
+                        raise e
+                
+            
+                neg2_ll = neg2_ll + interaction_term
+            debug_print(
+                "Objective Call Complete ============= OBEJECTIVE CALL COMPLETE ======================="
+            )
+            debug_print(f"Loss: {neg2_ll}\n")
+            debug_print(f"b_i_estimates: {b_i_estimates}\n")
     return neg2_ll, b_i_estimates, (preds, full_preds)
 
 def FOCEi_approx_ll_loss(
