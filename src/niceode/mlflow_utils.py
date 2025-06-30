@@ -220,7 +220,7 @@ def get_function_source_without_docstrings_or_comments(func_obj) -> str | None:
         return f"Error: An unexpected error occurred while processing '{func_name}': {e}"
 
 class MLflowCallback:
-    def __init__(self, objective_name:str, parameter_names):
+    def __init__(self, objective_name:str, parameter_names, use_full_omega:bool = True):
         self.iteration = 0
         self.objective_name = objective_name
         self.parameter_names = parameter_names
@@ -235,5 +235,8 @@ class MLflowCallback:
         mlflow.log_metric(self.objective_name,current_fun_val , step=self.iteration)
         [mlflow.log_metric(f'param_{self.parameter_names[idx]}_value', val, step = self.iteration)
          for idx, val in enumerate(intermediate_result.x)]
+    
+    def reconstruct_omega(intermediate_result):
+        raise NotImplementedError
 
 
