@@ -4,6 +4,8 @@ import sys
 import hashlib
 import mlflow
 from scipy.optimize import OptimizeResult
+import numpy as np
+import pandas as pd
 
 class _DocstringRemover(ast.NodeTransformer):
     """
@@ -220,10 +222,32 @@ def get_function_source_without_docstrings_or_comments(func_obj) -> str | None:
         return f"Error: An unexpected error occurred while processing '{func_name}': {e}"
 
 class MLflowCallback:
-    def __init__(self, objective_name:str, parameter_names, use_full_omega:bool = True):
+    def __init__(self, objective_name:str,
+                parameter_names,
+                params_idx,
+                omega_unpack_idx, 
+                omega_diag_size,
+                omega_diag_names,
+                omega_ltri_nodiag_names,
+                optimize_sigma_on_log_scale,
+                optimize_omega_on_log_scale,
+                 use_full_omega:bool = True,
+                 
+                 ):
         self.iteration = 0
         self.objective_name = objective_name
         self.parameter_names = parameter_names
+        self.params_idx = params_idx
+        self.omega_unpack_idx = omega_unpack_idx
+        self.omega_diag_size = omega_diag_size
+        self.optimize_sigma_on_log_scale = optimize_sigma_on_log_scale
+        self.optimize_omega_on_log_scale = optimize_omega_on_log_scale
+        self.use_full_omega = use_full_omega
+        self._cache_df = pd.DataFrame()
+        self.omega_diag_names = omega_diag_names
+        self.omega_ltri_nodiag_names = omega_ltri_nodiag_names
+        
+
     def __call__(self, intermediate_result:OptimizeResult):
         """
         Callback function to log metrics at each iteration.
@@ -235,8 +259,56 @@ class MLflowCallback:
         mlflow.log_metric(self.objective_name,current_fun_val , step=self.iteration)
         [mlflow.log_metric(f'param_{self.parameter_names[idx]}_value', val, step = self.iteration)
          for idx, val in enumerate(intermediate_result.x)]
+        pop_idx = self.params_idx['pop']
+        for idx in range(pop_idx[0], pop_idx[-1]):
+            mlflow.log_metric(f'exp_param_{self.parameter_names[idx]}_value',
+                              np.exp(intermediate_result.x[idx]),
+                              step = self.iteration)
+        
+        if self.use_full_omega:
+            omg, cor = self.reconstruct_omega(intermediate_result)
+            self.log_vals_names(omg[0].flatten(), omg[1])
+            self.log_vals_names(cor[0].flatten(), cor[1])
+            
+        if self.optimize_sigma_on_log_scale:
+            sigma_idx = self.params_idx['sigma']
+            for idx in range(sigma_idx[0], sigma_idx[-1]):
+                mlflow.log_metric(f'exp_param_{self.parameter_names[idx]}_value',
+                                np.exp(intermediate_result.x[idx]),
+                                step = self.iteration)
+        
+        
+    def reconstruct_omega(self, intermediate_result):
+        update_idx = self.omega_unpack_idx
+        omegas_idx = self.params_idx['omega']
+        omegas = intermediate_result.x[omegas_idx[0]:omegas_idx[-1]]
+        omegas_lchol = np.zeros((self.omega_diag_size, self.omega_diag_size), dtype = np.float64)
+        for idx, np_idx in enumerate(update_idx):
+            omegas_lchol[np_idx] = omegas[idx]
+        if self.optimize_omega_on_log_scale:
+            omegas_diag = np.diag(omegas_lchol)
+            omegas_diag = np.exp(omegas_diag)
+            np.fill_diagonal(omegas_lchol, omegas_diag)
+        omegas2 = omegas_lchol @ omegas_lchol.T
+        omegas1_diag = np.diag(omegas2)
+        omegas1_diag = np.sqrt(omegas1_diag)
+        sd_matrix = np.outer(omegas1_diag, omegas1_diag)
+        corr_matrix = np.copy(omegas2 / (sd_matrix + 1e-9))
+        corr_log_idx = np.tril_indices_from(corr_matrix, k=-1)
+        #omegas_log_idx = np.diag_indices_from(corr_matrix)
+        np.fill_diagonal(omegas2, omegas1_diag)
+
+        log_omegas = omegas1_diag
+
+        
+        log_corr = corr_matrix[corr_log_idx]
+
+        
+        return (log_omegas, self.omega_diag_names), (log_corr, self.omega_ltri_nodiag_names)
     
-    def reconstruct_omega(intermediate_result):
-        raise NotImplementedError
+    def log_vals_names(self, vals, names):
+        iter_obj = zip(vals, names)
+        for val, name in iter_obj:
+            mlflow.log_metric(name, val, step=self.iteration)
 
 

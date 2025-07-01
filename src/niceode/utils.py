@@ -904,9 +904,9 @@ def _estimate_b_i(
         columns=b_i_init.columns,
     )
     
-    hess_inv = result_b_i.hess_inv
+    #hess_inv = result_b_i.hess_inv
 
-    return b_i_estimated, hess_inv
+    return b_i_estimated, result_b_i
 
 
 #@profile
@@ -925,6 +925,7 @@ def FOCE_approx_ll_loss(
     use_full_omega = True,
     optimize_omega_on_log_scale = True,
     optmize_sigma_on_log_scale = True,
+    loss_is_apprx_neg2ll = False,
     **kwargs,
 ):
     debug_print("Objective Call Start")
@@ -963,6 +964,7 @@ def FOCE_approx_ll_loss(
     )
     b_i_estimates = []
     b_i_hess_invs = []
+    b_i_objfs = []
     if tqdm_bi:
         iter_obj = tqdm(model_obj.unique_groups)
     else:
@@ -1004,7 +1006,7 @@ def FOCE_approx_ll_loss(
         debug_print(f"omegas2: {omegas2}")
         debug_print("INNER LOOP VALUES IN END ===================")
 
-        b_i_est, b_i_hess_inv = _estimate_b_i(
+        b_i_est, result_b_i = _estimate_b_i(
             model_obj,
             pop_coeffs,
             thetas_i,
@@ -1018,115 +1020,125 @@ def FOCE_approx_ll_loss(
             y_i,
             sub,
         )
+        b_i_hess_inv = result_b_i.hess_inv
+        b_i_objf = result_b_i.fun
         b_i_estimates.append(b_i_est)
         b_i_hess_invs.append(b_i_hess_inv)
+        b_i_objfs.append(b_i_objf)
+
     b_i_estimates = pd.concat(b_i_estimates)
     b_i_estimates.columns = pd.MultiIndex.from_tuples(b_i_estimates.columns)
-
-    combined_coeffs = pd.DataFrame(
-        np.tile(pop_coeffs.values, (b_i_estimates.shape[0], 1)),
-        dtype=np.float64,
-        columns=pop_coeffs.columns,
-    )
-    for col in combined_coeffs.columns:
-        if col in b_i_estimates.columns:
-            # so much fuckery with these df . . .
-            combined_coeffs[col] = (
-                combined_coeffs[col].values + b_i_estimates[col].values.flatten()
-            )
-
-    model_coeffs = model_obj._generate_pk_model_coeff_vectorized(
-        combined_coeffs, thetas, theta_data
-    )
-    #check if the model coeffs are valid
-    if np.any(np.isinf(model_coeffs.to_numpy().flatten())):
-            neg2_ll = 1e12
-            preds = None
-            full_preds = None
-    else:
-        preds, full_preds = model_obj._solve_ivp(
-            model_coeffs,
-            parallel=False,
+    objf_cond_neg2ll = np.sum(np.array(b_i_objfs))
+    
+    if loss_is_apprx_neg2ll:
+        combined_coeffs = pd.DataFrame(
+            np.tile(pop_coeffs.values, (b_i_estimates.shape[0], 1)),
+            dtype=np.float64,
+            columns=pop_coeffs.columns,
         )
-        residuals = y - preds
+        for col in combined_coeffs.columns:
+            if col in b_i_estimates.columns:
+                # so much fuckery with these df . . .
+                combined_coeffs[col] = (
+                    combined_coeffs[col].values + b_i_estimates[col].values.flatten()
+                )
 
-        apprx_fprime_jac = False
-        central_diff_jac = True
-        J = estimate_jacobian(
-            combined_coeffs,
-            thetas,
-            theta_data,
-            omega_diag_names,
-            y,
-            model_obj,
-            use_fprime=apprx_fprime_jac,
-            use_cdiff=central_diff_jac,
+        model_coeffs = model_obj._generate_pk_model_coeff_vectorized(
+            combined_coeffs, thetas, theta_data
         )
-        #check if the jacobian is valid
-        jcheck1 = not np.all(np.isfinite(J))
-        jcheck2 = np.all(J == 0)
-        if jcheck1 or jcheck2:
-            neg2_ll = 1e12
-            preds = None
-            full_preds = None
+        #check if the model coeffs are valid
+        if np.any(np.isinf(model_coeffs.to_numpy().flatten())):
+                neg2_ll = 1e12
+                preds = None
+                full_preds = None
         else:
-            if model_obj.ode_t0_vals_are_subject_y0:
-                drop_idx = model_obj.subject_y0_idx
-                J = np.delete(J, drop_idx, axis=0)
-                residuals = np.delete(residuals, drop_idx)
-                y = np.delete(y, drop_idx)
-                y_groups_idx = np.delete(y_groups_idx, drop_idx)
+            preds, full_preds = model_obj._solve_ivp(
+                model_coeffs,
+                parallel=False,
+            )
+            residuals = y - preds
 
-            direct_det_cov = False
-            per_sub_direct_neg_ll = False
-            cholsky_cov = True
-            neg2_ll = estimate_neg_log_likelihood(
-                J,
-                y_groups_idx,
+            apprx_fprime_jac = False
+            central_diff_jac = True
+            J = estimate_jacobian(
+                combined_coeffs,
+                thetas,
+                theta_data,
+                omega_diag_names,
                 y,
-                residuals,
-                sigma2,
-                omegas2,
-                n_individuals,
-                n_random_effects,
                 model_obj,
-                cholsky_cov=cholsky_cov,
-                naive_cov_vec=direct_det_cov,
-                naive_cov_subj=per_sub_direct_neg_ll,
+                use_fprime=apprx_fprime_jac,
+                use_cdiff=central_diff_jac,
             )
-            
-            if focei:
-                interaction_term = 0
-                calculation_successful = True 
+            #check if the jacobian is valid
+            jcheck1 = not np.all(np.isfinite(J))
+            jcheck2 = np.all(J == 0)
+            if jcheck1 or jcheck2:
+                neg2_ll = 1e12
+                preds = None
+                full_preds = None
+            else:
+                if model_obj.ode_t0_vals_are_subject_y0:
+                    drop_idx = model_obj.subject_y0_idx
+                    J = np.delete(J, drop_idx, axis=0)
+                    residuals = np.delete(residuals, drop_idx)
+                    y = np.delete(y, drop_idx)
+                    y_groups_idx = np.delete(y_groups_idx, drop_idx)
 
-                # Loop through the inverse Hessians from your optimizer results
-                for hess_inv_i in b_i_hess_invs:
-                    try:
-                        # 1. Apply Cholesky directly to the INVERSE Hessian.
-                        # This serves as our stability and convergence check.
-                        L_inv_i = np.linalg.cholesky(hess_inv_i.todense())
-                        
-                        # 2. Calculate the log-determinant of the INVERSE Hessian.
-                        logdet_H_inv_i = 2 * np.sum(np.log(np.diag(L_inv_i)))
-                        
-                        # 3. The log-determinant of H is the NEGATIVE of the above.
-                        logdet_H_i = -logdet_H_inv_i
-                        
-                        interaction_term += logdet_H_i
-
-                    except np.linalg.LinAlgError as e:
-                        # This block executes if hess_inv_i is not positive-definite,
-                        # indicating a failure in the inner optimization step.
-                        calculation_successful = False
-                        raise e
+                direct_det_cov = False
+                per_sub_direct_neg_ll = False
+                cholsky_cov = True
+                neg2_ll = estimate_neg_log_likelihood(
+                    J,
+                    y_groups_idx,
+                    y,
+                    residuals,
+                    sigma2,
+                    omegas2,
+                    n_individuals,
+                    n_random_effects,
+                    model_obj,
+                    cholsky_cov=cholsky_cov,
+                    naive_cov_vec=direct_det_cov,
+                    naive_cov_subj=per_sub_direct_neg_ll,
+                )
                 
-            
-                neg2_ll = neg2_ll + interaction_term
-            debug_print(
-                "Objective Call Complete ============= OBEJECTIVE CALL COMPLETE ======================="
-            )
-            debug_print(f"Loss: {neg2_ll}\n")
-            debug_print(f"b_i_estimates: {b_i_estimates}\n")
+                
+                
+    else:
+        neg2_ll = objf_cond_neg2ll
+
+    if focei:
+        interaction_term = 0
+        calculation_successful = True 
+
+        # Loop through the inverse Hessians from your optimizer results
+        for hess_inv_i in b_i_hess_invs:
+            try:
+                # 1. Apply Cholesky directly to the INVERSE Hessian.
+                # This serves as our stability and convergence check.
+                L_inv_i = np.linalg.cholesky(hess_inv_i.todense())
+                
+                # 2. Calculate the log-determinant of the INVERSE Hessian.
+                logdet_H_inv_i = 2 * np.sum(np.log(np.diag(L_inv_i)))
+                
+                # 3. The log-determinant of H is the NEGATIVE of the above.
+                logdet_H_i = -logdet_H_inv_i
+                
+                interaction_term += logdet_H_i
+
+            except np.linalg.LinAlgError as e:
+                # This block executes if hess_inv_i is not positive-definite,
+                # indicating a failure in the inner optimization step.
+                calculation_successful = False
+                raise e
+        neg2_ll = neg2_ll + interaction_term
+        
+    debug_print(
+                    "Objective Call Complete ============= OBEJECTIVE CALL COMPLETE ======================="
+                )
+    debug_print(f"Loss: {neg2_ll}\n")
+    debug_print(f"b_i_estimates: {b_i_estimates}\n")
     return neg2_ll, b_i_estimates, (preds, full_preds)
 
 def FOCEi_approx_ll_loss(
@@ -1143,6 +1155,7 @@ def FOCEi_approx_ll_loss(
     use_full_omega = True,
     optimize_omega_on_log_scale = True,
     optmize_sigma_on_log_scale = True,
+    loss_is_apprx_neg2ll = False,
     **kwargs
 ):
 
@@ -1161,6 +1174,7 @@ def FOCEi_approx_ll_loss(
         use_full_omega = use_full_omega,
         optimize_omega_on_log_scale=optimize_omega_on_log_scale,
         optmize_sigma_on_log_scale = optmize_sigma_on_log_scale,
+        loss_is_apprx_neg2ll = loss_is_apprx_neg2ll,
         **kwargs,)
     
     return res_collection
@@ -2202,12 +2216,24 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         flat_lower_diag_idx = np.tril_indices_from(diag_eff)
         flat_lower_diag = diag_eff[flat_lower_diag_idx]
         rows, cols = flat_lower_diag_idx
+        lotril_no_diag_idx = np.tril_indices_from(diag_eff, k=-1)
+        ltril_rows, ltril_cols = lotril_no_diag_idx
+        ltril_rnames = subject_level_effect_sd.columns[ltril_rows]
+        ltril_cnames = subject_level_effect_sd.columns[ltril_cols]
+        ltril_names = tuple(zip(ltril_rnames, ltril_cnames))
         self.omega_lower_chol_idx = list(zip(rows, cols))
         row_names = subject_level_effect_sd.columns[rows]
         col_names = subject_level_effect_sd.columns[cols]
         cell_names = tuple(zip(row_names, col_names))
         flat_lower_diag = pd.DataFrame(flat_lower_diag.reshape(1,-1))
         flat_lower_diag.columns = pd.MultiIndex.from_tuples(cell_names)
+        self.omega_lower_diag_names = cell_names
+        self.cb_omega_diag_names =  [f"omega_{i[0]}" for i in 
+                                     list(subject_level_effect_sd.columns)]
+        ltril_names
+        self.cb_omega_ltri_nodiag_names = [
+            f"cor_omega{i[0][0]}_omega{i[1][0]}" for i in ltril_names
+        ]
         return flat_lower_diag
 
     def _assemble_pred_matrices_jax(self, init_params, theta_data):
@@ -3202,6 +3228,31 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         dump_obj.jax_ivp_pymcstiff_solver_is_compiled = False
         dump_obj.jax_ivp_pymcstiff_jittable_ = None
         
+        dump_obj.jax_ivp_closed_stiff_compiled_solver_= None
+        dump_obj.jax_ivp_closed_stiff_solver_is_compiled = False
+        dump_obj.jax_ivp_closed_stiff_jittable_ = None
+        
+
+        dump_obj.jax_ivp_pymcnonstiff_compiled_solver_ = None
+        dump_obj.jax_ivp_pymcnonstiff_solver_is_compiled = False
+        dump_obj.jax_ivp_pymcnonstiff_jittable_ = None
+        
+        dump_obj.jax_ivp_keys_stiff_solver_is_compiled = False
+        dump_obj.jax_ivp_keys_stiff_compiled_solver_ = None
+        dump_obj.jax_ivp_keys_stiff_jittable_ = None
+        
+        dump_obj.jax_ivp_pymcnonstiff_nondim_compiled_solver_ = None
+        dump_obj.jax_ivp_pymcnonstiff_nondim_solver_is_compiled = False
+        dump_obj.jax_ivp_pymcnonstiff_nondim_jittable_ = None
+        
+        dump_obj.jax_ivp_pymcnonstiff_hybrid_compiled_solver_ = None
+        dump_obj.jax_ivp_pymcnonstiff_hybrid_solver_is_compiled = False
+        dump_obj.jax_ivp_pymcnonstiff_hybrid_jittable_ = None
+        
+        dump_obj.jax_ivp_pymcstiff_nondim_compiled_solver_ = None
+        dump_obj.jax_ivp_pymcstiff_nondim_solver_is_compiled = False
+        dump_obj.jax_ivp_pymcstiff_nondim_jittable_ = None
+        
         return dump_obj
     
     def save_fitted_model(self, jb_file_name: str = None):
@@ -3328,7 +3379,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         self,
                         FO_b_i_apprx=self.subject_level_intercept_init_vals,
                         solve_for_omegas=True,
-                        use_full_omega = self.use_full_omega
+                        use_full_omega = self.use_full_omega,
+                        optimize_omega_on_log_scale = self.optimize_omega_on_log_scale,
+                        optimize_sigma_on_log_scale = self.optimize_sigma_on_log_scale,
                     )
                 else:
                     b_i_approx = self.b_i_approx
@@ -3531,6 +3584,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             )
             params_idx, next_start_idx = self._record_params_idx(thetas, 'theta',
                                          next_start_idx, params_idx)
+        self._fit_params_idx = deepcopy(params_idx)
         theta_data_jax = theta_data.to_dict(orient = 'list')
         theta_data_jax = {i:jnp.array(theta_data_jax[i]) for i in theta_data_jax}
         #it would be possible to construct this when the class is initialized from 
@@ -3650,7 +3704,15 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             mlflow.log_param('model_has_subj_effects', model_has_subj_level_effects)
             
             mlf_callback = MLflowCallback(objective_name=mlflow_loss.__name__, 
-                                          parameter_names=fit_result_summary['log_name'].values)
+                                          parameter_names=fit_result_summary['log_name'].values,
+                                          params_idx = params_idx,  
+                                          omega_unpack_idx = self.omega_lower_chol_idx, 
+                                          omega_diag_size = self.n_subject_level_intercept_sds,
+                                          omega_diag_names=self.cb_omega_diag_names,
+                                            omega_ltri_nodiag_names= self.cb_omega_ltri_nodiag_names,
+                                          optimize_sigma_on_log_scale = self.optimize_sigma_on_log_scale,
+                                          optimize_omega_on_log_scale = self.optimize_omega_on_log_scale,
+                                          )
             fit_with_jax = False
             if fit_with_jax:
                 raise NotImplementedError
