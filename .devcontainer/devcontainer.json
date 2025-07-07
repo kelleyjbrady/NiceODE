@@ -2,7 +2,7 @@
   "name": "PK Analysis Dev Environment w/ MLflow",
   "dockerComposeFile": [
       "../docker-compose.runtime.yml",
-      "../docker-compose.dev.yml"
+     // "../docker-compose.dev.yml" uncomment if working with local gemma 3
   ],
   
   "service": "dev", // The name of your development service in the compose file
