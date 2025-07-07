@@ -1069,6 +1069,142 @@ class OneCompartmentBolus_CL(PKBaseODE):
         return depvar_unit_result
     
     @staticmethod
+    def diffrax_mass_to_depvar_keys(pred_y_state0, args_pytree):
+        """
+        Converts the predicted mass in the central compartment to the dependent variable
+        (e.g., concentration), using a pytree for parameters.
+
+        Args:
+            pred_y_state0: The predicted mass in the central compartment.
+            args_pytree: A pytree (e.g., dict) containing the model parameter 'vd'.
+
+        Returns:
+            The calculated dependent variable (concentration).
+        """
+        vd = args_pytree['vd']
+        depvar_unit_result = pred_y_state0 / vd
+        return depvar_unit_result
+
+    @staticmethod
+    def nondim_diffrax_ode(t, y, args_tuple):
+        """
+        Defines the nondimensionalized ODE for the model.
+        For this model, dκ/dτ = -κ, where κ is the dimensionless mass
+        and τ is the dimensionless time. No parameters are needed.
+
+        Args:
+            t: Nondimensional time (τ).
+            y: Nondimensional state variables (κ).
+            args_tuple: An empty tuple, as no parameters remain in the ODE.
+            
+        Derivation:
+            1. Start with the dimensional ODE, defining the elimination rate constant $k_e = \frac{cl}{vd}$:
+               $$ \frac{d(CM)}{dt} = -k_e \cdot CM $$
+            2. Define dimensionless variables for mass ($\kappa$) and time ($\tau$). Mass is scaled by the initial dose ($D$), and time is scaled by the elimination rate constant ($k_e$):
+               $$ \kappa = \frac{CM}{D} \quad \implies \quad CM = \kappa \cdot D $$
+               $$ \tau = k_e \cdot t \quad \implies \quad t = \frac{\tau}{k_e} $$
+            3. Use the chain rule to substitute the dimensionless variables into the derivative:
+               $$ \frac{d(CM)}{dt} = \frac{d(\kappa \cdot D)}{d(\tau / k_e)} = D \cdot k_e \cdot \frac{d\kappa}{d\tau} $$
+            4. Substitute the expressions from steps 2 and 3 back into the original ODE from step 1:
+               $$ D \cdot k_e \cdot \frac{d\kappa}{d\tau} = -k_e \cdot (\kappa \cdot D) $$
+            5. Simplify the equation by canceling the dimensional terms ($D$ and $k_e$) from both sides, which yields the final nondimensional ODE:
+               $$ \frac{d\kappa}{d\tau} = -\kappa $$
+
+        Returns:
+            A JAX array of the derivatives of the nondimensional state variables.
+        """
+        kappa, = y
+        d_kappa_d_tau = -kappa
+        return jnp.array([d_kappa_d_tau])
+
+    @staticmethod
+    def nondim_to_concentration(kappa_trajectory, dimensional_params, dose_i):
+        """
+        Converts a nondimensional mass trajectory back to a dimensional concentration.
+
+        Args:
+            kappa_trajectory: The trajectory of the nondimensional mass (κ).
+            dimensional_params: A list or tuple of dimensional parameters [cl, vd].
+            dose_i: The initial dose administered.
+
+        Returns:
+            The dimensional concentration trajectory.
+        """
+        _cl, vd = dimensional_params
+        dimensional_mass_C = kappa_trajectory * dose_i
+        concentration = dimensional_mass_C / vd
+        return concentration
+
+    @staticmethod
+    def get_nondim_defs(dimensional_params: list):
+        """
+        Returns the definitions for the nondimensional parameters. For this model's
+        scaling, there are no remaining parameters in the nondimensional ODE.
+
+        Args:
+            dimensional_params: A list or tuple of dimensional parameters [cl, vd].
+
+        Returns:
+            An empty dictionary.
+        """
+        return {}
+
+    @staticmethod
+    def get_nondim_time(dimensional_params, dimensional_time):
+        """
+        Converts dimensional time to nondimensional time (τ).
+        τ = ke * t = (cl / vd) * t
+
+        Args:
+            dimensional_params: A list or tuple of dimensional parameters [cl, vd].
+            dimensional_time: The dimensional time vector.
+
+        Returns:
+            The nondimensional time vector (τ).
+        """
+        cl, vd = dimensional_params
+        ke = cl / vd
+        ke = ke.reshape((-1, 1))
+        tau = dimensional_time * ke
+        return tau
+
+    @staticmethod
+    def get_hybrid_nondim_defs(dimensional_params: dict):
+        """
+        Returns the definitions for hybrid nondimensional parameters, where only
+        state variables are scaled, not time. The resulting ODE is dκ/dt = -ke * κ.
+
+        Args:
+            dimensional_params: A dictionary of dimensional parameters {'cl': ..., 'vd': ...}.
+
+        Returns:
+            A dictionary defining the hybrid parameter 'ke'.
+        """
+        cl = dimensional_params['cl']
+        vd = dimensional_params['vd']
+        hybrid_param_formulas = {'ke': cl / vd}
+        return hybrid_param_formulas
+
+    @staticmethod
+    def hybrid_nondim_diffrax_ode(t, y, args_tuple):
+        """
+        Defines the hybrid nondimensional ODE, where time is dimensional.
+        dκ/dt = -ke * κ
+
+        Args:
+            t: Dimensional time.
+            y: Nondimensional state variables (κ).
+            args_tuple: A tuple containing the hybrid parameter 'ke'.
+
+        Returns:
+            A JAX array of the derivatives of the nondimensional state variables.
+        """
+        ke, = args_tuple
+        kappa, = y
+        d_kappa_dt = -ke * kappa
+        return jnp.array([d_kappa_dt])
+    
+    @staticmethod
     def summary_calculations(args_tuple: tuple) -> dict:
         """
         Calculates summary PK statistics. Same as OneCompartmentConc.
@@ -1243,6 +1379,74 @@ class OneCompartmentBolus_Ke(PKBaseODE):
         # vd_safe = jnp.where(jnp.abs(vd) < 1e-9, 1e-9, vd)
         depvar_unit_result = pred_y_state0 / vd
         return depvar_unit_result
+    
+    @staticmethod
+    def nondim_diffrax_ode(t, y, args_tuple):
+        """
+        Defines the nondimensionalized ODE for the model.
+        For this model, dκ/dτ = -κ, where κ is the dimensionless mass
+        and τ is the dimensionless time. No parameters are needed.
+
+        Derivation:
+            1. Start with the dimensional ODE:
+               $$ \frac{d(CM)}{dt} = -k_e \cdot CM $$
+            2. Define dimensionless variables for mass ($\kappa$) and time ($\tau$):
+               $$ \kappa = \frac{CM}{Dose} \quad \text{and} \quad \tau = k_e \cdot t $$
+            3. Substitute the dimensionless variables into the ODE using the chain rule:
+               $$ \frac{d(\kappa \cdot Dose)}{d(\tau / k_e)} = -k_e \cdot (\kappa \cdot Dose) $$
+               $$ Dose \cdot k_e \cdot \frac{d\kappa}{d\tau} = -k_e \cdot \kappa \cdot Dose $$
+            4. Simplify to get the final nondimensional ODE:
+               $$ \frac{d\kappa}{d\tau} = -\kappa $$
+        """
+        kappa, = y
+        d_kappa_d_tau = -kappa
+        return jnp.array([d_kappa_d_tau])
+
+    @staticmethod
+    def nondim_to_concentration(kappa_trajectory, dimensional_params, dose_i):
+        """
+        Converts a nondimensional mass trajectory back to a dimensional concentration.
+        """
+        _ke, vd = dimensional_params
+        dimensional_mass_C = kappa_trajectory * dose_i
+        concentration = dimensional_mass_C / vd
+        return concentration
+
+    @staticmethod
+    def get_nondim_defs(dimensional_params: list):
+        """
+        Returns definitions for nondimensional parameters. None are needed for this model.
+        """
+        return {}
+
+    @staticmethod
+    def get_nondim_time(dimensional_params, dimensional_time):
+        """
+        Converts dimensional time to nondimensional time (τ = ke * t).
+        """
+        ke, _vd = dimensional_params
+        ke = ke.reshape((-1, 1))
+        tau = dimensional_time * ke
+        return tau
+
+    @staticmethod
+    def get_hybrid_nondim_defs(dimensional_params: dict):
+        """
+        Returns definitions for hybrid nondimensional parameters (dκ/dt = -ke * κ).
+        """
+        ke = dimensional_params['ke']
+        hybrid_param_formulas = {'ke': ke}
+        return hybrid_param_formulas
+
+    @staticmethod
+    def hybrid_nondim_diffrax_ode(t, y, args_tuple):
+        """
+        Defines the hybrid nondimensional ODE, where time is dimensional.
+        """
+        ke, = args_tuple
+        kappa, = y
+        d_kappa_dt = -ke * kappa
+        return jnp.array([d_kappa_dt])
     
     @staticmethod
     def summary_calculations(args_tuple: tuple) -> dict:
@@ -1784,7 +1988,6 @@ class TwoCompartmentAbsorption(PKBaseODE):
         # v1_safe = jnp.where(jnp.abs(v1) < 1e-9, 1e-9, v1)
         depvar_unit_result = pred_y_state0 / v1
         return depvar_unit_result
-    
     
     
     @staticmethod
