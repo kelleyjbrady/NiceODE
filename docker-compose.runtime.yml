@@ -1,5 +1,12 @@
 #version: '3.8'
 
+networks:
+  pk-net:
+    driver: bridge
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.driver.mtu: "1400"
+
 services:
   db:
     image: postgres:15 # Or your preferred version
@@ -11,6 +18,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-yoursecurepassword}
       POSTGRES_DB: ${POSTGRES_DB:-mlflow_db}
     restart: unless-stopped
+    networks:
+      - pk-net
 
   mlflow-server:
     image: ${MLFLOW_IMAGE_TAG:-kelleyjbrady/mlflow-postgres:latest} # Reads from .env
@@ -34,14 +43,39 @@ services:
       --host 0.0.0.0
       --port 5000
     restart: unless-stopped
+    networks:
+      - pk-net
 
+  gemma-llm:
+    image: ${GEMMA_IMAGE_TAG}
+    container_name: pk_analysis_gemma_llm
+    restart: unless-stopped
+    volumes:
+      - hf_cache:/cache
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1 # Assign one GPU
+              capabilities: [gpu]
+    dns: # <<< ADD THIS BLOCK
+      - 8.8.8.8
+      - 1.0.0.1
+    networks:
+      - pk-net
+  
   dev:
     image: ${DEV_IMAGE_TAG:-kelleyjbrady/cuda-py:latest} # Reads from .env
     container_name: pk_analysis_dev_env # Unique name
     depends_on:
       - mlflow-server
+      - gemma-llm
     environment:
       - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+      - GEMMA_API_URL=http://gemma-llm:8000
       # Set user-specific ENV vars here that were previously in the Dockerfile's USER section
       - R_LIBS_USER=/home/vscode/R/library # For user R packages
       - PATH=/home/vscode/.local/bin:$PATH # If user installs tools
@@ -62,9 +96,13 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    networks:
+      - pk-net
 
 volumes:
   postgres_data:
     driver: local
   mlflow_artifacts:
+    driver: local
+  hf_cache:
     driver: local

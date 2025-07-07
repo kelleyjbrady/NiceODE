@@ -1,8 +1,10 @@
 {
   "name": "PK Analysis Dev Environment w/ MLflow",
   "dockerComposeFile": [
-      "../docker-compose.runtime.yml" // Path relative to this devcontainer.json file
+      "../docker-compose.runtime.yml",
+      "../docker-compose.dev.yml"
   ],
+  
   "service": "dev", // The name of your development service in the compose file
   "workspaceFolder": "/workspaces/PK-Analysis", // Target folder inside the container
 

@@ -1,0 +1,8 @@
+# This file provides development-only overrides
+services:
+  gemma-llm:
+
+    volumes:
+      - ../ode-cuda-container/gemma_llm/app:/app
+
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
