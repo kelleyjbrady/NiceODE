@@ -925,7 +925,7 @@ def FOCE_approx_ll_loss(
     use_full_omega = True,
     optimize_omega_on_log_scale = True,
     optmize_sigma_on_log_scale = True,
-    loss_is_apprx_neg2ll = False,
+    loss_is_apprx_neg2ll = True,
     **kwargs,
 ):
     debug_print("Objective Call Start")
@@ -1107,6 +1107,8 @@ def FOCE_approx_ll_loss(
                 
     else:
         neg2_ll = objf_cond_neg2ll
+        preds = None
+        full_preds = None
 
     if focei:
         interaction_term = 0
@@ -1486,7 +1488,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         use_full_omega = True,
         optimize_omega_on_log_scale = True,
         optimize_sigma_on_log_scale = True,
-        stiff_ode = True
+        stiff_ode = True,
+        center_log_scale_params = True,
     ):
         #defaults related to ODE solving
         self.stiff_ode = stiff_ode
@@ -1517,6 +1520,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.batch_id = uuid.uuid4() if batch_id is None else batch_id
         self.model_id = uuid.uuid4() if model_id is None else model_id
         self.model_name = model_name
+        self.center_log_scale_params = center_log_scale_params
         #uninitialized pk_model_class to use for signature inspection
         self._pk_model_class = pk_model_class
         #initialized pk_model_class to use with an ivp solver
@@ -1997,6 +2001,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             [self.ode_t0_time_val, self.global_tf_eval], dtype=np.float64
         )
 
+    
     def _unpack_prepare_thetas(
         self, model_param_dep_vars: pd.DataFrame, subject_data: pd.DataFrame
     ):
@@ -2019,6 +2024,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 theta_data_col = safe_signed_log(
                     subject_data[theta_name].values / row[ivc.allometric_norm_value]
                 )
+                
             else:
                 theta_data_col = subject_data[theta_name].values
             theta_data[col] = theta_data_col
@@ -3122,6 +3128,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self,
         params,
         beta_data,
+        init_params_for_scaling = None,
         subject_level_intercept_init_vals=None,
         parallel=None,
         parallel_n_jobs=None,
@@ -3130,6 +3137,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         optimize_sigma_on_log_scale = None,
     ):
         # If we do not need to unpack sigma (ie. when the loss is just SSE, MSE, Huber etc)
+        params = params + init_params_for_scaling
         if (self.n_subject_level_intercept_sds == 0) and (
             not self.no_me_loss_needs_sigma
         ):
@@ -3284,6 +3292,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         timepoints=None,
         subject_level_prediction=True,
         predict_unknown_t0=False,
+        return_loss = False,
     ):
         #force recompilation of ivp solver in case the timepoints in the 
         #prediction data are not those the model was trained with
@@ -3369,7 +3378,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 subject_coeffs = model_coeffs
                 # error = self.no_me_loss_function(self.y, preds, sigma, **self.no_me_loss_params)
             else:
-                if self.b_i_approx is None:
+                if (self.b_i_approx is None) or (return_loss):
                     error, b_i_approx, _ = self.me_loss_function(
                         pop_coeffs,
                         sigma,
@@ -3382,6 +3391,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         use_full_omega = self.use_full_omega,
                         optimize_omega_on_log_scale = self.optimize_omega_on_log_scale,
                         optimize_sigma_on_log_scale = self.optimize_sigma_on_log_scale,
+                        loss_is_apprx_neg2ll = True,
                     )
                 else:
                     b_i_approx = self.b_i_approx
@@ -3415,7 +3425,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             preds_out = full_preds
         else:
             preds_out = preds
-        return preds_out
+        
+        if return_loss:
+            out = (preds_out, error)
+        else:
+            out = preds_out
+        return out
 
     def _validate_data_chronology(
         self, data: pd.DataFrame, update_data_chronology: bool = False
@@ -3593,6 +3608,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 param_names,
             )
         init_params = np.concatenate(init_params, axis=1, dtype=np.float64).flatten()
+        if self.center_log_scale_params:
+            init_params_for_scaling = np.copy(init_params)
+            _init_params = np.zeros_like(init_params)
+        else:
+            init_params_for_scaling = np.zeros_like(init_params)
+            _init_params = np.copy(init_params)
         fit_result_summary['init_val'] = init_params
         fit_result_summary['lower_bound'] = [i[0] for i in self.bounds]
         fit_result_summary['upper_bound'] = [i[1] for i in self.bounds]
@@ -3602,6 +3623,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             return init_params_jax, theta_data_jax
         objective_function = partial(
             self._objective_function2,
+            init_params_for_scaling = init_params_for_scaling,
             subject_level_intercept_init_vals=subject_level_intercept_init_vals,
             parallel=parallel,
             parallel_n_jobs=parallel_n_jobs,
@@ -3712,6 +3734,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                             omega_ltri_nodiag_names= self.cb_omega_ltri_nodiag_names,
                                           optimize_sigma_on_log_scale = self.optimize_sigma_on_log_scale,
                                           optimize_omega_on_log_scale = self.optimize_omega_on_log_scale,
+                                          init_params_for_scaling = init_params_for_scaling,
                                           )
             fit_with_jax = False
             if fit_with_jax:
@@ -3720,7 +3743,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             else:
                 self.fit_result_ = optimize_with_checkpoint_joblib(
                     objective_function,
-                    init_params,
+                    _init_params,
                     n_checkpoint=n_iters_per_checkpoint,
                     checkpoint_filename=checkpoint_filename,
                     args=(theta_data,),
@@ -3763,7 +3786,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             
             # after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
             #
-            preds = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs)
+            preds, apprx_neg2ll = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs, return_loss = True)
+            mlflow.log_metric('final_apprx_neg2ll', apprx_neg2ll)
             pred_loss_sigma = (fit_result_summary
                                .loc[fit_result_summary['model_error'], 'best_fit_param_val'])
             pred_loss = neg2_log_likelihood_loss(self.y, preds, pred_loss_sigma)

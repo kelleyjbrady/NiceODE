@@ -231,7 +231,10 @@ class MLflowCallback:
                 omega_ltri_nodiag_names,
                 optimize_sigma_on_log_scale,
                 optimize_omega_on_log_scale,
+                init_params_for_scaling,
                  use_full_omega:bool = True,
+                 
+                 
                  
                  ):
         self.iteration = 0
@@ -246,6 +249,7 @@ class MLflowCallback:
         self._cache_df = pd.DataFrame()
         self.omega_diag_names = omega_diag_names
         self.omega_ltri_nodiag_names = omega_ltri_nodiag_names
+        self.init_params_for_scaling = init_params_for_scaling
         
 
     def __call__(self, intermediate_result:OptimizeResult):
@@ -257,16 +261,17 @@ class MLflowCallback:
         self.iteration += 1
         current_fun_val = intermediate_result.fun
         mlflow.log_metric(self.objective_name,current_fun_val , step=self.iteration)
+        uncentered_intermd_result = intermediate_result.x + self.init_params_for_scaling
         [mlflow.log_metric(f'param_{self.parameter_names[idx]}_value', val, step = self.iteration)
-         for idx, val in enumerate(intermediate_result.x)]
+         for idx, val in enumerate(uncentered_intermd_result)]
         pop_idx = self.params_idx['pop']
         for idx in range(pop_idx[0], pop_idx[-1]):
             mlflow.log_metric(f'exp_param_{self.parameter_names[idx]}_value',
-                              np.exp(intermediate_result.x[idx]),
+                              np.exp(uncentered_intermd_result[idx]),
                               step = self.iteration)
         
         if self.use_full_omega:
-            omg, cor = self.reconstruct_omega(intermediate_result)
+            omg, cor = self.reconstruct_omega(uncentered_intermd_result)
             self.log_vals_names(omg[0].flatten(), omg[1])
             self.log_vals_names(cor[0].flatten(), cor[1])
             
@@ -274,14 +279,14 @@ class MLflowCallback:
             sigma_idx = self.params_idx['sigma']
             for idx in range(sigma_idx[0], sigma_idx[-1]):
                 mlflow.log_metric(f'exp_param_{self.parameter_names[idx]}_value',
-                                np.exp(intermediate_result.x[idx]),
+                                np.exp(uncentered_intermd_result[idx]),
                                 step = self.iteration)
         
         
-    def reconstruct_omega(self, intermediate_result):
+    def reconstruct_omega(self, uncentered_intermd_result):
         update_idx = self.omega_unpack_idx
         omegas_idx = self.params_idx['omega']
-        omegas = intermediate_result.x[omegas_idx[0]:omegas_idx[-1]]
+        omegas = uncentered_intermd_result[omegas_idx[0]:omegas_idx[-1]]
         omegas_lchol = np.zeros((self.omega_diag_size, self.omega_diag_size), dtype = np.float64)
         for idx, np_idx in enumerate(update_idx):
             omegas_lchol[np_idx] = omegas[idx]

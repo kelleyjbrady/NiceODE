@@ -19,6 +19,7 @@ from niceode.utils import (CompartmentalModel,
                            )
 from niceode.diffeqs import OneCompartmentAbsorption
 import numpy as np
+import joblib as jb
 
 #%%
 
@@ -52,24 +53,24 @@ me_mod_fo =  CompartmentalModel(
                                 PopulationCoeffcient('ka', 
                                                     optimization_init_val=1.6, 
                                                     subject_level_intercept=True,
-                                                    optimization_lower_bound = np.log(1e-6),
-                                                    optimization_upper_bound = np.log(15),
+                                                    #optimization_lower_bound = np.log(1e-6),
+                                                    #optimization_upper_bound = np.log(15),
                                                     subject_level_intercept_sd_init_val = 0.6, 
                                                     subject_level_intercept_sd_upper_bound = 20,
                                                     subject_level_intercept_sd_lower_bound=1e-6
                                                     ),
                                 PopulationCoeffcient('cl',
                                                     optimization_init_val = 3,
-                                                    optimization_lower_bound = np.log(1e-4),
-                                                    optimization_upper_bound=np.log(25),
+                                                    #optimization_lower_bound = np.log(1e-4),
+                                                    #optimization_upper_bound=np.log(25),
                                                     subject_level_intercept=True, 
                                                     subject_level_intercept_sd_init_val = 0.3, 
                                                     subject_level_intercept_sd_upper_bound = 5,
                                                     subject_level_intercept_sd_lower_bound=1e-6
                                                     ),
-                                PopulationCoeffcient('vd', optimization_init_val = 35
-                                                    , optimization_lower_bound = np.log(.1)
-                                                    ,optimization_upper_bound=np.log(80), 
+                                PopulationCoeffcient('vd', optimization_init_val = 35,
+                                                    #, optimization_lower_bound = np.log(.1)
+                                                    #,optimization_upper_bound=np.log(80), 
                                                     subject_level_intercept=True, 
                                                     subject_level_intercept_sd_init_val = 0.1, 
                                                     subject_level_intercept_sd_upper_bound = 5,
@@ -95,12 +96,15 @@ me_mod_fo =  CompartmentalModel(
                                     minimize_method = 'COBYQA'
                                     )
 
-fit_model = False
+fit_model = True
 if fit_model:
     me_mod_fo = me_mod_fo.fit2(df, ci_level = None)
+else:
+    me_mod_fo = jb.load(r"/workspaces/PK-Analysis/debug/logs/fitted_model_cb_debug.jb.jb")
+
 
 #%%
-fit_pymc = False
+fit_pymc = True
 if fit_pymc:
 
     model = make_pymc_model(me_mod_fo,
@@ -134,7 +138,7 @@ me_mod_fo2 =  CompartmentalModel(
                                                     optimization_init_val=1.6, 
                                                     subject_level_intercept=True,
                                                     optimization_lower_bound = np.log(1e-6),
-                                                    optimization_upper_bound = np.log(15),
+                                                    optimization_upper_bound = np.log(50),
                                                     subject_level_intercept_sd_init_val = 0.6, 
                                                     subject_level_intercept_sd_upper_bound = 20,
                                                     subject_level_intercept_sd_lower_bound=1e-6
@@ -142,7 +146,7 @@ me_mod_fo2 =  CompartmentalModel(
                                 PopulationCoeffcient('cl',
                                                     optimization_init_val = 3,
                                                     optimization_lower_bound = np.log(1e-4),
-                                                    optimization_upper_bound=np.log(25),
+                                                    optimization_upper_bound=np.log(100),
                                                     subject_level_intercept=True, 
                                                     subject_level_intercept_sd_init_val = 0.3, 
                                                     subject_level_intercept_sd_upper_bound = 5,
@@ -164,6 +168,7 @@ me_mod_fo2 =  CompartmentalModel(
                                     no_me_loss_needs_sigma=True,
                                     me_loss_function=FOCE_approx_ll_loss,
                                     #optimizer_tol=None, 
+                                    optimizer_tol=1e-6,
                                     pk_model_class=OneCompartmentAbsorption, 
                                     model_error_sigma=PopulationCoeffcient('sigma'
                                                                             ,log_transform_init_val=False
@@ -173,13 +178,16 @@ me_mod_fo2 =  CompartmentalModel(
                                                                             ),
                                     #ode_solver_method='BDF'
                                     batch_id='theoph_test1',
-                                    minimize_method = 'COBYQA',
+                                    #minimize_method = 'COBYQA',
                                     use_full_omega=True
                                     )
 
-fit_model = False
+fit_model = True
 if fit_model:
     me_mod_fo2 = me_mod_fo2.fit2(df, ci_level = None)
+else:
+    me_mod_fo = jb.load(r"/workspaces/PK-Analysis/debug/logs/fitted_model_foce_lplc_loss.jb.jb")
+
 # %%
 me_mod_fo2i =  CompartmentalModel(
         model_name = "debug_theoph_abs_ka-clME-vd_FOCEi_nodep_dermal",
@@ -232,11 +240,11 @@ me_mod_fo2i =  CompartmentalModel(
                                     #ode_solver_method='BDF'
                                     batch_id='theoph_test1',
                                     #minimize_method = 'COBYQA',
-                                    optimizer_tol = 1e-8,
+                                    optimizer_tol = 1e-6,
                                     use_full_omega=True
                                     )
 
-fit_model = True
+fit_model = False
 if fit_model:
     me_mod_fo2i = me_mod_fo2i.fit2(df, ci_level = None)
 # %%
