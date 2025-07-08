@@ -232,6 +232,10 @@ class MLflowCallback:
                 optimize_sigma_on_log_scale,
                 optimize_omega_on_log_scale,
                 init_params_for_scaling,
+                total_n_params,
+                opt_params_combined_params_idx,
+                fixed_params_combined_params_idx,
+                fixed_params,
                  use_full_omega:bool = True,
                  
                  
@@ -250,6 +254,10 @@ class MLflowCallback:
         self.omega_diag_names = omega_diag_names
         self.omega_ltri_nodiag_names = omega_ltri_nodiag_names
         self.init_params_for_scaling = init_params_for_scaling
+        self.total_n_params = total_n_params
+        self.opt_params_combined_params_idx = opt_params_combined_params_idx
+        self.fixed_params_combined_params_idx = fixed_params_combined_params_idx
+        self.fixed_params = fixed_params
         
 
     def __call__(self, intermediate_result:OptimizeResult):
@@ -258,10 +266,14 @@ class MLflowCallback:
         'xk' is the current parameter vector.
         'intermediate_result' is an OptimizeResult object (for some methods like 'trust-constr').
         """
+        
+        combined_params = np.zeros(self.total_n_params)
+        combined_params[self.opt_params_combined_params_idx] = intermediate_result.x
+        combined_params[self.fixed_params_combined_params_idx] = self.fixed_params
         self.iteration += 1
         current_fun_val = intermediate_result.fun
         mlflow.log_metric(self.objective_name,current_fun_val , step=self.iteration)
-        uncentered_intermd_result = intermediate_result.x + self.init_params_for_scaling
+        uncentered_intermd_result = combined_params + self.init_params_for_scaling
         [mlflow.log_metric(f'param_{self.parameter_names[idx]}_value', val, step = self.iteration)
          for idx, val in enumerate(uncentered_intermd_result)]
         pop_idx = self.params_idx['pop']

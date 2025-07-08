@@ -47,6 +47,8 @@ class InitValsPdCols:
     subject_level_intercept_init_vals_column_name:str = "subject_level_intercept_init_vals_column_name" 
     subject_level_intercect_sd_lower_bound:str = "subject_level_intercect_sd_lower_bound" 
     subject_level_intercect_sd_upper_bound:str = "subject_level_intercect_sd_upper_bound" 
+    fix_param_value:str = "fix_param_value"
+    fix_subject_level_effect:str = "fix_subject_level_effect"
     
     def __post_init__(self, ):
         self.pd_dtypes = [
@@ -65,7 +67,9 @@ class InitValsPdCols:
         pd.Float64Dtype(), 
         pd.StringDtype(), 
         pd.Float64Dtype(), 
-        pd.Float64Dtype()   
+        pd.Float64Dtype(), 
+        pd.BooleanDtype(), 
+        pd.BooleanDtype()  
         ]
     def validate_df_row(self,df_row_dict:dict):
         new_keys = [i for i in df_row_dict]

@@ -77,6 +77,13 @@ fit <- nlmixr(one.cmt, theo_sd, est="foce",
 print(fit)
 ```
 
+
+```{r}
+fit_foce <- nlmixr(one.cmt, theo_sd, est="focei",
+                   control=foceiControl(interaction=FALSE, print=0))
+
+print(fit_foce) 
+```
 We can alternatively express the same model by ordinary differential
 equations (ODEs):
 

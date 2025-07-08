@@ -92,6 +92,7 @@ class ObjectiveFunctionColumn:
     optimization_history: list[np.float64] = field(default_factory=list)
     optimization_lower_bound: np.float64 = None
     optimization_upper_bound: np.float64 = None
+    fix_param_value:bool = False
 
     def __post_init__(self):
         log_name = self.coeff_name + '__' + self.column_name
@@ -160,7 +161,8 @@ class PopulationCoeffcient:
     subject_level_intercept_sd_upper_bound: np.float64 = None
     subject_level_intercept_opt_step_size: np.float64 = None
     subject_level_intercept_init_vals_column_name: str = None
-
+    fix_param_value:bool = False
+    fix_subject_level_effect = False
     def __post_init__(self):
         self.log_name = (self.coeff_name + "_pop" 
                          if self.log_name is None 
@@ -1490,6 +1492,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         optimize_sigma_on_log_scale = True,
         stiff_ode = True,
         center_log_scale_params = True,
+        use_surrogate_neg2ll = False
     ):
         #defaults related to ODE solving
         self.stiff_ode = stiff_ode
@@ -1521,6 +1524,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.model_id = uuid.uuid4() if model_id is None else model_id
         self.model_name = model_name
         self.center_log_scale_params = center_log_scale_params
+        self.use_surrogate_neg2ll = use_surrogate_neg2ll
         #uninitialized pk_model_class to use for signature inspection
         self._pk_model_class = pk_model_class
         #initialized pk_model_class to use with an ivp solver
@@ -1766,6 +1770,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 cols.population_coeff: True,
                 cols.model_error: False,
                 cols.init_val: pop_coeff.optimization_init_val,
+                cols.fix_param_value: pop_coeff.fix_param_value,
                 cols.model_coeff_lower_bound: pop_coeff.optimization_lower_bound,
                 cols.model_coeff_upper_bound: pop_coeff.optimization_upper_bound,
                 cols.allometric: False,
@@ -1773,6 +1778,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 cols.subject_level_intercept: pop_coeff.subject_level_intercept,
                 cols.subject_level_intercept_name: pop_coeff.subject_level_intercept_sd_name,
                 cols.subject_level_intercept_sd_init_val: pop_coeff.subject_level_intercept_sd_init_val,
+                cols.fix_subject_level_effect: pop_coeff.fix_subject_level_effect,
                 cols.subject_level_intercept_init_vals_column_name: pop_coeff.subject_level_intercept_init_vals_column_name,
                 cols.subject_level_intercect_sd_lower_bound: pop_coeff.subject_level_intercept_sd_lower_bound,
                 cols.subject_level_intercect_sd_upper_bound: pop_coeff.subject_level_intercept_sd_upper_bound,
@@ -1787,6 +1793,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     cols.population_coeff: False,
                     cols.model_error: True,
                     cols.init_val: self.model_error_sigma.optimization_init_val,
+                    cols.fix_param_value: self.model_error_sigma.fix_param_value,
                     cols.model_coeff_lower_bound: self.model_error_sigma.optimization_lower_bound,
                     cols.model_coeff_upper_bound: self.model_error_sigma.optimization_upper_bound,
                     cols.allometric: False,
@@ -1794,6 +1801,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     cols.subject_level_intercept: self.model_error_sigma.subject_level_intercept,
                     cols.subject_level_intercept_name: self.model_error_sigma.subject_level_intercept_sd_name,
                     cols.subject_level_intercept_sd_init_val: self.model_error_sigma.subject_level_intercept_sd_init_val,
+                    cols.fix_subject_level_effect: self.model_error_sigma.fix_subject_level_effect,
                     cols.subject_level_intercept_init_vals_column_name: self.model_error_sigma.subject_level_intercept_init_vals_column_name,
                     cols.subject_level_intercect_sd_lower_bound: self.model_error_sigma.subject_level_intercept_sd_lower_bound,
                     cols.subject_level_intercect_sd_upper_bound: self.model_error_sigma.subject_level_intercept_sd_upper_bound,
@@ -1818,6 +1826,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         cols.population_coeff: False,
                         cols.model_error: False,
                         cols.init_val: coeff_dep_var.optimization_init_val,
+                        cols.fix_param_value: coeff_dep_var.fix_param_value,
                         cols.model_coeff_lower_bound: coeff_dep_var.optimization_lower_bound,
                         cols.model_coeff_upper_bound: coeff_dep_var.optimization_upper_bound,
                         cols.allometric: True
@@ -1827,6 +1836,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         cols.subject_level_intercept: False,
                         cols.subject_level_intercept_name: None,
                         cols.subject_level_intercept_sd_init_val: None,
+                        cols.fix_subject_level_effect: None,
                         cols.subject_level_intercept_init_vals_column_name: None,
                         cols.subject_level_intercect_sd_lower_bound: None,
                         cols.subject_level_intercect_sd_upper_bound: None,
@@ -2007,6 +2017,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     ):
         thetas = pd.DataFrame()
         theta_data = pd.DataFrame()
+        theta_fix_status = {}
         ivc = self.init_vals_pd_cols
         for idx, row in model_param_dep_vars.iterrows():
             coeff_name = row[ivc.model_coeff]
@@ -2028,6 +2039,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             else:
                 theta_data_col = subject_data[theta_name].values
             theta_data[col] = theta_data_col
+            theta_fix_status = row[ivc.fix_param_value]
         thetas.columns = (
             pd.MultiIndex.from_tuples(thetas.columns)
             if len(thetas.columns) > 0
@@ -2038,14 +2050,20 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             if len(theta_data.columns) > 0
             else theta_data.columns
         )
+        
+        self.theta_fix_status = deepcopy(theta_fix_status)
+        
         return thetas, theta_data
 
     
     #@profile
     def _unpack_prepare_pop_coeffs(self, model_params: pd.DataFrame):
         pop_coeffs = pd.DataFrame()
+        pop_coeff_fix_status = {}
         subject_level_intercept_sds = pd.DataFrame(dtype=pd.Float64Dtype())
+        subject_level_effect_fix_status = {}
         subject_level_intercept_init_vals = pd.DataFrame(dtype=pd.Float64Dtype())
+        sigma_fix_status = {}
         ivc = self.init_vals_pd_cols
         for idx, row in model_params.iterrows():
             coeff_name = row[ivc.model_coeff]
@@ -2055,7 +2073,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     pd.Float64Dtype()
                 )
             pop_coeffs[coeff_name] = [row[ivc.init_val]]
-
+            pop_coeff_fix_status[coeff_name] = row[ivc.fix_param_value]
             if row[ivc.subject_level_intercept]: 
                 omega_name = row[ivc.subject_level_intercept_name]
                 col = (coeff_name, omega_name)
@@ -2067,7 +2085,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 subject_level_intercept_sds[col] = [
                     row[ivc.subject_level_intercept_sd_init_val] 
                 ]  # this is terrible, referencing the names like this
-                
+                subject_level_effect_fix_status[col] = row[ivc.fix_subject_level_effect]
                 init_vals_col = row[ivc.subject_level_intercept_init_vals_column_name]
                 if init_vals_col in self.subject_data.columns:
                     subject_level_intercept_init_vals[col] = (
@@ -2101,7 +2119,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             else:
                 sigma_tmp = self.model_error_sigma.optimization_init_val
             pop_coeffs[coeff_name] = sigma_tmp
-
+            pop_coeff_fix_status[coeff_name] = self.model_error_sigma.fix_param_value
+            sigma_fix_status[coeff_name] = self.model_error_sigma.fix_param_value
+        
+        self.sigma_fix_status = deepcopy(sigma_fix_status)
+        self.pop_coeff_fix_status = deepcopy(pop_coeff_fix_status)
+        self.subject_level_effect_fix_status = deepcopy(subject_level_effect_fix_status)
+        
+        
         return pop_coeffs, (
             subject_level_intercept_sds,
             subject_level_intercept_init_vals,
@@ -2216,6 +2241,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         )
     
     def _construct_init_omega_lower_chol(self, subject_level_effect_sd):
+        subject_level_effect_fix_status = {}
         n_eff = self.n_subject_level_intercept_sds
         self.n_lower_omega_lower_chol = int(n_eff * (n_eff + 1) / 2)
         diag_eff = np.diag(subject_level_effect_sd.to_numpy().flatten())
@@ -2240,6 +2266,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.cb_omega_ltri_nodiag_names = [
             f"cor_omega{i[0][0]}_omega{i[1][0]}" for i in ltril_names
         ]
+        for n in cell_names:
+            if n[0] == n[1]:
+                subject_level_effect_fix_status[n] = self.subject_level_effect_fix_status[n[0]]
+            else:
+                subject_level_effect_fix_status[n] = False
+        self.subject_level_effect_fix_status = deepcopy(subject_level_effect_fix_status)
         return flat_lower_diag
 
     def _assemble_pred_matrices_jax(self, init_params, theta_data):
@@ -3128,6 +3160,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self,
         params,
         beta_data,
+        fixed_params = None,
+        opt_params_combined_params_idx = None, 
+        fixed_params_combined_params_idx = None,
+        total_n_params = None,
         init_params_for_scaling = None,
         subject_level_intercept_init_vals=None,
         parallel=None,
@@ -3135,9 +3171,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         use_full_omega = None, 
         optimize_omega_on_log_scale = None,
         optimize_sigma_on_log_scale = None,
+        use_surrogate_neg2ll = None,
+        
     ):
         # If we do not need to unpack sigma (ie. when the loss is just SSE, MSE, Huber etc)
-        params = params + init_params_for_scaling
+        combined_params = np.zeros(total_n_params)
+        combined_params[opt_params_combined_params_idx] = params
+        combined_params[fixed_params_combined_params_idx] = fixed_params
+        params = combined_params + init_params_for_scaling
         if (self.n_subject_level_intercept_sds == 0) and (
             not self.no_me_loss_needs_sigma
         ):
@@ -3217,6 +3258,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     use_full_omega = use_full_omega, 
                     optimize_omega_on_log_scale = optimize_omega_on_log_scale,
                     optimize_sigma_on_log_scale = optimize_sigma_on_log_scale,
+                    use_surrogate_neg2ll = use_surrogate_neg2ll,
                 )
         # self.preds_opt_.append(preds)
         return error
@@ -3487,15 +3529,25 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         subject_level_intercept_init_vals = self.subject_level_intercept_init_vals
         sigma_check_1 = len(omegas.values) > 0
         sigma_check_2 = self.no_me_loss_needs_sigma
+        _pop_coeffs_fix_status = [self.pop_coeff_fix_status[i] 
+                                 for i in self.pop_coeff_fix_status]
+        theta_fix_status = [self.theta_fix_status[i] 
+                            for i in self.theta_fix_status]
+        subject_level_effect_fix_status = [self.subject_level_effect_fix_status[i]
+                                           for i in self.subject_level_effect_fix_status]
         if sigma_check_1 or sigma_check_2:
             sigma = pop_coeffs.iloc[:, [-1]]
+            sigma_fix_status = _pop_coeffs_fix_status[-1]
+            sigma_fix_status = [sigma_fix_status] if isinstance(sigma_fix_status, bool) else sigma_fix_status
             pop_coeffs = pop_coeffs.iloc[:, :-1]
-        
+            pop_coeffs_fix_status = _pop_coeffs_fix_status[:-1]
+            
         params_idx, next_start_idx = self._record_params_idx(pop_coeffs, 'pop')
         
         init_params = [
             pop_coeffs.values,
         ]  # pop coeffs already includes sigma if needed, this is confusing
+        init_params_fix_status = pop_coeffs_fix_status
         init_params_jax = pop_coeffs.to_dict(orient = 'list')
         init_params_jax = {(i,f"{i}_pop"):jnp.array(init_params_jax[i]) for i in init_params_jax}
         param_names = [
@@ -3513,6 +3565,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         ]
         if sigma_check_1 or sigma_check_2:
             init_params.append(sigma.values.reshape(1, -1))
+            init_params_fix_status.extend(sigma_fix_status)
             sigma_jax = sigma.to_dict(orient = 'list')
             sigma_jax = {(i,f"{i}_const"):jnp.array(sigma_jax[i]) for i in sigma_jax}
             init_params_jax.update(sigma_jax)
@@ -3540,6 +3593,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             model_has_subj_level_effects = False
         if len(omegas.values) > 0:
             init_params.append(omegas.values)
+            init_params_fix_status.extend(subject_level_effect_fix_status)
             omega_jax = omegas.to_dict(orient = 'list')
             omega_jax = {i:jnp.array(omega_jax[i]) for i in omega_jax}
             init_params_jax.update(omega_jax)
@@ -3579,6 +3633,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                          next_start_idx, params_idx)
         if len(thetas.values) > 0:
             init_params.append(thetas.values)
+            init_params_fix_status.extend(theta_fix_status)
             theta_jax = thetas.to_dict(orient = 'list')
             theta_jax = {i:jnp.array(theta_jax[i]) for i in theta_jax}
             init_params_jax.update(theta_jax)
@@ -3614,6 +3669,15 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         else:
             init_params_for_scaling = np.zeros_like(init_params)
             _init_params = np.copy(init_params)
+        _total_n_params = len(_init_params)
+        init_params_fix_status = np.array(init_params_fix_status)
+        _fixed_params = _init_params[init_params_fix_status]
+        _opt_params = _init_params[~init_params_fix_status]
+        fixed_params_combined_params_idx = np.argwhere(init_params_fix_status).flatten()
+        opt_params_combined_params_idx = np.argwhere(~init_params_fix_status).flatten()
+        _bounds = np.array(self.bounds)
+        _opt_bounds = _bounds[~init_params_fix_status]
+        _fixed_bounds = _bounds[init_params_fix_status]
         fit_result_summary['init_val'] = init_params
         fit_result_summary['lower_bound'] = [i[0] for i in self.bounds]
         fit_result_summary['upper_bound'] = [i[1] for i in self.bounds]
@@ -3629,6 +3693,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             parallel_n_jobs=parallel_n_jobs,
             use_full_omega = self.use_full_omega,
             optimize_omega_on_log_scale = self.optimize_omega_on_log_scale,
+            optimize_sigma_on_log_scale = self.optimize_sigma_on_log_scale,
+            use_surrogate_neg2ll = self.use_surrogate_neg2ll,
+            fixed_params = _fixed_params, 
+            fixed_params_combined_params_idx = fixed_params_combined_params_idx, 
+            opt_params_combined_params_idx = opt_params_combined_params_idx, 
+            total_n_params = _total_n_params
         )
         self.fit_id = fit_id
         id_str = self._generate_fitted_model_name(ignore_fit_status=True)
@@ -3735,6 +3805,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                           optimize_sigma_on_log_scale = self.optimize_sigma_on_log_scale,
                                           optimize_omega_on_log_scale = self.optimize_omega_on_log_scale,
                                           init_params_for_scaling = init_params_for_scaling,
+                                          fixed_params = _fixed_params, 
+                                            fixed_params_combined_params_idx = fixed_params_combined_params_idx, 
+                                            opt_params_combined_params_idx = opt_params_combined_params_idx, 
+                                            total_n_params = _total_n_params
                                           )
             fit_with_jax = False
             if fit_with_jax:
@@ -3743,14 +3817,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             else:
                 self.fit_result_ = optimize_with_checkpoint_joblib(
                     objective_function,
-                    _init_params,
+                    _opt_params,
                     n_checkpoint=n_iters_per_checkpoint,
                     checkpoint_filename=checkpoint_filename,
                     args=(theta_data,),
                     warm_start=warm_start,
                     minimize_method=self.minimize_method,
                     tol=self.optimizer_tol,
-                    bounds=self.bounds,
+                    bounds=_opt_bounds,
                     callback = mlf_callback
                     
                 )
@@ -3768,7 +3842,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             fit_result_summary["best_fit_param_val"] = fit_result_summary[
                 "best_fit_param_val"
             ].astype(pd.Float64Dtype())
-            fit_result_summary["best_fit_param_val"] = self.fit_result_.x
+            combined_params = np.zeros(_total_n_params)
+            combined_params[opt_params_combined_params_idx] = self.fit_result_.x
+            combined_params[fixed_params_combined_params_idx] = _fixed_params
+            final_params = combined_params + init_params_for_scaling
+            fit_result_summary["best_fit_param_val"] = final_params
             if ci_level is not None:
                 ci_df = self._generate_profile_ci(data=data)
                 fit_result_summary = fit_result_summary.merge(
