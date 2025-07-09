@@ -895,8 +895,9 @@ def _estimate_b_i(
         conditional_log_likelihood,
         b_i_init.values.flatten(),  # Initial guess for b_i (flattened)
         args=(y_i, pop_coeffs, thetas, beta_data, sigma2, Omega2, model_obj),
-        method="L-BFGS-B",
+        method="COBYQA",
         bounds=b_i_bounds,
+        tol = 1e-4
         # tol = 1e-6
     )
 
@@ -1482,7 +1483,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             optimization_upper_bound=20,
         ),
         model_error2:ModelError = None,
-        optimizer_tol=1e-4,
+        #optimizer_tol=1e-4,
+        #ode_solver_tol = 
+        significant_digits = 3,
         verbose=False,
         minimize_method: Literal[*MINIMIZE_METHODS_NEW_CB] = "l-bfgs-b",
         batch_id: uuid.UUID = None,
@@ -1587,11 +1590,17 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         self.bounds = self._unpack_upper_lower_bounds(self.model_error_sigma)
         self.no_me_loss_params = no_me_loss_params
-        self.optimizer_tol = optimizer_tol
-
+        self.significant_digits = significant_digits
+        self._initialize_tols(self.significant_digits)
+        
         # helper attributes possibly defined later
         self.fit_result_ = None
 
+    def _initialize_tols(self, significant_digits):
+        
+        self.optimizer_tol = 10**(-significant_digits - 1)
+        self.ode_solver_tol = .5 * (10**(-significant_digits - 2))
+    
     def _initialize_result_template(self, init_vals_pd):
         #pop_coeffs
         cols = self.init_vals_pd_cols
@@ -2754,7 +2763,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             #we should comprimise on precision, rather to speed
             #things up the tol of the outer optimizer should be 
             #increased as was done for the profiling optimizer. 
-            diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
+            diffrax_step_ctrl = PIDController(rtol=self.ode_solver_tol,
+                                              atol=self.ode_solver_tol)
             dt0 = 0.1
             
             partial_solve_ivp = partial(
@@ -2780,7 +2790,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if not (self.jax_ivp_stiff_solver_is_compiled):
             diffrax_solver = Kvaerno5()
             
-            diffrax_step_ctrl = PIDController(rtol=1e-6, atol=1e-6)
+            diffrax_step_ctrl = PIDController(rtol=self.ode_solver_tol,
+                                              atol=self.ode_solver_tol)
             dt0 = 0.1
             
             partial_solve_ivp = partial(
