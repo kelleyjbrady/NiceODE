@@ -236,7 +236,7 @@ class MLflowCallback:
                 opt_params_combined_params_idx,
                 fixed_params_combined_params_idx,
                 fixed_params,
-                 use_full_omega:bool = True,
+                 use_full_omega:bool,
                  
                  
                  
@@ -286,6 +286,13 @@ class MLflowCallback:
             omg, cor = self.reconstruct_omega(uncentered_intermd_result)
             self.log_vals_names(omg[0].flatten(), omg[1])
             self.log_vals_names(cor[0].flatten(), cor[1])
+        else:
+            if self.optimize_omega_on_log_scale:
+                omega_idx = self.params_idx['omega']
+                for idx in range(omega_idx[0], omega_idx[-1]):
+                    mlflow.log_metric(f'exp_param_{self.parameter_names[idx]}_value',
+                                    np.exp(uncentered_intermd_result[idx]),
+                                    step = self.iteration)
             
         if self.optimize_sigma_on_log_scale:
             sigma_idx = self.params_idx['sigma']
