@@ -44,14 +44,14 @@ def make_jittable_pk_coeff(expected_len_out):
 
 def _predict_jax_jacobian(
     jac_pop_coeff_values, # Differentiable argument: A tuple of JAX arrays
-    jac_pop_coeff_keys,   # Static argument: A tuple of string keys
+    pop_coeff_for_J_idx,   # Static argument: A tuple of string keys
     pop_coeffs,
-    pop_coeffs_order,
+    #pop_coeffs_order,
     data_contribution,
-    thetas,
-    theta_data,
+    #thetas,
+    #theta_data,
     ode_t0_vals,
-    gen_coeff_jit,
+    #gen_coeff_jit,
     compiled_ivp_solver_arr,
 ):
     """
@@ -61,16 +61,18 @@ def _predict_jax_jacobian(
     """
     # Reconstruct the dictionary from the static keys and differentiable values.
     # This keeps the non-differentiable structure separate from the values being traced.
-    jac_pop_coeffs = dict(zip(jac_pop_coeff_keys, jac_pop_coeff_values))
+    #jac_pop_coeffs = dict(zip(jac_pop_coeff_keys, jac_pop_coeff_values))
 
     # The rest of the function proceeds as before.
-    combined_pop_coeffs = {**pop_coeffs, **jac_pop_coeffs}
-    arrays_to_stack = tuple(combined_pop_coeffs[k] for k in pop_coeffs_order)
-    pop_coeffs_work = jnp.stack(arrays_to_stack).flatten()
+    #combined_pop_coeffs = {**pop_coeffs, **jac_pop_coeffs}
+    #arrays_to_stack = tuple(combined_pop_coeffs[k] for k in pop_coeffs_order)
+    #pop_coeffs_work = jnp.stack(arrays_to_stack).flatten()
     #model_coeffs_jit = gen_coeff_jit(
     #    pop_coeffs, thetas, theta_data,
     #)
-    model_coeffs_i = jnp.exp(data_contribution + pop_coeffs_work) + 1e-6
+    pop_coeffs_work = pop_coeffs.at[pop_coeff_for_J_idx].set(jac_pop_coeff_values)
+    
+    model_coeffs_i = jnp.exp(data_contribution + pop_coeffs_work)# + 1e-6
     #model_coeffs_jit = {i: model_coeffs_jit[i[0]] for i in pop_coeffs_order}
     #model_coeffs_jit_a = jnp.vstack([model_coeffs_jit[i] for i in model_coeffs_jit]).T
     
@@ -95,11 +97,12 @@ def _predict_jax_jacobian(
 def _estimate_jacobian_jax(
     jac_pop_coeffs, # The dictionary of coefficients to differentiate
     pop_coeffs,
-    pop_coeffs_order,
-    thetas,
-    theta_data,
+    #pop_coeffs_order,
+    pop_coeff_for_J_idx,
+    #thetas,
+    #theta_data,
     ode_t0_vals,
-    gen_coeff_jit,
+    #gen_coeff_jit,
     compiled_ivp_solver_arr,
     data_contribution,
 ):
@@ -107,23 +110,24 @@ def _estimate_jacobian_jax(
     Estimates the Jacobian using a properly defined custom_vjp to enforce
     the FO method's gradient behavior.
     """
-    jac_keys = tuple(jac_pop_coeffs.keys())
-    jac_values = tuple(jac_pop_coeffs.values())
+    #jac_keys = tuple(jac_pop_coeffs.keys())
+    #jac_values = tuple(jac_pop_coeffs.values())
 
     # Create a closure with all non-differentiated arguments using partial.
     # This safely separates static configuration from the dynamic values.
-    def predict_for_jacobian(jac_pop_coeff_values_tuple):
+    def predict_for_jacobian(jac_pop_coeffs):
         # We explicitly call the original prediction function, passing all
         # the closed-over variables from the parent scope.
         return _predict_jax_jacobian(
-            jac_pop_coeff_values=jac_pop_coeff_values_tuple,
-            jac_pop_coeff_keys=jac_keys,
+            jac_pop_coeff_values=jac_pop_coeffs,
+            pop_coeff_for_J_idx = pop_coeff_for_J_idx,
+            #jac_pop_coeff_keys=jac_keys,
             pop_coeffs=pop_coeffs,
-            pop_coeffs_order=pop_coeffs_order,
-            thetas=thetas,
-            theta_data=theta_data,
+            #pop_coeffs_order=pop_coeffs_order,
+            #thetas=thetas,
+            #theta_data=theta_data,
             ode_t0_vals=ode_t0_vals,
-            gen_coeff_jit=gen_coeff_jit,
+            #gen_coeff_jit=gen_coeff_jit,
             compiled_ivp_solver_arr=compiled_ivp_solver_arr,
             data_contribution=data_contribution,
         )
@@ -145,18 +149,18 @@ def _estimate_jacobian_jax(
         # The primal function took one argument (a tuple of values).
         # We must return a tuple containing one element: the gradient for that argument.
         # jax.tree_map is a robust way to create a matching pytree of Nones (zeros).
-        zero_grads = jax.tree.map(lambda x: None, jac_values)
+        zero_grads = jax.tree.map(lambda x: None, jac_pop_coeffs)
         return (zero_grads,)
 
     # Register the forward/backward rules with our local function
     jacobian_with_fo_grad.defvjp(jacobian_fwd, jacobian_bwd)
 
     # Execute our VJP-wrapped jacobian calculation
-    jacobian_as_pytree = jacobian_with_fo_grad(jac_values)
+    jacobian_as_pytree = jacobian_with_fo_grad(jac_pop_coeffs)
 
     # Reconstruct the final dictionary
-    jacobian_dict = dict(zip(jac_keys, jacobian_as_pytree))
-    return jacobian_dict
+    #jacobian_dict = dict(zip(jac_keys, jacobian_as_pytree))
+    return jacobian_as_pytree
 
 def _estimate_jacobian_finite_diff(
     jac_pop_coeffs,
@@ -351,6 +355,57 @@ def neg2_ll_chol_jit(
 
     return neg2_ll
 
+def estimate_ebes_jax(
+    padded_J, padded_residuals, time_mask, omegas2, sigma2
+):
+    """
+    Calculates the Empirical Bayes Estimates (EBEs) for all subjects in parallel.
+
+    Args:
+        padded_J: Padded Jacobian matrix.
+                  Shape: (n_individuals, max_obs, n_random_effects)
+        padded_residuals: Padded residuals.
+                          Shape: (n_individuals, max_obs)
+        time_mask: Boolean mask indicating valid (not padded) observations.
+                   Shape: (n_individuals, max_obs)
+        omegas2: Covariance matrix of the random effects (shared).
+                 Shape: (n_random_effects, n_random_effects)
+        sigma2: Variance of the residual error (shared).
+                Shape: scalar
+
+    Returns:
+        b_i_approx: The estimated EBEs for each individual.
+                    Shape: (n_individuals, n_random_effects)
+    """
+
+    # 1. Pre-calculate the inverse of omega^2 once (it's shared across all subjects)
+    # Using the pseudo-inverse (pinv) is more numerically stable than inv.
+    omega_inv = jnp.linalg.pinv(omegas2)
+
+    # 2. Define the estimation function for a SINGLE individual
+    def _calculate_single_b_i(J_sub, residuals_sub, mask_sub):
+        """Performs the EBE calculation for one subject."""
+        # Zero out the padded values to exclude them from calculations
+        J_masked = jnp.where(mask_sub[:, None], J_sub, 0)
+        residuals_masked = jnp.where(mask_sub, residuals_sub, 0)
+
+        # A = J'J + sigma^2 * Omega^-1
+        A = J_masked.T @ J_masked + sigma2 * omega_inv
+        # rhs = J' * residuals
+        rhs = J_masked.T @ residuals_masked
+
+        # Solve for b_i: A * b_i = rhs
+        b_i = jnp.linalg.solve(A, rhs)
+        return b_i
+
+    # 3. Use jax.vmap to apply the single-subject function to all subjects
+    # The in_axes argument tells vmap to map over the first axis of the
+    # padded arrays and the mask.
+    b_i_approx = jax.vmap(
+        _calculate_single_b_i, in_axes=(0, 0, 0)
+    )(padded_J, padded_residuals, time_mask)
+
+    return b_i_approx
 
 #@partial(jax.jit, static_argnames = ("params_order",
 #                                     "n_population_coeff", 
@@ -368,103 +423,43 @@ def neg2_ll_chol_jit(
 #                                    "theta_data_tensor_names"
 #                                     ))
 def FO_approx_ll_loss_jax(
-    params,
-    params_order,
+    pop_coeff, 
+    sigma2, 
+    omega2, 
+    theta, 
     theta_data,
-    theta_data_tensor,
-    theta_data_tensor_names,
+    #params,
+    #params_order,
+    #theta_data,
+    #theta_data_tensor,
+    #theta_data_tensor_names,
     padded_y,
     unpadded_y_len,
-    y_groups_idx, 
-    y_groups_unique,
-    n_population_coeff, 
-    pop_coeff_names,
-    n_subject_level_effects,
-    subject_level_effect_names,
-    sigma_names,
-    n_thetas,
-    theta_names,
+    #y_groups_idx, 
+    #y_groups_unique,
+    #n_population_coeff, 
+    #pop_coeff_names,
+    omega2_diag_size,
+    #subject_level_effect_names,
+    #sigma_names,
+    #n_thetas,
+    #theta_names,
     time_mask_y,
     time_mask_J,
-    compiled_ivp_solver_keys,
+    #compiled_ivp_solver_keys,
     compiled_ivp_solver_arr,
     ode_t0_vals,
-    compiled_gen_ode_coeff,
+    #compiled_gen_ode_coeff,
+    pop_coeff_for_J_idx,
     #compiled_ivp_predictor,
-    solve_for_omegas=False,
+    #solve_for_omegas=False,
 ):
-    # unpack some variables locally for clarity
     
-    #theta_data = jax.lax.stop_gradient(theta_data)
-    #theta_data_tensor = jax.lax.stop_gradient(theta_data_tensor)
-    #padded_y = jax.lax.stop_gradient(padded_y)
-    #unpadded_y_len = jax.lax.stop_gradient(unpadded_y_len)
-    #y_groups_idx = jax.lax.stop_gradient(y_groups_idx)
-    #y_groups_unique = jax.lax.stop_gradient(y_groups_unique)
-    #time_mask_y = jax.lax.stop_gradient(time_mask_y)
-    #time_mask_J = jax.lax.stop_gradient(time_mask_J)
-    #ode_t0_vals = jax.lax.stop_gradient(ode_t0_vals)
-    
-    
-    params_order_work = list(params_order)
-    params_work = {i:params[i] for i in params_order_work}
-    
-    pop_coeff_keys = tuple(params_order_work[:n_population_coeff])
-    pop_coeffs = {k:params_work[k] 
-                      for k in pop_coeff_keys}
-    pop_coeffs_order = pop_coeff_keys
-    pop_coeffs_work = jnp.array([pop_coeffs[k] for k in pop_coeff_keys]).flatten()
-      
-    start_idx = n_population_coeff
-    end_idx = start_idx + 1
-    sigma_keys = tuple(params_order_work[start_idx:end_idx])
-    sigma = {k: params_work[k] for k in sigma_keys}
-    
-    start_idx = end_idx
-    end_idx = start_idx + n_subject_level_effects
-    omegas_keys = tuple(params_order_work[start_idx:end_idx])
-    omegas = {k: params_work[k] for k in omegas_keys}
-    omegas_order = omegas_keys
-    
-    start_idx = end_idx
-    thetas_keys = tuple(params_order_work[start_idx:])
-    thetas_dict = {k: params_work[k] for k in thetas_keys}
-    thetas = jnp.array([thetas_dict[i] for i in thetas_dict]).flatten()
-    
-    thetas_work = jnp.zeros(len(theta_data_tensor_names))
-    for p_idx, p in enumerate(theta_data_tensor_names):
-        if p in thetas_keys:
-            thetas_work = thetas_work.at[p_idx].set(thetas_dict[p])
-        
 
-    # omegas are SD, we want Variance, thus **2 below
-    # FO assumes that there is no cov btwn the random effects, thus off diags are zero
-    #this is not actually FO's assumption, but a simplification,
-    omegas_values = jnp.array([omegas[k] for k in omegas_keys]).flatten()
-    omegas2 = jnp.diag(
-        omegas_values**2
-    ) 
-     
-    sigma_values = jnp.array([sigma[k] for k in sigma_keys]).flatten()
-    sigma2 = sigma_values**2
-    n_individuals = len(y_groups_unique)
-
-    data_contribution = thetas_work @ theta_data_tensor
+    data_contribution = theta @ theta_data
     
-    # ==================== DEBUGGING BLOCK ====================
-    # Insert this block right before the line that fails.
-    jax.debug.print("--- Inspecting shapes before addition ---")
-    jax.debug.print("pop_coeffs dictionary: {x}", x=pop_coeffs)
     
-    # Let's inspect the list that creates pop_coeffs_work
-    pop_coeffs_vals_list = [pop_coeffs[i] for i in pop_coeffs]
-    jax.debug.print("List of values from pop_coeffs: {x}", x=pop_coeffs_vals_list)
-
-    jax.debug.print("Shape of pop_coeffs_work: {x}", x=pop_coeffs_work.shape)
-    jax.debug.print("Shape of data_contribution: {x}", x=data_contribution.shape)
-    # =========================================================
-    
-    model_coeffs_i = jnp.exp(data_contribution + pop_coeffs_work) + 1e-6
+    model_coeffs_i = jnp.exp(data_contribution + pop_coeff)# + 1e-6
 
     padded_full_preds, padded_pred_y = compiled_ivp_solver_arr(
         ode_t0_vals,
@@ -474,14 +469,21 @@ def FO_approx_ll_loss_jax(
     
     masked_residuals = jnp.where(time_mask_y, padded_y - padded_pred_y, 0.0)
 
-    pop_coeffs_j = {i:pop_coeffs[i] for i in pop_coeffs if i[0] in [i[0] for i in omegas_order]}
+    pop_coeffs_j = pop_coeff[pop_coeff_for_J_idx]
 
     #this AD function does not work, leaving it though to make it easier to recall how to use it
-    j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
-                              thetas=thetas_dict, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
-                              gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
+    j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j,
+                               pop_coeffs=pop_coeff,
+                               pop_coeff_for_J_idx=pop_coeff_for_J_idx,
+                               #pop_coeffs_order=pop_coeffs_order,
+                              #thetas=thetas_dict,
+                              #theta_data = theta_data,
+                              ode_t0_vals=ode_t0_vals,
+                              #gen_coeff_jit=compiled_gen_ode_coeff,
+                              compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
                               data_contribution = data_contribution
                               )
+    jax.debug.print("j shape: {j}", j=j.shape)
     # j = _estimate_jacobian_finite_diff(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
     #                       thetas=thetas_dict, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
     #                          gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
@@ -489,8 +491,10 @@ def FO_approx_ll_loss_jax(
     #                          )
     
     # We create a dense J by stacking, then apply the mask to zero-out rows.
-    J_dense = jnp.stack([j[key] for key in pop_coeffs_j],axis = 2) #shape (n_subject, max_obs_per_subject, n_s)
+    J_dense = j #shape (n_subject, max_obs_per_subject, n_s)
     J = jnp.where(time_mask_J, J_dense, 0.0) # time_mask_J shape  (n_subject, max_obs_per_subject, n_s)
+    
+    
 
     # Estimate the covariance matrix, then estimate neg log likelihood
     neg2_ll = neg2_ll_chol_jit(
@@ -498,14 +502,13 @@ def FO_approx_ll_loss_jax(
         masked_residuals,  # Shape: (n_subjects, max_obs)
         time_mask_y,              # Shape: (n_subjects, max_obs)
         sigma2,            # Shape: scalar
-        omegas2,           # Shape: (n_effects, n_effects)
+        omega2,           # Shape: (n_effects, n_effects)
         unpadded_y_len,
     )
-
-    # if predicting or debugging, solve for the optimal b_i given the first order apprx
-    # perhaps b_i approx is off in the 2cmpt case bc the model was learned on t1+ w/
-    # t0 as the intial condition but now t0 is in the data w/out a conc in the DV
-    # col, this should make the resdiduals very wrong
-    b_i_approx = jnp.zeros((n_individuals, n_subject_level_effects))
+    jax.debug.print("neg2_ll: {neg2_ll}", neg2_ll=neg2_ll)
+    b_i_approx = estimate_ebes_jax(padded_J=J, padded_residuals=masked_residuals, 
+                                   time_mask=time_mask_y,
+                                   omegas2=omega2, sigma2=sigma2
+                                   )
 
     return neg2_ll, (b_i_approx, (padded_pred_y, padded_full_preds))
