@@ -84,6 +84,32 @@ fit_foce <- nlmixr(one.cmt, theo_sd, est="focei",
 
 print(fit_foce) 
 ```
+
+``` {r}
+pop_params <- list(
+  theta = fixef(fit_foce),  # Named vector of fixed effects
+  omega = fit_foce$omega,   # The full Omega matrix
+  sigma = fit_foce$parFixedDf["add.sd", "Est."] # The residual error
+)
+
+# 3. Extract the individual EBEs
+individual_ebes <- fit_foce$eta
+
+# 4. View the extracted components
+print("Population Theta values:")
+print(pop_params$theta)
+
+print("Omega Matrix:")
+print(pop_params$omega)
+
+print("Residual Error (sigma):")
+print(pop_params$sigma)
+
+print("Individual EBEs (first 6 subjects):")
+print(head(individual_ebes))
+
+```
+
 We can alternatively express the same model by ordinary differential
 equations (ODEs):
 

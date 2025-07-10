@@ -162,7 +162,7 @@ class PopulationCoeffcient:
     subject_level_intercept_opt_step_size: np.float64 = None
     subject_level_intercept_init_vals_column_name: str = None
     fix_param_value:bool = False
-    fix_subject_level_effect = False
+    fix_subject_level_effect:bool = False
     def __post_init__(self):
         self.log_name = (self.coeff_name + "_pop" 
                          if self.log_name is None 
@@ -816,7 +816,9 @@ def _estimate_b_i(
             combined_coeffs, thetas, beta_data, expected_len_out=1
         )
         # Solve the ODEs for this individual
-        if np.any(np.isinf(model_coeffs_i.to_numpy().flatten())):
+        bail_check1 = np.any(np.isinf(model_coeffs_i.to_numpy().flatten()))
+        bail_check2 = np.any(model_coeffs_i.to_numpy().flatten() < 1e-9)
+        if bail_check1 or bail_check2:
             neg2_ll_data = 1e12
         else:
             preds_i, full_preds_i = model_obj._solve_ivp(
@@ -895,9 +897,9 @@ def _estimate_b_i(
         conditional_log_likelihood,
         b_i_init.values.flatten(),  # Initial guess for b_i (flattened)
         args=(y_i, pop_coeffs, thetas, beta_data, sigma2, Omega2, model_obj),
-        method="COBYQA",
+        method="L-BFGS-B",
         bounds=b_i_bounds,
-        tol = 1e-4
+        #tol = 1e-4
         # tol = 1e-6
     )
 
@@ -928,9 +930,10 @@ def FOCE_approx_ll_loss(
     use_full_omega = True,
     optimize_omega_on_log_scale = True,
     optmize_sigma_on_log_scale = True,
-    loss_is_apprx_neg2ll = True,
+    use_surrogate_neg2ll = False,
     **kwargs,
 ):
+    loss_is_apprx_neg2ll = not use_surrogate_neg2ll
     debug_print("Objective Call Start")
     y = np.copy(model_obj.y)
     y_groups_idx = np.copy(model_obj.y_groups)
@@ -1050,7 +1053,9 @@ def FOCE_approx_ll_loss(
             combined_coeffs, thetas, theta_data
         )
         #check if the model coeffs are valid
-        if np.any(np.isinf(model_coeffs.to_numpy().flatten())):
+        bail_check1 = np.any(np.isinf(model_coeffs.to_numpy().flatten()))
+        bail_check2 = np.any(model_coeffs.to_numpy().flatten() < 1e-9)
+        if bail_check1 or bail_check2:
                 neg2_ll = 1e12
                 preds = None
                 full_preds = None
@@ -1236,67 +1241,74 @@ def FO_approx_ll_loss(
     model_coeffs = model_obj._generate_pk_model_coeff_vectorized(
         pop_coeffs, thetas, theta_data
     )
-    # would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`)
-    # prepopulated with partial
-    preds, full_preds = model_obj._solve_ivp(
-        model_coeffs,
-        parallel=False,
-    )
-    residuals = y - preds
+    bail_check1 = np.any(np.isinf(model_coeffs.to_numpy().flatten()))
+    bail_check2 = np.any(model_coeffs.to_numpy().flatten() < 1e-9)
+    if bail_check1 or bail_check2:
+        neg2_ll = 1e12
+        preds = None
+        full_preds = None
+    else:
+        # would be good to create wrapper methods inside of the model obj with these args (eg. `parallel = model_obj.parallel`)
+        # prepopulated with partial
+        preds, full_preds = model_obj._solve_ivp(
+            model_coeffs,
+            parallel=False,
+        )
+        residuals = y - preds
 
-    # estimate jacobian
-    # there is something going on with the way this is filtered to use fprime and
-    # when there are multiple omegas
-    apprx_fprime_jac = False
-    central_diff_jac = True
-    use_adaptive = True
-    J = estimate_jacobian(
-        pop_coeffs,
-        thetas,
-        theta_data,
-        omega_diag_names,
-        y,
-        model_obj,
-        use_fprime=apprx_fprime_jac,
-        use_cdiff=central_diff_jac,
-        use_adaptive=use_adaptive,
-    )
+        # estimate jacobian
+        # there is something going on with the way this is filtered to use fprime and
+        # when there are multiple omegas
+        apprx_fprime_jac = False
+        central_diff_jac = True
+        use_adaptive = True
+        J = estimate_jacobian(
+            pop_coeffs,
+            thetas,
+            theta_data,
+            omega_diag_names,
+            y,
+            model_obj,
+            use_fprime=apprx_fprime_jac,
+            use_cdiff=central_diff_jac,
+            use_adaptive=use_adaptive,
+        )
 
-    if np.all(J == 0):
-        raise ValueError("All elements of the Jacobian are zero")
-    # drop initial values from relevant arrays if `model_obj.ode_t0_vals_are_subject_y0`
-    # perfect predictions can cause issues during optimization and also add no information to the loss
-    # If there are any subjects with only one data point this will fail by dropping the entire subject
-    if model_obj.ode_t0_vals_are_subject_y0:
-        drop_idx = model_obj.subject_y0_idx
-        J = np.delete(J, drop_idx, axis=0)
-        residuals = np.delete(residuals, drop_idx)
-        y = np.delete(y, drop_idx)
-        y_groups_idx = np.delete(y_groups_idx, drop_idx)
+        if np.all(J == 0):
+            raise ValueError("All elements of the Jacobian are zero")
+        # drop initial values from relevant arrays if `model_obj.ode_t0_vals_are_subject_y0`
+        # perfect predictions can cause issues during optimization and also add no information to the loss
+        # If there are any subjects with only one data point this will fail by dropping the entire subject
+        if model_obj.ode_t0_vals_are_subject_y0:
+            drop_idx = model_obj.subject_y0_idx
+            J = np.delete(J, drop_idx, axis=0)
+            residuals = np.delete(residuals, drop_idx)
+            y = np.delete(y, drop_idx)
+            y_groups_idx = np.delete(y_groups_idx, drop_idx)
 
-    # Estimate the covariance matrix, then estimate neg log likelihood
-    direct_det_cov = False
-    per_sub_direct_neg_ll = False
-    cholsky_cov = True
-    neg2_ll = estimate_neg_log_likelihood(
-        J,
-        y_groups_idx,
-        y,
-        residuals,
-        sigma2,
-        omegas2,
-        n_individuals,
-        n_random_effects,
-        model_obj,
-        cholsky_cov=cholsky_cov,
-        naive_cov_vec=direct_det_cov,
-        naive_cov_subj=per_sub_direct_neg_ll,
-    )
+        # Estimate the covariance matrix, then estimate neg log likelihood
+        direct_det_cov = False
+        per_sub_direct_neg_ll = False
+        cholsky_cov = True
+        neg2_ll = estimate_neg_log_likelihood(
+            J,
+            y_groups_idx,
+            y,
+            residuals,
+            sigma2,
+            omegas2,
+            n_individuals,
+            n_random_effects,
+            model_obj,
+            cholsky_cov=cholsky_cov,
+            naive_cov_vec=direct_det_cov,
+            naive_cov_subj=per_sub_direct_neg_ll,
+        )
 
-    # if predicting or debugging, solve for the optimal b_i given the first order apprx
-    # perhaps b_i approx is off in the 2cmpt case bc the model was learned on t1+ w/
-    # t0 as the intial condition but now t0 is in the data w/out a conc in the DV
-    # col, this should make the resdiduals very wrong
+        # if predicting or debugging, solve for the optimal b_i given the first order apprx
+        # perhaps b_i approx is off in the 2cmpt case bc the model was learned on t1+ w/
+        # t0 as the intial condition but now t0 is in the data w/out a conc in the DV
+        # col, this should make the resdiduals very wrong
     b_i_approx = np.zeros((n_individuals, n_random_effects))
     if solve_for_omegas:
         for sub_idx, sub in enumerate(model_obj.unique_groups):
@@ -2133,7 +2145,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         self.sigma_fix_status = deepcopy(sigma_fix_status)
         self.pop_coeff_fix_status = deepcopy(pop_coeff_fix_status)
-        self.subject_level_effect_fix_status = deepcopy(subject_level_effect_fix_status)
+        self.omega_diag_subject_level_effect_fix_status = deepcopy(subject_level_effect_fix_status)
         
         
         return pop_coeffs, (
@@ -2240,8 +2252,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         # this is too many things to return in this manner
         if self.use_full_omega:
             omegas_out = self.subject_level_lower_chol.copy()
+            self.subject_level_effect_fix_status = deepcopy(self.full_omega_subject_level_effect_fix_status)
         else:
             omegas_out = self.subject_level_intercept_sds.copy()
+            self.subject_level_effect_fix_status = deepcopy(self.omega_diag_subject_level_effect_fix_status)
         return (
             pop_coeffs.copy(),
             omegas_out.copy(),
@@ -2277,10 +2291,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         ]
         for n in cell_names:
             if n[0] == n[1]:
-                subject_level_effect_fix_status[n] = self.subject_level_effect_fix_status[n[0]]
+                subject_level_effect_fix_status[n] = self.omega_diag_subject_level_effect_fix_status[n[0]]
             else:
-                subject_level_effect_fix_status[n] = False
-        self.subject_level_effect_fix_status = deepcopy(subject_level_effect_fix_status)
+                subject_level_effect_fix_status[n] = False #There is currently not a way to parameterize these, thus have to let them opt from zero. 
+        self.full_omega_subject_level_effect_fix_status = deepcopy(subject_level_effect_fix_status)
         return flat_lower_diag
 
     def _assemble_pred_matrices_jax(self, init_params, theta_data):
@@ -2372,7 +2386,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         td_tensor = np.stack(td_tensor, axis = 2)   
     #@profile
     def _generate_pk_model_coeff_vectorized(
-        self, pop_coeffs, thetas, theta_data, expected_len_out=None
+        self, pop_coeffs, thetas, theta_data, expected_len_out=None, 
+        regularization_constant = 0.0
     ):
         use_jax = False
         expected_len_out = (
@@ -2395,7 +2410,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     else np.zeros_like(pop_coeff)
                 )
                 data_contribution = (X @ theta)
-                out = np.exp(data_contribution + pop_coeff)   + 1e-6
+                out = np.exp(data_contribution + pop_coeff)   + regularization_constant
                 if len(out) != expected_len_out:
                     out = np.repeat(out, expected_len_out)
                 if c not in model_coeffs.columns:
@@ -2763,8 +2778,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             #we should comprimise on precision, rather to speed
             #things up the tol of the outer optimizer should be 
             #increased as was done for the profiling optimizer. 
-            diffrax_step_ctrl = PIDController(rtol=self.ode_solver_tol,
-                                              atol=self.ode_solver_tol)
+            diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
             dt0 = 0.1
             
             partial_solve_ivp = partial(
@@ -2790,8 +2804,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if not (self.jax_ivp_stiff_solver_is_compiled):
             diffrax_solver = Kvaerno5()
             
-            diffrax_step_ctrl = PIDController(rtol=self.ode_solver_tol,
-                                              atol=self.ode_solver_tol)
+            diffrax_step_ctrl = PIDController(rtol=1e-6, atol=1e-6)
             dt0 = 0.1
             
             partial_solve_ivp = partial(
@@ -3185,11 +3198,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         use_surrogate_neg2ll = None,
         
     ):
-        # If we do not need to unpack sigma (ie. when the loss is just SSE, MSE, Huber etc)
+        #combine the fixed and unfixed params
         combined_params = np.zeros(total_n_params)
         combined_params[opt_params_combined_params_idx] = params
         combined_params[fixed_params_combined_params_idx] = fixed_params
         params = combined_params + init_params_for_scaling
+        # If we do not need to unpack sigma (ie. when the loss is just SSE, MSE, Huber etc)
         if (self.n_subject_level_intercept_sds == 0) and (
             not self.no_me_loss_needs_sigma
         ):
@@ -3339,6 +3353,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     def predict2(
         self,
         data,
+        params = None,
         predict_all_ode_outputs = False,
         parallel=None,
         parallel_n_jobs=None,
@@ -3353,10 +3368,21 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.jax_ivp_stiff_solver_is_compiled = False
         self.jax_ivp_pymcstiff_solver_is_compiled = False
         
-        if self.fit_result_ is None:
-            raise ValueError("The Model must be fit before prediction")
-        params = self.fit_result_["x"]
+        
+        
+        if params is None:
+            if self.fit_result_ is None:
+                raise ValueError("The Model must be fit before prediction")
+            combined_params = np.zeros(self._total_n_params)
+            combined_params[self._opt_params_combined_params_idx] = self.fit_result_.x
+            combined_params[self._fixed_params_combined_params_idx] = self._fixed_params
+            params = combined_params + self._init_params_for_scaling
+        else:
+            if self.fit_result_ is None:
+                self.fit2(data, perform_fit=False)
+                
         _, _, _, beta_data = self._assemble_pred_matrices(data)
+        self._compile_jax_ivp_solvers()
         ode_t0_vals_are_subject_y0_init_status = deepcopy(
             self.ode_t0_vals_are_subject_y0
         )
@@ -3533,6 +3559,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         warm_start=False,
         fit_id: uuid.UUID = None,
         ci_level:np.float64 = 0.95, 
+        perform_fit = True,
     ) -> Self:
         fit_id = uuid.uuid4() if fit_id is None else fit_id
         data = self._validate_data_chronology(data)
@@ -3680,12 +3707,17 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         else:
             init_params_for_scaling = np.zeros_like(init_params)
             _init_params = np.copy(init_params)
+        self._init_params_for_scaling = init_params_for_scaling
         _total_n_params = len(_init_params)
+        self._total_n_params = _total_n_params
         init_params_fix_status = np.array(init_params_fix_status)
         _fixed_params = _init_params[init_params_fix_status]
+        self._fixed_params = _fixed_params
         _opt_params = _init_params[~init_params_fix_status]
         fixed_params_combined_params_idx = np.argwhere(init_params_fix_status).flatten()
+        self._fixed_params_combined_params_idx = fixed_params_combined_params_idx
         opt_params_combined_params_idx = np.argwhere(~init_params_fix_status).flatten()
+        self._opt_params_combined_params_idx = opt_params_combined_params_idx
         _bounds = np.array(self.bounds)
         _opt_bounds = _bounds[~init_params_fix_status]
         _fixed_bounds = _bounds[init_params_fix_status]
@@ -3815,94 +3847,98 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                             omega_ltri_nodiag_names= self.cb_omega_ltri_nodiag_names,
                                           optimize_sigma_on_log_scale = self.optimize_sigma_on_log_scale,
                                           optimize_omega_on_log_scale = self.optimize_omega_on_log_scale,
+                                          use_full_omega=self.use_full_omega,
                                           init_params_for_scaling = init_params_for_scaling,
                                           fixed_params = _fixed_params, 
                                             fixed_params_combined_params_idx = fixed_params_combined_params_idx, 
                                             opt_params_combined_params_idx = opt_params_combined_params_idx, 
                                             total_n_params = _total_n_params
                                           )
-            fit_with_jax = False
-            if fit_with_jax:
-                raise NotImplementedError
+            if perform_fit:
+                fit_with_jax = False
+                if fit_with_jax:
+                    raise NotImplementedError
 
-            else:
-                self.fit_result_ = optimize_with_checkpoint_joblib(
-                    objective_function,
-                    _opt_params,
-                    n_checkpoint=n_iters_per_checkpoint,
-                    checkpoint_filename=checkpoint_filename,
-                    args=(theta_data,),
-                    warm_start=warm_start,
-                    minimize_method=self.minimize_method,
-                    tol=self.optimizer_tol,
-                    bounds=_opt_bounds,
-                    callback = mlf_callback
-                    
-                )
-            # hess_fun = nd.Hessian()
-            mlflow.log_metric(f"final_{mlflow_loss.__name__}", self.fit_result_.fun)
-            mlflow.log_metric(f"final_{self.loss_summary_name}", self.fit_result_.fun)
-            mlflow.log_metric('final_nfev', self.fit_result_.nfev)
-            mlflow.log_metric('final_nit', self.fit_result_.nit)
-            mlflow.log_metric('final_success', bool(self.fit_result_.success))
-            mlflow.log_text(str(self.fit_result_), 'OptimizeResult.txt')
-            
-            
-            
-            fit_result_summary["best_fit_param_val"] = pd.NA
-            fit_result_summary["best_fit_param_val"] = fit_result_summary[
-                "best_fit_param_val"
-            ].astype(pd.Float64Dtype())
-            combined_params = np.zeros(_total_n_params)
-            combined_params[opt_params_combined_params_idx] = self.fit_result_.x
-            combined_params[fixed_params_combined_params_idx] = _fixed_params
-            final_params = combined_params + init_params_for_scaling
-            fit_result_summary["best_fit_param_val"] = final_params
-            if ci_level is not None:
-                ci_df = self._generate_profile_ci(data=data)
-                fit_result_summary = fit_result_summary.merge(
-                    ci_df, how = 'left', right_index=True, left_index=True
-                )
-                ci_re = re.compile('^ci[0-9]{1,2}')
-                ci_cols = [i for i in fit_result_summary.columns if bool(re.search(ci_re, i))]
-                for idx, row in fit_result_summary.iterrows():
-                    for c in ci_cols:
-                        log_str = f"param_{row['log_name']}_{c}"
-                        mlflow.log_metric(log_str, row[c])
-            
-            self.fit_result_summary_ = fit_result_summary.copy()
-            mlflow.log_table(self.fit_result_summary_, 'fit_result_summary.json')
-            
-            # after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
-            #
-            preds, apprx_neg2ll = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs, return_loss = True)
-            mlflow.log_metric('final_apprx_neg2ll', apprx_neg2ll)
-            pred_loss_sigma = (fit_result_summary
-                               .loc[fit_result_summary['model_error'], 'best_fit_param_val'])
-            pred_loss = neg2_log_likelihood_loss(self.y, preds, pred_loss_sigma)
-            mlflow.log_metric('fit_predict_neg2ll', pred_loss)
-            if len(omegas.values) > 0:
-                mlflow.log_table(self.b_i_approx, 'subject_level_effects.json')
+                else:
+                    self.fit_result_ = optimize_with_checkpoint_joblib(
+                        objective_function,
+                        _opt_params,
+                        n_checkpoint=n_iters_per_checkpoint,
+                        checkpoint_filename=checkpoint_filename,
+                        args=(theta_data,),
+                        warm_start=warm_start,
+                        minimize_method=self.minimize_method,
+                        tol=self.optimizer_tol,
+                        bounds=_opt_bounds,
+                        callback = mlf_callback
+                        
+                    )
+                # hess_fun = nd.Hessian()
+                mlflow.log_metric(f"final_{mlflow_loss.__name__}", self.fit_result_.fun)
+                mlflow.log_metric(f"final_{self.loss_summary_name}", self.fit_result_.fun)
+                mlflow.log_metric('final_nfev', self.fit_result_.nfev)
+                mlflow.log_metric('final_nit', self.fit_result_.nit)
+                mlflow.log_metric('final_success', bool(self.fit_result_.success))
+                mlflow.log_text(str(self.fit_result_), 'OptimizeResult.txt')
+                
+                
+                
+                fit_result_summary["best_fit_param_val"] = pd.NA
+                fit_result_summary["best_fit_param_val"] = fit_result_summary[
+                    "best_fit_param_val"
+                ].astype(pd.Float64Dtype())
+                combined_params = np.zeros(_total_n_params)
+                combined_params[opt_params_combined_params_idx] = self.fit_result_.x
+                combined_params[fixed_params_combined_params_idx] = _fixed_params
+                final_params = combined_params + init_params_for_scaling
+                fit_result_summary["best_fit_param_val"] = final_params
+                if ci_level is not None:
+                    ci_df = self._generate_profile_ci(data=data)
+                    fit_result_summary = fit_result_summary.merge(
+                        ci_df, how = 'left', right_index=True, left_index=True
+                    )
+                    ci_re = re.compile('^ci[0-9]{1,2}')
+                    ci_cols = [i for i in fit_result_summary.columns if bool(re.search(ci_re, i))]
+                    for idx, row in fit_result_summary.iterrows():
+                        for c in ci_cols:
+                            log_str = f"param_{row['log_name']}_{c}"
+                            mlflow.log_metric(log_str, row[c])
+                
+                self.fit_result_summary_ = fit_result_summary.copy()
+                mlflow.log_table(self.fit_result_summary_, 'fit_result_summary.json')
+                
+                # after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
+                #
+                preds, apprx_neg2ll = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs, return_loss = True)
+                mlflow.log_metric('final_apprx_neg2ll', apprx_neg2ll)
+                pred_loss_sigma = (fit_result_summary
+                                .loc[fit_result_summary['model_error'], 'best_fit_param_val'])
+                if self.optimize_sigma_on_log_scale:
+                    pred_loss_sigma = np.exp(pred_loss_sigma)
+                pred_loss = neg2_log_likelihood_loss(self.y, preds, pred_loss_sigma)
+                mlflow.log_metric('fit_predict_neg2ll', pred_loss)
+                if len(omegas.values) > 0:
+                    mlflow.log_table(self.b_i_approx, 'subject_level_effects.json')
 
-   
-            mlflow.log_table(self._fitted_subject_ode_params, 'fitted_subject_ode_params_base.json')
-            
-            self._summary_pk_stats = (self._fitted_subject_ode_params
-                                      .apply(self.pk_model_class.summary_calculations,
-                                                                            axis = 1, result_type = 'expand'))
-            #For some reason this writing and reloading is required to get the df to be serializable.
-            #Related to: https://github.com/pandas-dev/pandas/issues/55490
-            with BytesIO() as f:
-                self._summary_pk_stats.to_csv(f,index=False)
-                f.seek(0)
-                self._summary_pk_stats = pd.read_csv(f, dtype = pd.Float64Dtype())
-            mlflow.log_table(self._summary_pk_stats, 'fitted_subject_ode_params.json')
-            self._summary_pk_stats_descr = self._summary_pk_stats.describe()
-            mlflow.log_table(self._summary_pk_stats_descr, 'fitted_subject_ode_params_descr.json')
-            for c in self._summary_pk_stats_descr.columns:
-                tmp = self._summary_pk_stats_descr[c]
-                [mlflow.log_metric(f"fitted_subject_{c}_{idx.replace('%', 'quantile')}", tmp[idx])
-                 for idx in tmp.index[1:]] 
+    
+                mlflow.log_table(self._fitted_subject_ode_params, 'fitted_subject_ode_params_base.json')
+                
+                self._summary_pk_stats = (self._fitted_subject_ode_params
+                                        .apply(self.pk_model_class.summary_calculations,
+                                                                                axis = 1, result_type = 'expand'))
+                #For some reason this writing and reloading is required to get the df to be serializable.
+                #Related to: https://github.com/pandas-dev/pandas/issues/55490
+                with BytesIO() as f:
+                    self._summary_pk_stats.to_csv(f,index=False)
+                    f.seek(0)
+                    self._summary_pk_stats = pd.read_csv(f, dtype = pd.Float64Dtype())
+                mlflow.log_table(self._summary_pk_stats, 'fitted_subject_ode_params.json')
+                self._summary_pk_stats_descr = self._summary_pk_stats.describe()
+                mlflow.log_table(self._summary_pk_stats_descr, 'fitted_subject_ode_params_descr.json')
+                for c in self._summary_pk_stats_descr.columns:
+                    tmp = self._summary_pk_stats_descr[c]
+                    [mlflow.log_metric(f"fitted_subject_{c}_{idx.replace('%', 'quantile')}", tmp[idx])
+                    for idx in tmp.index[1:]] 
             
             
                 

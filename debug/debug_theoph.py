@@ -49,31 +49,34 @@ me_mod_fo =  CompartmentalModel(
             time_col = 'TIME',
             population_coeff=[
                                 PopulationCoeffcient('ka', 
-                                                    optimization_init_val=1.6, 
+                                                    optimization_init_val=np.exp(.4674449), 
                                                     subject_level_intercept=True,
                                                     fix_param_value = True,
                                                     #optimization_lower_bound = np.log(1e-6),
                                                     #optimization_upper_bound = np.log(15),
-                                                    subject_level_intercept_sd_init_val = 0.6, 
+                                                    subject_level_intercept_sd_init_val = 0.4049448, 
+                                                    fix_subject_level_effect = True,
                                                     subject_level_intercept_sd_upper_bound = 20,
                                                     subject_level_intercept_sd_lower_bound=1e-6
                                                     ),
                                 PopulationCoeffcient('cl',
-                                                    optimization_init_val = 2.75,
+                                                    optimization_init_val = np.exp(1.0103161),
                                                     fix_param_value = True,
                                                     #optimization_lower_bound = np.log(1e-4),
                                                     #optimization_upper_bound=np.log(25),
                                                     subject_level_intercept=True, 
-                                                    subject_level_intercept_sd_init_val = 0.3, 
+                                                    subject_level_intercept_sd_init_val = 0.06878444, 
+                                                    fix_subject_level_effect = True,
                                                     subject_level_intercept_sd_upper_bound = 5,
                                                     subject_level_intercept_sd_lower_bound=1e-6
                                                     ),
-                                PopulationCoeffcient('vd', optimization_init_val = 31.9,
+                                PopulationCoeffcient('vd', optimization_init_val = np.exp(3.4597150),
                                                      fix_param_value = True,
                                                     #, optimization_lower_bound = np.log(.1)
                                                     #,optimization_upper_bound=np.log(80), 
                                                     subject_level_intercept=True, 
-                                                    subject_level_intercept_sd_init_val = 0.1, 
+                                                    subject_level_intercept_sd_init_val = 0.01916743, 
+                                                    fix_subject_level_effect = True,
                                                     subject_level_intercept_sd_upper_bound = 5,
                                                     subject_level_intercept_sd_lower_bound=1e-6
                                                     
@@ -83,24 +86,93 @@ me_mod_fo =  CompartmentalModel(
             dep_vars= None, 
                                     no_me_loss_function=neg2_log_likelihood_loss, 
                                     no_me_loss_needs_sigma=True,
-                                    #optimizer_tol=None, 
-                                    optimizer_tol=1e-6,
+                                    significant_digits=3,
                                     pk_model_class=OneCompartmentAbsorption, 
                                     model_error_sigma=PopulationCoeffcient('sigma'
                                                                             ,log_transform_init_val=False
-                                                                            , optimization_init_val=.5
+                                                                            ,fix_param_value=False
+                                                                            , optimization_init_val=0.6948632
                                                                             ,optimization_lower_bound=0.00001
                                                                             ,optimization_upper_bound=3
                                                                             ),
                                     #ode_solver_method='BDF'
                                     batch_id='theoph_test1',
-                                    minimize_method = 'COBYQA'
+                                    minimize_method = 'COBYQA', 
+                                    use_full_omega=False
                                     )
 
-fit_model = True
+fit_model = False
 if fit_model:
     me_mod_fo = me_mod_fo.fit2(df, ci_level = None)
 
+#%%
+
+me_mod_fo =  CompartmentalModel(
+        model_name = "debug_theoph_abs_ka-clME-vd_FOCE_nodep_dermal",
+            ode_t0_cols=[ ODEInitVals('DV'), ODEInitVals('AMT'),],
+            conc_at_time_col = 'DV',
+            subject_id_col = 'ID', 
+            time_col = 'TIME',
+            population_coeff=[
+                                PopulationCoeffcient('ka', 
+                                                    optimization_init_val=np.exp(.4674449), 
+                                                    subject_level_intercept=True,
+                                                    fix_param_value = False,
+                                                    #optimization_lower_bound = np.log(1e-6),
+                                                    #optimization_upper_bound = np.log(15),
+                                                    subject_level_intercept_sd_init_val = np.sqrt(0.4049448), 
+                                                    fix_subject_level_effect = False,
+                                                    subject_level_intercept_sd_upper_bound = 20,
+                                                    subject_level_intercept_sd_lower_bound=1e-6
+                                                    ),
+                                PopulationCoeffcient('cl',
+                                                    optimization_init_val = np.exp(1.0103161),
+                                                    fix_param_value = False,
+                                                    #optimization_lower_bound = np.log(1e-4),
+                                                    #optimization_upper_bound=np.log(25),
+                                                    subject_level_intercept=True, 
+                                                    subject_level_intercept_sd_init_val = np.sqrt(0.06878444), 
+                                                    fix_subject_level_effect = False,
+                                                    subject_level_intercept_sd_upper_bound = 5,
+                                                    subject_level_intercept_sd_lower_bound=1e-6
+                                                    ),
+                                PopulationCoeffcient('vd', optimization_init_val = np.exp(3.4597150),
+                                                     fix_param_value = False,
+                                                    #, optimization_lower_bound = np.log(.1)
+                                                    #,optimization_upper_bound=np.log(80), 
+                                                    subject_level_intercept=True, 
+                                                    subject_level_intercept_sd_init_val = np.sqrt(0.01916743), 
+                                                    fix_subject_level_effect = False,
+                                                    subject_level_intercept_sd_upper_bound = 5,
+                                                    subject_level_intercept_sd_lower_bound=1e-6
+                                                    
+                                                    #, optimization_upper_bound = np.log(.05)
+                                                    ),
+                            ],
+            dep_vars= None, 
+                                    no_me_loss_function=neg2_log_likelihood_loss, 
+                                    no_me_loss_needs_sigma=True,
+                                    significant_digits=5,
+                                    me_loss_function=FOCE_approx_ll_loss,
+                                    pk_model_class=OneCompartmentAbsorption, 
+                                    model_error_sigma=PopulationCoeffcient('sigma'
+                                                                            ,log_transform_init_val=False
+                                                                            ,fix_param_value=False
+                                                                            , optimization_init_val=0.6948632
+                                                                            ,optimization_lower_bound=0.00001
+                                                                            ,optimization_upper_bound=3
+                                                                            ),
+                                    #ode_solver_method='BDF'
+                                    batch_id='theoph_test1',
+                                    minimize_method = 'COBYQA', 
+                                    use_full_omega=True
+                                    )
+
+fit_model = False
+if fit_model:
+    me_mod_fo = me_mod_fo.fit2(df, ci_level = None)
+
+#%%
 
 #%%
 #%%
@@ -143,8 +215,9 @@ me_mod_fo =  CompartmentalModel(
             dep_vars= None, 
                                     no_me_loss_function=neg2_log_likelihood_loss, 
                                     no_me_loss_needs_sigma=True,
+
                                     #optimizer_tol=None, 
-                                    optimizer_tol=1e-6,
+                                    #optimizer_tol=1e-4,
                                     pk_model_class=OneCompartmentAbsorption, 
                                     model_error_sigma=PopulationCoeffcient('sigma'
                                                                             ,log_transform_init_val=False
@@ -156,7 +229,7 @@ me_mod_fo =  CompartmentalModel(
                                     batch_id='theoph_test1',
                                     minimize_method = 'COBYQA'
                                     )
-
+#%%
 fit_model = True
 if fit_model:
     me_mod_fo = me_mod_fo.fit2(df, ci_level = None)
@@ -229,7 +302,7 @@ me_mod_fo2 =  CompartmentalModel(
                                     no_me_loss_needs_sigma=True,
                                     me_loss_function=FOCE_approx_ll_loss,
                                     #optimizer_tol=None, 
-                                    optimizer_tol=1e-4,
+                                    #optimizer_tol=1e-4,
                                     pk_model_class=OneCompartmentAbsorption, 
                                     model_error_sigma=PopulationCoeffcient('sigma'
                                                                             ,log_transform_init_val=False
