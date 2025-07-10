@@ -26,7 +26,9 @@ def debug_print(print_obj, *args ):
         if isinstance(print_obj, str):
             print(print_obj)
 
-
+#TO DO: Add allometric scaling prep
+#TO DO: Verify no changes are required/it is not beneficial to implement log scale opt of bayes equivlanets of 
+# sigma and omega
 def make_pymc_model(model_obj,
                     pm_subj_df = None,
                     pm_df = None,
