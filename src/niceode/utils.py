@@ -2060,7 +2060,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             else:
                 theta_data_col = subject_data[theta_name].values
             theta_data[col] = theta_data_col
-            theta_fix_status = row[ivc.fix_param_value]
+            theta_fix_status[col] = row[ivc.fix_param_value]
         thetas.columns = (
             pd.MultiIndex.from_tuples(thetas.columns)
             if len(thetas.columns) > 0
@@ -2297,13 +2297,16 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.full_omega_subject_level_effect_fix_status = deepcopy(subject_level_effect_fix_status)
         return flat_lower_diag
 
-    def _assemble_pred_matrices_jax(self, init_params, theta_data):
+    def _assemble_pred_matrices_jax(self, init_params, theta_data, params_idx):
+        jax_bundle_out = {}
         n_pop_e = self.n_population_coeff
+        #`n_subj_e` is the diag of omega
         n_subj_e = self.n_subject_level_intercept_sds
         unique_groups = self.unique_groups
         groups_idx = self.y_groups
         y = self.y
         unpadded_y_len = len(y)
+        #`expected_len_out` is the expected number of ODE coeffs sets (the number of subjects)
         expected_len_out =  len(unique_groups)
         time_mask = self.time_mask
         time_mask_y = jnp.array(time_mask)
@@ -2329,22 +2332,24 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         tmp_y = pd.DataFrame()
         tmp_y['y'] = y
         tmp_y['id'] = groups_idx
-        tmp_y['time'] = self.data['TIME']
+        tmp_y['time'] = self.data[self.time_col]
 
         masked_y = mask_df.merge(tmp_y, how = 'left', on = ['id', 'time'])
 
         masked_y['y'] = masked_y['y'].fillna(0.0)
         padded_y = masked_y['y'].to_numpy().reshape(len(unique_groups), len(self.global_tp_eval))
         
-        pop_coeff_names = [i for idx, i in enumerate(init_params) if idx < n_pop_e ]
-        start_idx = n_pop_e
-        end_idx = start_idx + 1
-        sigma_names = [i for idx, i in enumerate(init_params) if idx >= start_idx and idx < end_idx ]
-        start_idx = end_idx
-        end_idx = start_idx + n_subj_e
-        omega_names =   [i for idx, i in enumerate(init_params) if idx >= start_idx and idx < end_idx ]
-        start_idx = end_idx
-        theta_names = [i for idx, i in enumerate(init_params) if idx >= start_idx ]
+        unpack_names = False
+        if unpack_names:
+            pop_coeff_names = [i for idx, i in enumerate(init_params) if idx < n_pop_e ]
+            start_idx = n_pop_e
+            end_idx = start_idx + 1
+            sigma_names = [i for idx, i in enumerate(init_params) if idx >= start_idx and idx < end_idx ]
+            start_idx = end_idx
+            end_idx = start_idx + n_subj_e
+            omega_names =   [i for idx, i in enumerate(init_params) if idx >= start_idx and idx < end_idx ]
+            start_idx = end_idx
+            theta_names = [i for idx, i in enumerate(init_params) if idx >= start_idx ]
         
         dfs = []
         td_df = pd.DataFrame(theta_data)
@@ -2383,7 +2388,85 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             tmp_df[other_cols] = 0
             td_tensor.append(tmp_df.to_numpy())
         td_tensor_cols = tuple(tmp_df.columns)
-        td_tensor = np.stack(td_tensor, axis = 2)   
+        td_tensor = np.stack(td_tensor, axis = 2)
+           
+        jax_bundle_out['td_tensor'] = deepcopy(td_tensor)
+        jax_bundle_out['td_tensor_cols'] = deepcopy(td_tensor_cols)
+        jax_bundle_out['padded_y'] = np.copy(padded_y)
+        jax_bundle_out['time_mask_y'] = deepcopy(time_mask_y)
+        jax_bundle_out['unpadded_y_len'] = deepcopy(unpadded_y_len)
+        jax_bundle_out['time_mask_J'] = deepcopy(time_mask_J)
+
+        return deepcopy(jax_bundle_out)
+    
+    @staticmethod
+    def _jittable_param_unpack(opt_params, 
+                                theta_data_tensor, 
+                                theta_data_tensor_cols,
+                                theta_base_cols,
+                                padded_y, 
+                                time_mask_y, 
+                                time_mask_J, 
+                                unpadded_y_len,
+                                params_idx,
+                                fixed_params = None,
+                                opt_params_combined_params_idx = None, 
+                                fixed_params_combined_params_idx = None,
+                                total_n_params = None,
+                                init_params_for_scaling = None,
+                                
+                                use_full_omega = None, 
+                                omega_lower_chol_idx = None,
+                                omega_diag_size = None,
+                                optimize_omega_on_log_scale = None,
+                                optimize_sigma_on_log_scale = None,
+                                use_surrogate_neg2ll = None,
+                               ):
+        
+        combined_params = np.zeros(total_n_params)
+        combined_params[opt_params_combined_params_idx] = opt_params
+        combined_params[fixed_params_combined_params_idx] = fixed_params
+        params = combined_params + init_params_for_scaling
+
+        #unpack pop coeffs
+        pop_coeffs = params[params_idx['pop'][0]:params_idx['pop'][-1]]
+        
+        #unpack sigma, assume opt on log scale
+        sigma = params[params_idx['sigma'][0]:params_idx['sigma'][-1]]
+        sigma2 = jnp.exp(sigma)**2
+        
+        
+        #unpack omega, assume opt on log scale
+        omega = params[params_idx['omega'][0]:params_idx['omega'][-1]]
+        update_idx = omega_lower_chol_idx
+        omega_lchol = np.zeros((omega_diag_size, omega_diag_size), dtype = np.float64)
+        for idx, np_idx in enumerate(update_idx):
+            omega_lchol[np_idx] = omega[idx]
+        omegas_diag = np.diag(omega_lchol)
+        omegas_diag = np.exp(omegas_diag)
+        np.fill_diagonal(omega_lchol, omegas_diag)
+        omega2 = omega_lchol @ omega_lchol.T
+        
+        #unpack theta, should rewrite this to be similar to how the fixed params work
+        theta = params[params_idx['theta'][0]:params_idx['theta'][-1]]
+        thetas_work = jnp.zeros(len(theta_data_tensor_cols))
+        for update_to_idx, p in enumerate(theta_data_tensor_cols):
+            if p in theta_base_cols:
+                update_from_idx = theta_base_cols[p]
+                thetas_work = thetas_work.at[update_to_idx].set(theta[update_from_idx])
+        
+        loss_kwargs = {
+            'pop_coeffs':pop_coeffs, 
+            'sigma2':sigma2, 
+            'omega2':omega2, 
+            'theta':thetas_work, 
+            'theta_data':theta_data_tensor, 
+            'padded_y':padded_y,
+            'time_mask_y':time_mask_y,
+            'time_mask_J':time_mask_J,
+            'unpadded_y_len':unpadded_y_len, 
+        } 
+        return deepcopy(loss_kwargs)
     #@profile
     def _generate_pk_model_coeff_vectorized(
         self, pop_coeffs, thetas, theta_data, expected_len_out=None, 
@@ -3728,6 +3811,35 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         debugging_jax = False
         if debugging_jax:
             return init_params_jax, theta_data_jax
+        #----------JAX Setup-------------
+        jax_bundle_out = self._assemble_pred_matrices_jax(init_params_jax, theta_data_jax, params_idx)
+        
+        _jax_unpack_params = partial(
+            self._jittable_param_unpack, 
+            theta_data_tensor = jax_bundle_out['td_tensor'], 
+            theta_data_tensor_cols=jax_bundle_out['td_tensor_cols'],
+            theta_base_cols = {c:idx for idx, c in enumerate(theta_jax)},
+            padded_y = jax_bundle_out['padded_y'],
+            time_mask_y = jax_bundle_out['time_mask_y'],
+            time_mask_J = jax_bundle_out['time_mask_J'],
+            unpadded_y_len = jax_bundle_out['unpadded_y_len'],
+            params_idx = params_idx,
+            fixed_params = _fixed_params,
+            opt_params_combined_params_idx = opt_params_combined_params_idx,
+            fixed_params_combined_params_idx = fixed_params_combined_params_idx,
+            total_n_params = _total_n_params,
+            init_params_for_scaling = init_params_for_scaling,
+            use_full_omega = None,
+            omega_lower_chol_idx = self.omega_lower_chol_idx,
+            omega_diag_size = self.n_subject_level_intercept_sds,
+            optimize_omega_on_log_scale = None,
+            optimize_sigma_on_log_scale = None,
+            use_surrogate_neg2ll = None,
+        )
+        
+        
+        
+        #--------------------------------
         objective_function = partial(
             self._objective_function2,
             init_params_for_scaling = init_params_for_scaling,
