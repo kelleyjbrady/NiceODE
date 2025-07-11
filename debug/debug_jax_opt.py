@@ -193,7 +193,7 @@ me_mod_fo = CompartmentalModel(
 #%%
 
 #fit2 is where the debugging generates the tracer leak
-loss_bundle = me_mod_fo.fit2(
+_jax_objective, _opt_params = me_mod_fo.fit2(
     df_oral,
 )
 #%%

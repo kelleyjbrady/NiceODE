@@ -34,7 +34,7 @@ import mlflow
 import multiprocessing
 import jax.numpy as jnp
 from itertools import product
-from jax_utils import FO_approx_ll_loss_jax
+from .jax_utils import FO_approx_ll_loss_jax
 from mlflow.data.pandas_dataset import from_pandas
 from .mlflow_utils import (get_class_source_without_docstrings,
                                   generate_class_contents_hash, 
@@ -44,6 +44,7 @@ from typing import Type
 from .pd_templates import InitValsPdCols
 from warnings import warn
 import diffrax
+import flax.struct
 from diffrax import (ODETerm, SaveAt, diffeqsolve,
                      Kvaerno5, Tsit5, PIDController, BacksolveAdjoint, 
                      RecursiveCheckpointAdjoint
@@ -1464,6 +1465,13 @@ def optimize_with_checkpoint_joblib(
 
     return result
 
+@flax.struct.dataclass
+class ParamsIdx:
+    pop: tuple
+    sigma: tuple
+    omega: tuple
+    theta: tuple
+
 class CompartmentalModel(RegressorMixin, BaseEstimator):
     #@profile
     def __init__(
@@ -2400,6 +2408,20 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return deepcopy(jax_bundle_out)
     
     @staticmethod
+    @partial(jax.jit, static_argnames = ( 
+                                          # SHAPES for jnp.zeros
+                                        "theta_total_len",
+                                        "total_n_params",  
+                                        "omega_diag_size",
+                                        
+                                        # DICTIONARY for lookups                                
+                                        "params_idx", 
+                                        
+                                        # BOOLEAN FLAGS for potential `if` statements
+                                        "use_full_omega", 
+                                        "optimize_omega_on_log_scale", 
+                                        "optimize_sigma_on_log_scale", 
+                                        "use_surrogate_neg2ll",) )
     def _jittable_param_unpack(opt_params, 
                                 theta_data_tensor, 
                                 theta_update_to_indices,
@@ -2411,8 +2433,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                 unpadded_y_len,
                                 params_idx,
                                 fixed_params = None,
-                                pop_coeff_cols = None,
-                                omega_diag_cols = None,
+                                #pop_coeff_cols = None,
+                                #omega_diag_cols = None,
                                 pop_coeffs_for_J_idx = None,
                                 opt_params_combined_params_idx = None, 
                                 fixed_params_combined_params_idx = None,
@@ -2438,17 +2460,17 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         params = combined_params + init_params_for_scaling
 
         #unpack pop coeffs
-        pop_coeffs = params[params_idx['pop'][0]:params_idx['pop'][-1]]
+        pop_coeffs = params[params_idx.pop[0]:params_idx.pop[-1]]
         
         #unpack sigma, assume opt on log scale
-        sigma = params[params_idx['sigma'][0]:params_idx['sigma'][-1]]
+        sigma = params[params_idx.sigma[0]:params_idx.sigma[-1]]
         sigma2 = jnp.exp(sigma)**2
         
         
         #unpack omega, assume opt on log scale
-        omega = params[params_idx['omega'][0]:params_idx['omega'][-1]]
-        update_idx = omega_lower_chol_idx
-        rows, cols = zip(*update_idx)
+        omega = params[params_idx.omega[0]:params_idx.omega[-1]]
+        #update_idx = omega_lower_chol_idx
+        rows, cols = omega_lower_chol_idx
         omega_lchol = jnp.zeros((omega_diag_size, omega_diag_size), dtype = np.float64)
         omega_lchol = omega_lchol.at[rows, cols].set(omega)
         omegas_diag = jnp.diag(omega_lchol)
@@ -2456,8 +2478,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         omega_lchol = omega_lchol.at[jnp.diag_indices_from(omega_lchol)].set(omegas_diag)
         omega2 = omega_lchol @ omega_lchol.T
         
-        #unpack theta, should rewrite this to be similar to how the fixed params work
-        theta = params[params_idx['theta'][0]:params_idx['theta'][-1]]
+        #unpack theta
+        theta = params[params_idx.theta[0]:params_idx.theta[-1]]
         thetas_work = jnp.zeros(theta_total_len)
         thetas_work = thetas_work.at[theta_update_to_indices].set(theta[theta_update_from_indices])
         
@@ -3822,6 +3844,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         debugging_jax = True
         
         #----------JAX Setup-------------
+        params_idx_struct = ParamsIdx(
+            pop=params_idx["pop"],
+            sigma=params_idx["sigma"],
+            omega=params_idx['omega'],
+            theta=params_idx['theta'],
+        )
         jax_bundle_out = self._assemble_pred_matrices_jax(init_params_jax, theta_data_jax, params_idx)
         pop_coeff_cols = {c:idx for idx, c in enumerate(pop_coeffs_jax)}
         omega_diag_cols = omega_diag_names_jax
@@ -3838,48 +3866,98 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             theta_base_cols[p] for p in theta_data_tensor_cols 
             if p in theta_base_cols
         ])
-        _jax_unpack_params = partial(
-        self._jittable_param_unpack,
-            #opt_params=_opt_params,
-            theta_data_tensor = jax_bundle_out['td_tensor'], 
-            #theta_data_tensor_cols=jax_bundle_out['td_tensor_cols'],
-            #theta_base_cols = {c:idx for idx, c in enumerate(theta_jax)},
-            theta_update_to_indices = theta_update_to_indices,
-            theta_update_from_indices = theta_update_from_indices,
-            theta_total_len = theta_total_len,
-            pop_coeff_cols = {c:idx for idx, c in enumerate(pop_coeffs_jax)},
-            omega_diag_cols = omega_diag_names_jax,
-            pop_coeffs_for_J_idx = pop_coeffs_for_J_idx,
-            padded_y = jax_bundle_out['padded_y'],
-            time_mask_y = jax_bundle_out['time_mask_y'],
-            time_mask_J = jax_bundle_out['time_mask_J'],
-            unpadded_y_len = jax_bundle_out['unpadded_y_len'],
-            params_idx = params_idx,
-            fixed_params = _fixed_params,
-            ode_t0_vals = np.array(self.ode_t0_vals.to_numpy(dtype = np.float64)),
-            opt_params_combined_params_idx = opt_params_combined_params_idx,
-            fixed_params_combined_params_idx = fixed_params_combined_params_idx,
-            total_n_params = _total_n_params,
-            init_params_for_scaling = init_params_for_scaling,
-            use_full_omega = None,
-            omega_lower_chol_idx = self.omega_lower_chol_idx,
-            omega_diag_size = self.n_subject_level_intercept_sds,
-            optimize_omega_on_log_scale = None,
-            optimize_sigma_on_log_scale = None,
-            use_surrogate_neg2ll = None,
-        )
-        def _jax_objective_function(opt_params):
+        #_jax_unpack_params = partial(
+        #self._jittable_param_unpack,
+        #    #opt_params=_opt_params,
+        #    theta_data_tensor = jax_bundle_out['td_tensor'], 
+        #    theta_data_tensor_cols=jax_bundle_out['td_tensor_cols'],
+        #    theta_base_cols = {c:idx for idx, c in enumerate(theta_jax)},
+        #    theta_update_to_indices = theta_update_to_indices,
+        #    theta_update_from_indices = theta_update_from_indices,
+        #    theta_total_len = theta_total_len,
+        #    pop_coeff_cols = {c:idx for idx, c in enumerate(pop_coeffs_jax)},
+        #    omega_diag_cols = omega_diag_names_jax,
+        #    pop_coeffs_for_J_idx = pop_coeffs_for_J_idx,
+        #    padded_y = jax_bundle_out['padded_y'],
+        #    time_mask_y = jax_bundle_out['time_mask_y'],
+        #    time_mask_J = jax_bundle_out['time_mask_J'],
+        #    unpadded_y_len = jax_bundle_out['unpadded_y_len'],
+        #    params_idx = params_idx,
+        #    fixed_params = _fixed_params,
+        #    ode_t0_vals = np.array(self.ode_t0_vals.to_numpy(dtype = np.float64)),
+        #    opt_params_combined_params_idx = opt_params_combined_params_idx,
+        #    fixed_params_combined_params_idx = fixed_params_combined_params_idx,
+        #    total_n_params = _total_n_params,
+        #    init_params_for_scaling = init_params_for_scaling,
+        #    use_full_omega = None,
+        #    omega_lower_chol_idx = self.omega_lower_chol_idx,
+        #    omega_diag_size = self.n_subject_level_intercept_sds,
+        #    optimize_omega_on_log_scale = None,
+        #    optimize_sigma_on_log_scale = None,
+        #    use_surrogate_neg2ll = None,
+        #)
+        static_opt_kwargs = {
+            "theta_total_len": theta_total_len,
+            "params_idx": params_idx_struct,
+            "total_n_params": _total_n_params,
+            "omega_diag_size": self.n_subject_level_intercept_sds,
+            "use_full_omega": None,
+            "optimize_omega_on_log_scale": None,
+            "optimize_sigma_on_log_scale": None,
+            "use_surrogate_neg2ll": None,
+        }
+        dynamic_opt_kwargs = {
+            "theta_data_tensor": jax_bundle_out["td_tensor"],
+            #"theta_data_tensor_cols": jax_bundle_out["td_tensor_cols"],
+            #"theta_base_cols": {c: idx for idx, c in enumerate(theta_jax)},
+            "theta_update_to_indices": theta_update_to_indices,
+            "theta_update_from_indices": theta_update_from_indices,
+            "pop_coeffs_for_J_idx": pop_coeffs_for_J_idx,
+            "padded_y": jax_bundle_out["padded_y"],
+            "time_mask_y": jax_bundle_out["time_mask_y"],
+            "time_mask_J": jax_bundle_out["time_mask_J"],
+            "unpadded_y_len": jax_bundle_out["unpadded_y_len"],
+            "fixed_params": _fixed_params,
+            "ode_t0_vals": np.array(self.ode_t0_vals.to_numpy(dtype=np.float64)),
+            "opt_params_combined_params_idx": opt_params_combined_params_idx,
+            "fixed_params_combined_params_idx": fixed_params_combined_params_idx,
+            "init_params_for_scaling": init_params_for_scaling,
+            "omega_lower_chol_idx": list(zip(*self.omega_lower_chol_idx)),
+        }
+        #should we jit this wrapper?
+        def create_jax_objective(static_opt_kwargs, dynamic_opt_kwargs, compiled_solver):
             
-            loss_kwargs = _jax_unpack_params(opt_params=opt_params)
-            loss_kwargs['compiled_ivp_solver_arr'] = self.jax_ivp_closed_stiff_compiled_solver_
+            all_other_kwargs = {**static_opt_kwargs, **dynamic_opt_kwargs}
             
-            loss_res_bundle = FO_approx_ll_loss_jax(
-                    **loss_kwargs
-                )
+            def _jax_objective_function(opt_params, ):
+                
+                loss_kwargs = self._jittable_param_unpack(opt_params=opt_params, **all_other_kwargs)
+                loss_kwargs['compiled_ivp_solver_arr'] = compiled_solver
+                
+                loss_res_bundle = FO_approx_ll_loss_jax(
+                        **loss_kwargs
+                    )
+                
+                return loss_res_bundle
             
-            return loss_res_bundle
+            #static_names_for_jit = ["compiled_solver"] + list(static_opt_kwargs.keys())
+            #
+            #jitted_objective = partial(jax.jit(
+            #    _jax_objective_function, 
+            #    static_argnames=static_names_for_jit 
+            #),
+            #
+            #compiled_solver = compiled_solver,   
+            #**static_opt_kwargs, 
+            #**dynamic_opt_kwargs                 
+            #                           )
+            return jax.jit(_jax_objective_function)
+        _jax_objective_function = create_jax_objective(static_opt_kwargs=static_opt_kwargs, 
+                                                       dynamic_opt_kwargs=dynamic_opt_kwargs,
+                                                       compiled_solver=self.jax_ivp_closed_stiff_compiled_solver_
+                                                       )
         if debugging_jax:
-            return loss_func_bundle
+            return _jax_objective_function, _opt_params
         
         
         #--------------------------------

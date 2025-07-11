@@ -37,6 +37,7 @@ rpy2 = "^3.5"
 mlflow = "^2.22.0"
 lightgbm = "^4.6.0"
 equinox = "^0.12.2"
+flax = "^0.10.7"
 
 
 

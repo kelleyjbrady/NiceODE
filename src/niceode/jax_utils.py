@@ -407,21 +407,9 @@ def estimate_ebes_jax(
 
     return b_i_approx
 
-#@partial(jax.jit, static_argnames = ("params_order",
-#                                     "n_population_coeff", 
-#                                    "n_subject_level_effects",
-#                                    "compiled_ivp_solver_keys",
-#                                    "compiled_ivp_solver_arr",
-#                                    "compiled_gen_ode_coeff",
-#                                    #"compiled_ivp_predictor",
-#                                    "solve_for_omegas", 
-#                                    "pop_coeff_names",
-#                                    "subject_level_effect_names",
-#                                    "sigma_names",
-#                                    "n_thetas",
-#                                    "theta_names",
-#                                    "theta_data_tensor_names"
-#                                     ))
+@partial(jax.jit, static_argnames = (
+                                    "compiled_ivp_solver_arr",
+                                   ))
 def FO_approx_ll_loss_jax(
     pop_coeff, 
     sigma2, 
