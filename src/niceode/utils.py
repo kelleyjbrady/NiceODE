@@ -2397,7 +2397,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             td_tensor.append(tmp_df.to_numpy())
         td_tensor_cols = tuple(tmp_df.columns)
         td_tensor = np.stack(td_tensor, axis = 2)
-           
+        
+        if td_tensor.size == 0:
+            td_tensor_cols = ()
         jax_bundle_out['td_tensor'] = deepcopy(td_tensor)
         jax_bundle_out['td_tensor_cols'] = deepcopy(td_tensor_cols)
         jax_bundle_out['padded_y'] = np.copy(padded_y)
@@ -3718,6 +3720,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             )
             params_idx, next_start_idx = self._record_params_idx(thetas, 'theta',
                                          next_start_idx, params_idx)
+        else:
+            theta_jax = None
         self._fit_params_idx = deepcopy(params_idx)
         theta_data_jax = theta_data.to_dict(orient = 'list')
         theta_data_jax = {i:np.array(theta_data_jax[i]) for i in theta_data_jax}
@@ -3751,31 +3755,41 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         fit_result_summary['lower_bound'] = [i[0] for i in self.bounds]
         fit_result_summary['upper_bound'] = [i[1] for i in self.bounds]
         self.preds_opt_ = []
-        debugging_jax = True
+        
         
         #----------JAX Setup-------------
+        debugging_jax = True
+        params_idx_jax = deepcopy(params_idx)
+        required_keys = ['pop', 'sigma', 'omega', 'theta']
+        existing_keys = [i for i in params_idx_jax]
+        for k in required_keys:
+            if k not in existing_keys:
+                params_idx_jax[k] = (0,0)
         params_idx_struct = ParamsIdx(
-            pop=params_idx["pop"],
-            sigma=params_idx["sigma"],
-            omega=params_idx['omega'],
-            theta=params_idx['theta'],
+            pop=params_idx_jax["pop"],
+            sigma=params_idx_jax["sigma"],
+            omega=params_idx_jax['omega'],
+            theta=params_idx_jax['theta'],
         )
         jax_bundle_out = self._assemble_pred_matrices_jax(init_params_jax, theta_data_jax, params_idx)
         pop_coeff_cols = {c:idx for idx, c in enumerate(pop_coeffs_jax)}
         omega_diag_cols = omega_diag_names_jax
         pop_coeffs_for_J_idx = [pop_coeff_cols[i] for i in pop_coeff_cols if i[0] in [i[0][0] for i in omega_diag_cols]]
         pop_coeffs_for_J_idx = np.array(pop_coeffs_for_J_idx)
-        theta_base_cols = {c:idx for idx, c in enumerate(theta_jax)}
+        if theta_jax is not None:
+            theta_base_cols = {c:idx for idx, c in enumerate(theta_jax)}
+        else:
+            theta_base_cols = {}
         theta_data_tensor_cols = jax_bundle_out['td_tensor_cols']
         theta_total_len = len(theta_data_tensor_cols)
         theta_update_to_indices = np.array([
             idx for idx, p in enumerate(theta_data_tensor_cols) 
             if p in theta_base_cols
-        ])
+        ], dtype = np.int32)
         theta_update_from_indices = np.array([
             theta_base_cols[p] for p in theta_data_tensor_cols 
             if p in theta_base_cols
-        ])
+        ], np.int32)
         #_jax_unpack_params = partial(
         #self._jittable_param_unpack,
         #    #opt_params=_opt_params,
@@ -3836,9 +3850,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         }
         #should we jit this wrapper?
         self._compile_jax_ivp_solvers()
-        _jax_objective_function = create_jax_objective(static_opt_kwargs=static_opt_kwargs, 
+        _jax_objective_function, _jax_objective_function_predict = create_jax_objective(static_opt_kwargs=static_opt_kwargs, 
                                                        dynamic_opt_kwargs=dynamic_opt_kwargs,
-                                                       compiled_solver=self.jax_ivp_closed_stiff_compiled_solver_, 
+                                                       compiled_solver=self.jax_ivp_stiff_compiled_solver_, 
                                                        jittable_loss = FO_approx_ll_loss_jax
                                                        )
         if debugging_jax:
@@ -3973,9 +3987,30 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                             total_n_params = _total_n_params
                                           )
             if perform_fit:
-                fit_with_jax = False
+                fit_with_jax = True
                 if fit_with_jax:
-                    raise NotImplementedError
+                    def scipy_wrapper(numpy_params):
+                        """
+                        This function is NOT jitted. It's a simple Python function
+                        that shields our JAX code from SciPy.
+                        """
+                        # a. Convert SciPy's NumPy array to a JAX array with a specific dtype
+                        jax_params = jnp.asarray(numpy_params, dtype=jnp.float64)
+
+                        # b. Call your already-JIT-compiled objective function
+                        loss = _jax_objective_function(jax_params)
+
+                        # c. Return a standard Python float, which optimizers expect
+                        return float(loss)
+                    self.fit_result_ = minimize(
+                            scipy_wrapper,
+                            _opt_params,
+                            method=self.minimize_method,
+                            tol=self.optimizer_tol,
+                            options={"disp": True, 
+                                    },
+                            callback = mlf_callback,
+                        )
 
                 else:
                     self.fit_result_ = optimize_with_checkpoint_joblib(

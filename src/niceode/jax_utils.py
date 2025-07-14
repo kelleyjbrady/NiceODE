@@ -79,9 +79,9 @@ def _predict_jax_jacobian(
     # --- DEBUGGING ---
     # Print the shapes and dtypes of the arguments going into the solver.
     # The label is important for finding the output in the console.
-    jax.debug.print("--- Jacobian's diffeqsolve input ---")
-    jax.debug.print("y0 shape: {x}", x=ode_t0_vals.shape)
-    jax.debug.print("args (model_coeffs_i) shape: {x}", x=model_coeffs_i.shape)
+    #jax.debug.print("--- Jacobian's diffeqsolve input ---")
+    #jax.debug.print("y0 shape: {x}", x=ode_t0_vals.shape)
+    #jax.debug.print("args (model_coeffs_i) shape: {x}", x=model_coeffs_i.shape)
     # --- END DEBUGGING ---
     
     
@@ -95,72 +95,33 @@ def _predict_jax_jacobian(
 #    "pop_coeffs_order", "gen_coeff_jit", "compiled_ivp_solver_arr"
 #)) #this decorator was from the old function, possibly not relevant to the new one
 def _estimate_jacobian_jax(
-    jac_pop_coeffs, # The dictionary of coefficients to differentiate
+    jac_pop_coeffs,
     pop_coeffs,
-    #pop_coeffs_order,
     pop_coeff_for_J_idx,
-    #thetas,
-    #theta_data,
     ode_t0_vals,
-    #gen_coeff_jit,
     compiled_ivp_solver_arr,
     data_contribution,
 ):
     """
-    Estimates the Jacobian using a properly defined custom_vjp to enforce
-    the FO method's gradient behavior.
+    Estimates the Jacobian and stops its gradient for the FO approximation.
     """
-    #jac_keys = tuple(jac_pop_coeffs.keys())
-    #jac_values = tuple(jac_pop_coeffs.values())
+    # 1. Use functools.partial to create a clean function of only the
+    #    variable we want to differentiate. This does NOT create a leaky closure.
+    predict_fn_with_baked_args = partial(
+        _predict_jax_jacobian,
+        pop_coeff_for_J_idx=pop_coeff_for_J_idx,
+        pop_coeffs=pop_coeffs,
+        data_contribution=data_contribution,
+        ode_t0_vals=ode_t0_vals,
+        compiled_ivp_solver_arr=compiled_ivp_solver_arr,
+    )
 
-    # Create a closure with all non-differentiated arguments using partial.
-    # This safely separates static configuration from the dynamic values.
-    def predict_for_jacobian(jac_pop_coeffs):
-        # We explicitly call the original prediction function, passing all
-        # the closed-over variables from the parent scope.
-        return _predict_jax_jacobian(
-            jac_pop_coeff_values=jac_pop_coeffs,
-            pop_coeff_for_J_idx = pop_coeff_for_J_idx,
-            #jac_pop_coeff_keys=jac_keys,
-            pop_coeffs=pop_coeffs,
-            #pop_coeffs_order=pop_coeffs_order,
-            #thetas=thetas,
-            #theta_data=theta_data,
-            ode_t0_vals=ode_t0_vals,
-            #gen_coeff_jit=gen_coeff_jit,
-            compiled_ivp_solver_arr=compiled_ivp_solver_arr,
-            data_contribution=data_contribution,
-        )
+    # 2. Calculate the Jacobian of this simplified function.
+    J = jax.jacobian(predict_fn_with_baked_args)(jac_pop_coeffs)
 
-    # Apply the custom VJP to a local function that only takes the values
-    # we want to differentiate. This is the most robust pattern.
-    @jax.custom_vjp
-    def jacobian_with_fo_grad(values_to_diff):
-        jac_fn = jax.jacobian(predict_for_jacobian, argnums=0)
-        return jac_fn(values_to_diff)
-
-    # Define the forward and backward passes for the VJP
-    def jacobian_fwd(values_to_diff):
-        # The .fun attribute unwraps the function from the VJP decorator
-        # to avoid infinite recursion.
-        return jacobian_with_fo_grad.fun(values_to_diff), None
-
-    def jacobian_bwd(residuals, g):
-        # The primal function took one argument (a tuple of values).
-        # We must return a tuple containing one element: the gradient for that argument.
-        # jax.tree_map is a robust way to create a matching pytree of Nones (zeros).
-        zero_grads = jax.tree.map(lambda x: None, jac_pop_coeffs)
-        return (zero_grads,)
-
-    # Register the forward/backward rules with our local function
-    jacobian_with_fo_grad.defvjp(jacobian_fwd, jacobian_bwd)
-
-    # Execute our VJP-wrapped jacobian calculation
-    jacobian_as_pytree = jacobian_with_fo_grad(jac_pop_coeffs)
-
-    # Reconstruct the final dictionary
-    #jacobian_dict = dict(zip(jac_keys, jacobian_as_pytree))
-    return jacobian_as_pytree
+    # 3. Use stop_gradient to ensure no gradients flow back through J.
+    #    This achieves the goal of the custom_vjp in a much clearer way.
+    return jax.lax.stop_gradient(J)
 
 def _estimate_jacobian_finite_diff(
     jac_pop_coeffs,
@@ -508,12 +469,23 @@ def create_jax_objective(static_opt_kwargs, dynamic_opt_kwargs, compiled_solver,
         loss_kwargs = _jittable_param_unpack(opt_params=opt_params, **all_other_kwargs)
         loss_kwargs['compiled_ivp_solver_arr'] = compiled_solver
         
-        loss_res_bundle = jittable_loss(
+        loss, _ = jittable_loss(
                 **loss_kwargs
             )
         
-        return loss_res_bundle
+        return loss
     
+    
+    def _jax_objective_function_predict(opt_params, ):
+        
+        loss_kwargs = _jittable_param_unpack(opt_params=opt_params, **all_other_kwargs)
+        loss_kwargs['compiled_ivp_solver_arr'] = compiled_solver
+        
+        loss_bundle = jittable_loss(
+                **loss_kwargs
+            )
+        
+        return loss_bundle
     #static_names_for_jit = ["compiled_solver"] + list(static_opt_kwargs.keys())
     #
     #jitted_objective = partial(jax.jit(
@@ -525,7 +497,8 @@ def create_jax_objective(static_opt_kwargs, dynamic_opt_kwargs, compiled_solver,
     #**static_opt_kwargs, 
     #**dynamic_opt_kwargs                 
     #                           )
-    return jax.jit(_jax_objective_function)
+    return jax.jit(_jax_objective_function), jax.jit(_jax_objective_function_predict)
+    #return _jax_objective_function
 
 #@partial(jax.jit, static_argnames = (
 #                                    "compiled_ivp_solver_arr",
@@ -563,12 +536,21 @@ def FO_approx_ll_loss_jax(
     #solve_for_omegas=False,
 ):
     
-
-    data_contribution = theta @ theta_data
-    
-    
+    #jax.debug.print("theta shape: {s}", s = theta.shape )
+    if theta.shape[0] == 0:
+        n_subjects = time_mask_y.shape[0]
+        n_coeffs = pop_coeff.shape[0]
+        data_contribution = jnp.zeros((n_subjects, n_coeffs))
+    else:
+        data_contribution = theta @ theta_data
+    #jax.debug.print("time_mask_y shape: {s}", s = time_mask_y.shape )
+    #jax.debug.print("data_contribution shape: {j}", j=data_contribution.shape)
+    #jax.debug.print("pop_coeff shape: {j}", j=pop_coeff.shape)
     model_coeffs_i = jnp.exp(data_contribution + pop_coeff)# + 1e-6
-
+    is_zero = (model_coeffs_i == 0)
+    not_finite = ~jnp.isfinite(model_coeffs_i)
+    is_bad_state = jnp.any(not_finite | is_zero)
+    #jax.debug.print("model_coeffs_i shape: {j}", j=model_coeffs_i.shape)
     padded_full_preds, padded_pred_y = compiled_ivp_solver_arr(
         ode_t0_vals,
         model_coeffs_i
@@ -591,7 +573,7 @@ def FO_approx_ll_loss_jax(
                               compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
                               data_contribution = data_contribution
                               )
-    jax.debug.print("j shape: {j}", j=j.shape)
+    #jax.debug.print("j shape: {j}", j=j.shape)
     # j = _estimate_jacobian_finite_diff(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
     #                       thetas=thetas_dict, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
     #                          gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
@@ -613,10 +595,11 @@ def FO_approx_ll_loss_jax(
         omega2,           # Shape: (n_effects, n_effects)
         unpadded_y_len,
     )
-    jax.debug.print("neg2_ll: {neg2_ll}", neg2_ll=neg2_ll)
+    #jax.debug.print("neg2_ll: {neg2_ll}", neg2_ll=neg2_ll)
+    #jax.debug.print("is_bad_state: {is_bad_state}", is_bad_state=is_bad_state)
     b_i_approx = estimate_ebes_jax(padded_J=J, padded_residuals=masked_residuals, 
                                    time_mask=time_mask_y,
                                    omegas2=omega2, sigma2=sigma2
                                    )
-
+    neg2_ll = jnp.where(is_bad_state, jnp.inf, neg2_ll)
     return neg2_ll, (b_i_approx, (padded_pred_y, padded_full_preds))
