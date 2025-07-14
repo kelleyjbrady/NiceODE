@@ -498,11 +498,43 @@ def create_jax_objective(static_opt_kwargs, dynamic_opt_kwargs, compiled_solver,
     #**dynamic_opt_kwargs                 
     #                           )
     return jax.jit(_jax_objective_function), jax.jit(_jax_objective_function_predict)
-    #return _jax_objective_function
+    #return _jax_objective_function, _jax_objective_function_predict
 
 #@partial(jax.jit, static_argnames = (
 #                                    "compiled_ivp_solver_arr",
-#                                   ))
+#
+# ))
+def create_aug_dynamics_ode(diffrax_ode,  pop_coeff_for_J_idx):
+    
+    def aug_dynamics_ode(t, aug_y, args):
+        y, S = aug_y 
+        j_args = args[pop_coeff_for_J_idx]
+        
+        
+        #jax is able to handle a lambda liike this, but not a closure
+        #with a def
+        j_ode = lambda y_in, j_args_in: diffrax_ode(
+            t,
+            y_in,
+            args.at[pop_coeff_for_J_idx].set(j_args_in)
+        )
+            
+        
+        jac_f_wrt_y = jax.jacobian(j_ode, argnums=0)(y, j_args)
+        jac_f_wrt_p = jax.jacobian(j_ode, argnums=1)(y, j_args)
+
+        
+        dydt = diffrax_ode(t, y, args)
+        
+        dSdt = jac_f_wrt_y @ S + jac_f_wrt_p 
+
+        return (dydt, dSdt)
+    
+    return aug_dynamics_ode
+
+def aug_dynamics_jax_worker():
+    raise NotImplementedError
+
 def FO_approx_ll_loss_jax(
     pop_coeff, 
     sigma2, 
@@ -551,28 +583,30 @@ def FO_approx_ll_loss_jax(
     not_finite = ~jnp.isfinite(model_coeffs_i)
     is_bad_state = jnp.any(not_finite | is_zero)
     #jax.debug.print("model_coeffs_i shape: {j}", j=model_coeffs_i.shape)
-    padded_full_preds, padded_pred_y = compiled_ivp_solver_arr(
+    padded_full_preds, padded_pred_y, J_full, J_conc_full = compiled_ivp_solver_arr(
         ode_t0_vals,
         model_coeffs_i
     )
-    
+    #jax.debug.print("padded_pred_y shape: {padded_pred_y}", padded_pred_y=padded_pred_y.shape)
+    #jax.debug.print("J_conc_full shape: {J_conc_full}", J_conc_full=J_conc_full.shape)
+    #jax.debug.print("model_coeffs_i shape: {j}", j=model_coeffs_i.shape)
     
     masked_residuals = jnp.where(time_mask_y, padded_y - padded_pred_y, 0.0)
 
-    pop_coeffs_j = pop_coeff[pop_coeff_for_J_idx]
-
-    #this AD function does not work, leaving it though to make it easier to recall how to use it
-    j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j,
-                               pop_coeffs=pop_coeff,
-                               pop_coeff_for_J_idx=pop_coeff_for_J_idx,
-                               #pop_coeffs_order=pop_coeffs_order,
-                              #thetas=thetas_dict,
-                              #theta_data = theta_data,
-                              ode_t0_vals=ode_t0_vals,
-                              #gen_coeff_jit=compiled_gen_ode_coeff,
-                              compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
-                              data_contribution = data_contribution
-                              )
+    #pop_coeffs_j = pop_coeff[pop_coeff_for_J_idx]
+#
+    ##this AD function does not work, leaving it though to make it easier to recall how to use it
+    #j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j,
+    #                           pop_coeffs=pop_coeff,
+    #                           pop_coeff_for_J_idx=pop_coeff_for_J_idx,
+    #                           #pop_coeffs_order=pop_coeffs_order,
+    #                          #thetas=thetas_dict,
+    #                          #theta_data = theta_data,
+    #                          ode_t0_vals=ode_t0_vals,
+    #                          #gen_coeff_jit=compiled_gen_ode_coeff,
+    #                          compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
+    #                          data_contribution = data_contribution
+    #                          )
     #jax.debug.print("j shape: {j}", j=j.shape)
     # j = _estimate_jacobian_finite_diff(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
     #                       thetas=thetas_dict, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
@@ -581,7 +615,7 @@ def FO_approx_ll_loss_jax(
     #                          )
     
     # We create a dense J by stacking, then apply the mask to zero-out rows.
-    J_dense = j #shape (n_subject, max_obs_per_subject, n_s)
+    J_dense = J_conc_full#shape (n_subject, max_obs_per_subject, n_s)
     J = jnp.where(time_mask_J, J_dense, 0.0) # time_mask_J shape  (n_subject, max_obs_per_subject, n_s)
     
     

@@ -34,7 +34,7 @@ import mlflow
 import multiprocessing
 import jax.numpy as jnp
 from itertools import product
-from .jax_utils import FO_approx_ll_loss_jax, create_jax_objective
+from .jax_utils import FO_approx_ll_loss_jax, create_jax_objective, create_aug_dynamics_ode
 from mlflow.data.pandas_dataset import from_pandas
 from .mlflow_utils import (get_class_source_without_docstrings,
                                   generate_class_contents_hash, 
@@ -1519,6 +1519,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     ):
         #defaults related to ODE solving
         self.stiff_ode = stiff_ode
+        self.jax_augdyn_ivp_stiff_compiled_solver_ = None
+        self.jax_augdyn_ivp_stiff_solver_is_compiled = False
         self.jax_ivp_closed_stiff_compiled_solver_= None
         self.jax_ivp_closed_stiff_solver_is_compiled = False
         self.jax_ivp_nonstiff_solver_is_compiled = False 
@@ -2473,6 +2475,49 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         return pred_obj
     
     @staticmethod
+    def _solve_augdyn_ivp_jax_worker(y0, args,
+                       tspan=None,
+                       teval=None,
+                       dt0 = None,
+                       aug_ode_func = None,
+                       mass_to_depvar = None,
+                       diffrax_solver=None, 
+                       diffrax_step_ctrl = None,    
+                       diffrax_max_steps = None, 
+                       pop_coeff_for_J_idx = None
+                       ):
+        
+        #aug_ode = create_aug_dynamics_ode(ode_func, pop_coeff_for_J_idx)
+        num_states = y0.shape[0]
+        num_j_params = pop_coeff_for_J_idx.shape[0] # Assuming args is a flat vector of parameters
+        S0 = jnp.zeros((num_states, num_j_params))
+        augmented_y0 = (y0, S0)
+        ode_term = ODETerm(aug_ode_func)
+        
+        solution = diffeqsolve(
+        terms=ode_term,
+        solver=diffrax_solver,
+        t0=tspan[0],
+        t1=tspan[1],
+        dt0=dt0,
+        y0=augmented_y0, # Use the augmented initial state
+        args=args,
+        max_steps=diffrax_max_steps,
+        saveat=SaveAt(ts=teval),
+        stepsize_controller=diffrax_step_ctrl,
+        # NOTE: The adjoint argument is no longer needed here
+        )
+        
+        y_trajectory, J_trajectory = solution.ys
+        J_conc_trajectory = J_trajectory[:,0]   
+        central_mass_trajectory = y_trajectory[:, 0]
+        concentrations = mass_to_depvar(
+            central_mass_trajectory, 
+            args
+        )
+        return y_trajectory, concentrations, J_trajectory, J_conc_trajectory
+    
+    @staticmethod
     def _solve_ivp_jax_worker(y0, args,
                        tspan=None,
                        teval=None,
@@ -2485,9 +2530,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                        ):
         
         ode_term = ODETerm(ode_func)
-        adjoint = BacksolveAdjoint(solver = diffrax_solver, 
-                                   stepsize_controller=diffrax_step_ctrl, 
-                                   )
+        #adjoint = BacksolveAdjoint(solver = diffrax_solver, 
+        #                           stepsize_controller=diffrax_step_ctrl, 
+        #                           )
         solution = diffeqsolve(
         terms = ode_term,
         solver = diffrax_solver,
@@ -2499,7 +2544,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         max_steps=diffrax_max_steps,
         saveat=SaveAt(ts=teval), # Specify time points for output
         stepsize_controller=diffrax_step_ctrl, 
-        adjoint=adjoint
+        #adjoint=adjoint
         )
         
         central_mass_trajectory = solution.ys[:, 0]
@@ -2730,9 +2775,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     )
         return solution.ys, concentrations
     
+    
+    
     def _compile_jax_ivp_solvers(self,
         ode_t0_vals=None,
         timepoints=None,
+        pop_coeffs_for_J_idx = None,
         **kwargs):
         ode_t0_vals = self.ode_t0_vals if ode_t0_vals is None else ode_t0_vals
         ode_t0_vals =  ode_t0_vals.to_numpy()
@@ -2827,6 +2875,38 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             self.jax_ivp_nonstiff_solver_is_compiled = True
             print('Sucessfully complied non-stiff ODE solver')
         
+        aug_check1 = not self.jax_augdyn_ivp_stiff_solver_is_compiled
+        aug_check2 = pop_coeffs_for_J_idx is not None
+        if (aug_check1 and aug_check2):
+            
+            aug_ode_func = create_aug_dynamics_ode(self.pk_model_class.diffrax_ode, pop_coeffs_for_J_idx)
+            
+            diffrax_solver = Kvaerno5()
+            
+            diffrax_step_ctrl = PIDController(rtol=1e-6, atol=1e-6)
+            dt0 = 0.1
+            
+            partial_solve_ivp = partial(
+                self._solve_augdyn_ivp_jax_worker,
+                aug_ode_func = aug_ode_func,
+                mass_to_depvar = self.pk_model_class.diffrax_mass_to_depvar,
+                tspan=tspan_jax,
+                teval=teval_jax,
+                diffrax_solver=diffrax_solver,
+                diffrax_step_ctrl = diffrax_step_ctrl,
+                dt0 = dt0, 
+                diffrax_max_steps = maxsteps, 
+                pop_coeff_for_J_idx = pop_coeffs_for_J_idx
+                
+            )
+            vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+            jit_vmapped_solve = jax.jit(vmapped_solve)
+            self.jax_augdyn_ivp_stiff_jittable_ = vmapped_solve
+            self.jax_augdyn_ivp_stiff_compiled_solver_ = jit_vmapped_solve
+            self.jax_augdyn_ivp_stiff_solver_is_compiled = True
+            print('Sucessfully complied augmented dynamics stiff ODE solver')
+        
+        
         if not (self.jax_ivp_stiff_solver_is_compiled):
             diffrax_solver = Kvaerno5()
             
@@ -2845,6 +2925,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 diffrax_max_steps = maxsteps
                 
             )
+            
             
             vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
             jit_vmapped_solve = jax.jit(vmapped_solve)
@@ -3393,6 +3474,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.jax_ivp_nonstiff_solver_is_compiled = False
         self.jax_ivp_stiff_solver_is_compiled = False
         self.jax_ivp_pymcstiff_solver_is_compiled = False
+        self.jax_augdyn_ivp_stiff_solver_is_compiled = False
         
         
         
@@ -3408,7 +3490,18 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 self.fit2(data, perform_fit=False)
                 
         _, _, _, beta_data = self._assemble_pred_matrices(data)
-        self._compile_jax_ivp_solvers()
+        pop_coeffs_for_J_idx = self.dynamic_opt_kwargs_['pop_coeffs_for_J_idx']
+        self._compile_jax_ivp_solvers(timepoints=timepoints, pop_coeffs_for_J_idx=pop_coeffs_for_J_idx)
+        #if timepoints is NOT the same as what was fit, need to update AT LEAST padded_y, time_mask_y
+        # time_mask_J unpadded_y_len so that there is not padding when predicting at every timepoint for 
+        #each subject. 
+        pred_static_opt_kwargs = deepcopy(self.static_opt_kwargs_)
+        pred_dynamic_opt_kwargs = deepcopy(self.dynamic_opt_kwargs_)
+        _, _jax_objective_function_predict_ = create_jax_objective(static_opt_kwargs=pred_static_opt_kwargs, 
+                                                       dynamic_opt_kwargs=pred_dynamic_opt_kwargs,
+                                                       compiled_solver=self.jax_augdyn_ivp_stiff_compiled_solver_, 
+                                                       jittable_loss = FO_approx_ll_loss_jax
+                                                       )
         ode_t0_vals_are_subject_y0_init_status = deepcopy(
             self.ode_t0_vals_are_subject_y0
         )
@@ -3758,7 +3851,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         
         #----------JAX Setup-------------
-        debugging_jax = True
+        debugging_jax = False
         params_idx_jax = deepcopy(params_idx)
         required_keys = ['pop', 'sigma', 'omega', 'theta']
         existing_keys = [i for i in params_idx_jax]
@@ -3849,10 +3942,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             "omega_lower_chol_idx": list(zip(*self.omega_lower_chol_idx)),
         }
         #should we jit this wrapper?
-        self._compile_jax_ivp_solvers()
-        _jax_objective_function, _jax_objective_function_predict = create_jax_objective(static_opt_kwargs=static_opt_kwargs, 
+        self._compile_jax_ivp_solvers(pop_coeffs_for_J_idx=pop_coeffs_for_J_idx)
+        self.static_opt_kwargs_ = deepcopy(static_opt_kwargs)
+        self.dynamic_opt_kwargs_ = deepcopy(dynamic_opt_kwargs)
+        _jax_objective_function, _ = create_jax_objective(static_opt_kwargs=static_opt_kwargs, 
                                                        dynamic_opt_kwargs=dynamic_opt_kwargs,
-                                                       compiled_solver=self.jax_ivp_stiff_compiled_solver_, 
+                                                       compiled_solver=self.jax_augdyn_ivp_stiff_compiled_solver_, 
                                                        jittable_loss = FO_approx_ll_loss_jax
                                                        )
         if debugging_jax:
@@ -3987,30 +4082,37 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                             total_n_params = _total_n_params
                                           )
             if perform_fit:
-                fit_with_jax = True
-                if fit_with_jax:
-                    def scipy_wrapper(numpy_params):
-                        """
-                        This function is NOT jitted. It's a simple Python function
-                        that shields our JAX code from SciPy.
-                        """
-                        # a. Convert SciPy's NumPy array to a JAX array with a specific dtype
-                        jax_params = jnp.asarray(numpy_params, dtype=jnp.float64)
+                fit_jax_objective = True
+                optimize_with_scipy = True
+                use_logger = False
+                if use_logger:
+                    callback = mlf_callback
+                else:
+                    callback = None
+                if fit_jax_objective:
+                    if optimize_with_scipy:
+                        def scipy_wrapper(numpy_params):
+                            """
+                            This function is NOT jitted. It's a simple Python function
+                            that shields our JAX code from SciPy.
+                            """
+                            # a. Convert SciPy's NumPy array to a JAX array with a specific dtype
+                            jax_params = jnp.asarray(numpy_params, dtype=jnp.float64)
 
-                        # b. Call your already-JIT-compiled objective function
-                        loss = _jax_objective_function(jax_params)
+                            # b. Call your already-JIT-compiled objective function
+                            loss = _jax_objective_function(jax_params)
 
-                        # c. Return a standard Python float, which optimizers expect
-                        return float(loss)
-                    self.fit_result_ = minimize(
-                            scipy_wrapper,
-                            _opt_params,
-                            method=self.minimize_method,
-                            tol=self.optimizer_tol,
-                            options={"disp": True, 
-                                    },
-                            callback = mlf_callback,
-                        )
+                            # c. Return a standard Python float, which optimizers expect
+                            return float(loss)
+                        self.fit_result_ = minimize(
+                                scipy_wrapper,
+                                _opt_params,
+                                method=self.minimize_method,
+                                tol=self.optimizer_tol,
+                                options={"disp": False, 
+                                        },
+                                callback = callback,
+                            )
 
                 else:
                     self.fit_result_ = optimize_with_checkpoint_joblib(
@@ -4023,7 +4125,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         minimize_method=self.minimize_method,
                         tol=self.optimizer_tol,
                         bounds=_opt_bounds,
-                        callback = mlf_callback
+                        callback = callback
                         
                     )
                 # hess_fun = nd.Hessian()
