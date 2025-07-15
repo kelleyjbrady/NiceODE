@@ -4,6 +4,7 @@ import pandas as pd
 import jax
 from functools import partial
 import numdifftools as nd
+import optax
 
 
 def make_jittable_pk_coeff(expected_len_out):
@@ -317,7 +318,7 @@ def neg2_ll_chol_jit(
     return neg2_ll
 
 def estimate_ebes_jax(
-    padded_J, padded_residuals, time_mask, omegas2, sigma2
+    padded_J, padded_residuals, time_mask, omegas2, sigma2, **kwargs
 ):
     """
     Calculates the Empirical Bayes Estimates (EBEs) for all subjects in parallel.
@@ -460,13 +461,20 @@ def _jittable_param_unpack(opt_params,
     return loss_kwargs
 
 
-def create_jax_objective(static_opt_kwargs, dynamic_opt_kwargs, compiled_solver, jittable_loss):
+def create_jax_objective(static_opt_kwargs,
+                         dynamic_opt_kwargs,
+                         compiled_augdyn_solver,
+                         compiled_solver,
+                         jittable_loss, 
+                         
+                         ):
               
     all_other_kwargs = {**static_opt_kwargs, **dynamic_opt_kwargs}
     
     def _jax_objective_function(opt_params, ):
         
         loss_kwargs = _jittable_param_unpack(opt_params=opt_params, **all_other_kwargs)
+        loss_kwargs['compiled_augdyn_ivp_solver_arr'] = compiled_augdyn_solver
         loss_kwargs['compiled_ivp_solver_arr'] = compiled_solver
         
         loss, _ = jittable_loss(
@@ -479,6 +487,7 @@ def create_jax_objective(static_opt_kwargs, dynamic_opt_kwargs, compiled_solver,
     def _jax_objective_function_predict(opt_params, ):
         
         loss_kwargs = _jittable_param_unpack(opt_params=opt_params, **all_other_kwargs)
+        loss_kwargs['compiled_augdyn_ivp_solver_arr'] = compiled_augdyn_solver
         loss_kwargs['compiled_ivp_solver_arr'] = compiled_solver
         
         loss_bundle = jittable_loss(
@@ -535,7 +544,175 @@ def create_aug_dynamics_ode(diffrax_ode,  pop_coeff_for_J_idx):
 def aug_dynamics_jax_worker():
     raise NotImplementedError
 
-def FO_approx_ll_loss_jax(
+def estimate_b_i_vmapped(
+    # Batched inputs (one entry per subject)
+    initial_b_i_batch,
+    padded_y_batch,
+    data_contribution_batch,
+    ode_t0_vals_batch,
+    time_mask_y_batch,
+    unpadded_y_len_batch,
+    # Shared inputs (same for all subjects)
+    pop_coeff,
+    sigma2,
+    omega2,
+    n_random_effects,
+    compiled_ivp_solver,
+):
+    """
+    Estimates b_i for all subjects in parallel using a vmapped Optax optimizer.
+    """
+    # Define the optimization for a single subject
+    def _estimate_single_b_i(initial_b_i,
+                             padded_y_i,
+                             data_contrib_i,
+                             ode_t0_i,
+                             time_mask_y_i,
+                             unpadded_y_i_len,
+                             ):
+        # The objective function with data for this subject closed over
+        # We also unpad the subject's observation vector here
+        #y_i = padded_y_batch[:n_obs]
+        
+        obj_fn = lambda b_i: FOCE_inner_loss_fn(
+            b_i = b_i, 
+            padded_y_i = padded_y_i,
+            unpadded_y_i_len=unpadded_y_i_len,
+            pop_coeff_i=pop_coeff,
+            data_contrib_i = data_contrib_i,
+            sigma2 = sigma2,
+            omega2 = omega2,
+            ode_t0_i = ode_t0_i,
+            time_mask_y_i=time_mask_y_i,
+            n_random_effects=n_random_effects, 
+            compiled_ivp_solver=compiled_ivp_solver,
+            
+        )
+
+        # Initialize the L-BFGS optimizer
+        optimizer = optax.lbfgs(maxiter=50, tol=1e-4)
+        
+        # Run the optimization to find the parameters (b_i) that minimize the objective
+        # The `run` method is a convenient wrapper for stateful optimizers
+        results = optimizer.run(obj_fn, initial_b_i)
+        
+        # Return the optimized parameters
+        return results.params
+
+    # Vmap the single-subject optimization function
+    # `in_axes` specifies which arguments to map over. `None` means broadcast.
+    vmapped_optimizer = jax.vmap(
+        _estimate_single_b_i,
+        in_axes=(0, 0, 0, 0, 0, 0),  # Map over all batched inputs
+    )
+    
+    # Execute the vmapped function
+    all_b_i_estimates = vmapped_optimizer(
+        initial_b_i_batch,
+        padded_y_batch,
+        data_contribution_batch,
+        ode_t0_vals_batch,
+        time_mask_y_batch,
+        unpadded_y_len_batch
+    )
+    
+    return all_b_i_estimates
+
+def FOCE_inner_loss_fn(
+    b_i,  # The parameters we are optimizing (random effects)
+    # --- Static data for this subject (won't change during inner opt) ---
+    padded_y_i,
+    unpadded_y_i_len,
+    pop_coeff_i,
+    data_contribution_i,
+    sigma2,
+    omega2,
+    ode_t0_val_i,
+    time_mask_y_i,
+    n_random_effects,
+    compiled_ivp_solver,
+):
+    """
+    Calculates the conditional negative 2 log-likelihood for a single subject.
+    This function is pure and written entirely in JAX.
+    """
+    # Combine population and random effects to get subject-specific coefficients
+    # This assumes b_i are additive adjustments on the log-scale
+    combined_coeffs = pop_coeff_i + b_i
+    model_coeffs_i = jnp.exp(data_contribution_i + combined_coeffs)
+
+    # --- Data Likelihood Part ---
+    # Solve the ODE for this individual with the current b_i guess
+    padded_preds_i = compiled_ivp_solver(model_coeffs_i, ode_t0_val_i,)
+    masked_residuals_i = jnp.where(time_mask_y_i, padded_y_i - padded_preds_i, 0.0)
+    # Compute residuals only for observed time points
+    
+    n_t = unpadded_y_i_len # Number of actual observations for subject i
+    sum_sq_residuals = jnp.sum(masked_residuals_i**2)
+    
+    # This assumes an additive error model, as in the original code
+    neg2_ll_data = (n_t * jnp.log(2 * jnp.pi) 
+                    + n_t * jnp.log(sigma2) 
+                    + sum_sq_residuals / sigma2)
+
+    # --- Prior Penalty Part ---
+    # Calculate the penalty from the random effects distribution
+    # b_i.T @ inv(omega2) @ b_i + log(det(omega2))
+    L, low = jax.scipy.linalg.cho_factor(omega2, lower=True)
+    log_det_omega2 = 2 * jnp.sum(jnp.log(jnp.diag(L)))
+    
+    # Use Cholesky solve for stability and efficiency
+    prior_penalty = b_i @ jnp.linalg.cho_solve((L, True), b_i)
+
+    neg2ll_prior = (n_random_effects * jnp.log(2 * jnp.pi) 
+                    + log_det_omega2 
+                    + prior_penalty)
+
+    return neg2_ll_data + neg2ll_prior
+
+def estimate_b_i_foce_passthrough(pop_coeff, **kwargs):
+    return pop_coeff
+
+def estimate_b_i_fo_passthrough(b_i, **kwargs):
+    return b_i
+
+def FO_approx_neg2ll_loss_jax(
+    pop_coeff, 
+    sigma2, 
+    omega2, 
+    theta, 
+    theta_data,
+    padded_y,
+    unpadded_y_len,
+    time_mask_y,
+    time_mask_J,
+    compiled_augdyn_ivp_solver_arr,
+    compiled_ivp_solver_arr,
+    ode_t0_vals,
+    pop_coeff_for_J_idx,
+    **kwargs,
+):
+    loss = approx_neg2ll_loss_jax(
+        pop_coeff = pop_coeff, 
+        sigma2 = sigma2, 
+        omega2 = omega2, 
+        theta = theta, 
+        theta_data = theta_data,
+        padded_y = padded_y,
+        unpadded_y_len = unpadded_y_len,
+        time_mask_y = time_mask_y,
+        time_mask_J = time_mask_J,
+        compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
+        compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+        ode_t0_vals = ode_t0_vals,
+        pop_coeff_for_J_idx = pop_coeff_for_J_idx,
+        compiled_estimate_b_i_foce = estimate_b_i_foce_passthrough,
+        compiled_estimate_b_i_fo = estimate_ebes_jax
+    )
+    
+    return loss
+
+def approx_neg2ll_loss_jax(
     pop_coeff, 
     sigma2, 
     omega2, 
@@ -552,7 +729,7 @@ def FO_approx_ll_loss_jax(
     #y_groups_unique,
     #n_population_coeff, 
     #pop_coeff_names,
-    omega2_diag_size,
+    #omega2_diag_size,
     #subject_level_effect_names,
     #sigma_names,
     #n_thetas,
@@ -560,30 +737,53 @@ def FO_approx_ll_loss_jax(
     time_mask_y,
     time_mask_J,
     #compiled_ivp_solver_keys,
+    compiled_augdyn_ivp_solver_arr,
     compiled_ivp_solver_arr,
     ode_t0_vals,
     #compiled_gen_ode_coeff,
     pop_coeff_for_J_idx,
     #compiled_ivp_predictor,
     #solve_for_omegas=False,
+    compiled_estimate_b_i_foce, 
+    compiled_estimate_b_i_fo,
 ):
     
     #jax.debug.print("theta shape: {s}", s = theta.shape )
+    n_subjects = time_mask_y.shape[0]
+    n_coeffs = pop_coeff.shape[0]
+    n_subject_level_eff = pop_coeff_for_J_idx.shape[0]
     if theta.shape[0] == 0:
-        n_subjects = time_mask_y.shape[0]
-        n_coeffs = pop_coeff.shape[0]
+        
         data_contribution = jnp.zeros((n_subjects, n_coeffs))
     else:
         data_contribution = theta @ theta_data
     #jax.debug.print("time_mask_y shape: {s}", s = time_mask_y.shape )
     #jax.debug.print("data_contribution shape: {j}", j=data_contribution.shape)
     #jax.debug.print("pop_coeff shape: {j}", j=pop_coeff.shape)
-    model_coeffs_i = jnp.exp(data_contribution + pop_coeff)# + 1e-6
+    
+    #estimate b_i here
+    initial_b_i_batch = jnp.zeros((n_subjects, n_subject_level_eff))
+    subject_coeff = compiled_estimate_b_i_foce(
+                                               initial_b_i_batch = initial_b_i_batch,
+                                                padded_y_batch = padded_y,
+                                                data_contribution_batch = data_contribution,
+                                                ode_t0_vals_batch = ode_t0_vals,
+                                                time_mask_y_batch = time_mask_y,
+                                                unpadded_y_len_batch = unpadded_y_len,
+                                                pop_coeff = pop_coeff,
+                                                sigma2 = sigma2,
+                                                omega2 = omega2,
+                                                n_random_effects = n_subject_level_eff,
+                                                compiled_ivp_solver = compiled_ivp_solver_arr,
+                                               
+                                               
+                                               )
+    model_coeffs_i = jnp.exp(data_contribution + subject_coeff)# + 1e-6
     is_zero = (model_coeffs_i == 0)
     not_finite = ~jnp.isfinite(model_coeffs_i)
     is_bad_state = jnp.any(not_finite | is_zero)
     #jax.debug.print("model_coeffs_i shape: {j}", j=model_coeffs_i.shape)
-    padded_full_preds, padded_pred_y, J_full, J_conc_full = compiled_ivp_solver_arr(
+    padded_full_preds, padded_pred_y, J_full, J_conc_full = compiled_augdyn_ivp_solver_arr(
         ode_t0_vals,
         model_coeffs_i
     )
@@ -593,28 +793,6 @@ def FO_approx_ll_loss_jax(
     
     masked_residuals = jnp.where(time_mask_y, padded_y - padded_pred_y, 0.0)
 
-    #pop_coeffs_j = pop_coeff[pop_coeff_for_J_idx]
-#
-    ##this AD function does not work, leaving it though to make it easier to recall how to use it
-    #j = _estimate_jacobian_jax(jac_pop_coeffs = pop_coeffs_j,
-    #                           pop_coeffs=pop_coeff,
-    #                           pop_coeff_for_J_idx=pop_coeff_for_J_idx,
-    #                           #pop_coeffs_order=pop_coeffs_order,
-    #                          #thetas=thetas_dict,
-    #                          #theta_data = theta_data,
-    #                          ode_t0_vals=ode_t0_vals,
-    #                          #gen_coeff_jit=compiled_gen_ode_coeff,
-    #                          compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
-    #                          data_contribution = data_contribution
-    #                          )
-    #jax.debug.print("j shape: {j}", j=j.shape)
-    # j = _estimate_jacobian_finite_diff(jac_pop_coeffs = pop_coeffs_j, pop_coeffs=pop_coeffs, pop_coeffs_order=pop_coeffs_order,
-    #                       thetas=thetas_dict, theta_data = theta_data, ode_t0_vals=ode_t0_vals,
-    #                          gen_coeff_jit=compiled_gen_ode_coeff, compiled_ivp_solver_arr=compiled_ivp_solver_arr, 
-    #                          data_contribution = data_contribution, time_mask_y=time_mask_y
-    #                          )
-    
-    # We create a dense J by stacking, then apply the mask to zero-out rows.
     J_dense = J_conc_full#shape (n_subject, max_obs_per_subject, n_s)
     J = jnp.where(time_mask_J, J_dense, 0.0) # time_mask_J shape  (n_subject, max_obs_per_subject, n_s)
     
@@ -631,7 +809,7 @@ def FO_approx_ll_loss_jax(
     )
     #jax.debug.print("neg2_ll: {neg2_ll}", neg2_ll=neg2_ll)
     #jax.debug.print("is_bad_state: {is_bad_state}", is_bad_state=is_bad_state)
-    b_i_approx = estimate_ebes_jax(padded_J=J, padded_residuals=masked_residuals, 
+    b_i_approx = compiled_estimate_b_i_fo(padded_J=J, padded_residuals=masked_residuals, 
                                    time_mask=time_mask_y,
                                    omegas2=omega2, sigma2=sigma2
                                    )

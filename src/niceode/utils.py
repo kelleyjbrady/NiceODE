@@ -34,7 +34,7 @@ import mlflow
 import multiprocessing
 import jax.numpy as jnp
 from itertools import product
-from .jax_utils import FO_approx_ll_loss_jax, create_jax_objective, create_aug_dynamics_ode
+from .jax_utils import FO_approx_neg2ll_loss_jax, create_jax_objective, create_aug_dynamics_ode
 from mlflow.data.pandas_dataset import from_pandas
 from .mlflow_utils import (get_class_source_without_docstrings,
                                   generate_class_contents_hash, 
@@ -3499,8 +3499,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         pred_dynamic_opt_kwargs = deepcopy(self.dynamic_opt_kwargs_)
         _, _jax_objective_function_predict_ = create_jax_objective(static_opt_kwargs=pred_static_opt_kwargs, 
                                                        dynamic_opt_kwargs=pred_dynamic_opt_kwargs,
-                                                       compiled_solver=self.jax_augdyn_ivp_stiff_compiled_solver_, 
-                                                       jittable_loss = FO_approx_ll_loss_jax
+                                                       compiled_augdyn_solver=self.jax_augdyn_ivp_stiff_compiled_solver_, 
+                                                       compiled_solver = self.jax_ivp_stiff_compiled_solver_,
+                                                       jittable_loss = FO_approx_neg2ll_loss_jax,
                                                        )
         ode_t0_vals_are_subject_y0_init_status = deepcopy(
             self.ode_t0_vals_are_subject_y0
@@ -3947,8 +3948,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.dynamic_opt_kwargs_ = deepcopy(dynamic_opt_kwargs)
         _jax_objective_function, _ = create_jax_objective(static_opt_kwargs=static_opt_kwargs, 
                                                        dynamic_opt_kwargs=dynamic_opt_kwargs,
-                                                       compiled_solver=self.jax_augdyn_ivp_stiff_compiled_solver_, 
-                                                       jittable_loss = FO_approx_ll_loss_jax
+                                                       compiled_augdyn_solver=self.jax_augdyn_ivp_stiff_compiled_solver_, 
+                                                        compiled_solver=self.jax_ivp_stiff_compiled_solver_, 
+                                                       jittable_loss = FO_approx_neg2ll_loss_jax,
                                                        )
         if debugging_jax:
             return _jax_objective_function, _opt_params
