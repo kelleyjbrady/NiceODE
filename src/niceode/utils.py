@@ -34,7 +34,12 @@ import mlflow
 import multiprocessing
 import jax.numpy as jnp
 from itertools import product
-from .jax_utils import FO_approx_neg2ll_loss_jax, create_jax_objective, create_aug_dynamics_ode
+from .jax_utils import (FO_approx_neg2ll_loss_jax,
+                        FOCE_approx_neg2ll_loss_jax,
+                        create_jax_objective,
+                        create_aug_dynamics_ode
+                        
+                        )
 from mlflow.data.pandas_dataset import from_pandas
 from .mlflow_utils import (get_class_source_without_docstrings,
                                   generate_class_contents_hash, 
@@ -1515,9 +1520,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         optimize_sigma_on_log_scale = True,
         stiff_ode = True,
         center_log_scale_params = True,
-        use_surrogate_neg2ll = False
+        use_surrogate_neg2ll = False, 
+        jax_loss = None,
     ):
         #defaults related to ODE solving
+        self.jax_loss = jax_loss
         self.stiff_ode = stiff_ode
         self.jax_augdyn_ivp_stiff_compiled_solver_ = None
         self.jax_augdyn_ivp_stiff_solver_is_compiled = False
@@ -1891,8 +1898,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         sigma_case_2 = self.no_me_loss_needs_sigma
         if sigma_case_1 or sigma_case_2:
             if self.optimize_sigma_on_log_scale:
-                sigma_lower = None
-                sigma_upper = None 
+                sigma_lower = 2e-9
+                sigma_upper = 22000 
             else:
                 sigma_lower = model_error.optimization_lower_bound
                 sigma_upper = model_error.optimization_upper_bound
@@ -1908,7 +1915,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             n_eff = len([obj for obj in self.population_coeff
                      if obj.subject_level_intercept])
             n_lower_omega_lower_chol = int(n_eff * (n_eff + 1) / 2)
-            bounds.extend((None, None) for i in range(n_lower_omega_lower_chol))
+            bounds.extend((2e-9, 22000) for i in range(n_lower_omega_lower_chol))
 
         else:
             bounds.extend(
@@ -2486,7 +2493,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                        diffrax_max_steps = None, 
                        pop_coeff_for_J_idx = None
                        ):
-        
+        print("Compiling `_solve_augdyn_ivp_jax_worker`")
         #aug_ode = create_aug_dynamics_ode(ode_func, pop_coeff_for_J_idx)
         num_states = y0.shape[0]
         num_j_params = pop_coeff_for_J_idx.shape[0] # Assuming args is a flat vector of parameters
@@ -2528,7 +2535,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                        diffrax_step_ctrl = None,    
                        diffrax_max_steps = None
                        ):
-        
+        print("Compiling `_solve_ivp_jax_worker`")
         ode_term = ODETerm(ode_func)
         #adjoint = BacksolveAdjoint(solver = diffrax_solver, 
         #                           stepsize_controller=diffrax_step_ctrl, 
@@ -2930,6 +2937,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
             jit_vmapped_solve = jax.jit(vmapped_solve)
             self.jax_ivp_stiff_jittable_ = vmapped_solve
+            self.jax_ivp_stiff_jittable_novmap_ = partial_solve_ivp
             self.jax_ivp_stiff_compiled_solver_ = jit_vmapped_solve
             self.jax_ivp_stiff_solver_is_compiled = True
             print('Sucessfully complied stiff ODE solver')
@@ -3501,7 +3509,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                        dynamic_opt_kwargs=pred_dynamic_opt_kwargs,
                                                        compiled_augdyn_solver=self.jax_augdyn_ivp_stiff_compiled_solver_, 
                                                        compiled_solver = self.jax_ivp_stiff_compiled_solver_,
-                                                       jittable_loss = FO_approx_neg2ll_loss_jax,
+                                                       jittable_loss = self.jax_loss,
                                                        )
         ode_t0_vals_are_subject_y0_init_status = deepcopy(
             self.ode_t0_vals_are_subject_y0
@@ -3852,7 +3860,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         
         #----------JAX Setup-------------
-        debugging_jax = False
+        debugging_jax = True
         params_idx_jax = deepcopy(params_idx)
         required_keys = ['pop', 'sigma', 'omega', 'theta']
         existing_keys = [i for i in params_idx_jax]
@@ -3948,9 +3956,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.dynamic_opt_kwargs_ = deepcopy(dynamic_opt_kwargs)
         _jax_objective_function, _ = create_jax_objective(static_opt_kwargs=static_opt_kwargs, 
                                                        dynamic_opt_kwargs=dynamic_opt_kwargs,
-                                                       compiled_augdyn_solver=self.jax_augdyn_ivp_stiff_compiled_solver_, 
-                                                        compiled_solver=self.jax_ivp_stiff_compiled_solver_, 
-                                                       jittable_loss = FO_approx_neg2ll_loss_jax,
+                                                       compiled_augdyn_solver=self.jax_augdyn_ivp_stiff_jittable_, 
+                                                        compiled_solver=self.jax_ivp_stiff_jittable_novmap_, 
+                                                       jittable_loss = self.jax_loss,
                                                        )
         if debugging_jax:
             return _jax_objective_function, _opt_params
@@ -4086,7 +4094,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             if perform_fit:
                 fit_jax_objective = True
                 optimize_with_scipy = True
-                use_logger = False
+                use_logger = True
                 if use_logger:
                     callback = mlf_callback
                 else:
@@ -4098,6 +4106,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                             This function is NOT jitted. It's a simple Python function
                             that shields our JAX code from SciPy.
                             """
+                            [print(i) for i in numpy_params]
                             # a. Convert SciPy's NumPy array to a JAX array with a specific dtype
                             jax_params = jnp.asarray(numpy_params, dtype=jnp.float64)
 
@@ -4111,7 +4120,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                 _opt_params,
                                 method=self.minimize_method,
                                 tol=self.optimizer_tol,
-                                options={"disp": False, 
+                                options={"disp": True, 
                                         },
                                 callback = callback,
                             )
