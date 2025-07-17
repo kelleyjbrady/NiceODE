@@ -2912,6 +2912,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             )
             vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
             jit_vmapped_solve = jax.jit(vmapped_solve)
+            self.jax_augdyn_ivp_stiff_jittable_novmap_ = partial_solve_ivp
             self.jax_augdyn_ivp_stiff_jittable_ = vmapped_solve
             self.jax_augdyn_ivp_stiff_compiled_solver_ = jit_vmapped_solve
             self.jax_augdyn_ivp_stiff_solver_is_compiled = True
@@ -3968,6 +3969,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             "fixed_params_combined_params_idx": fixed_params_combined_params_idx,
             "init_params_for_scaling": init_params_for_scaling,
             "omega_lower_chol_idx": list(zip(*self.omega_lower_chol_idx)),
+            "use_full_omega": self.use_full_omega,
         }
         loss_static_kwargs = {
             "theta_data": jax_bundle_out["td_tensor"],
@@ -3978,6 +3980,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             "unpadded_y_len": jax_bundle_out["unpadded_y_len"],
             "ode_t0_vals": np.array(self.ode_t0_vals.to_numpy(dtype=np.float64)),
             "compiled_augdyn_ivp_solver_arr":self.jax_augdyn_ivp_stiff_jittable_,
+            "compiled_augdyn_ivp_solver_novmap_arr":self.jax_augdyn_ivp_stiff_jittable_novmap_,
             "compiled_ivp_solver_arr":self.jax_ivp_stiff_jittable_novmap_, 
         }
         #should we jit this wrapper?

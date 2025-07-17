@@ -370,6 +370,74 @@ def estimate_ebes_jax(
 
     return b_i_approx
 
+def estimate_ebes_jax_vectorized(
+    padded_J: jnp.ndarray,
+    padded_residuals: jnp.ndarray,
+    time_mask: jnp.ndarray,
+    omegas2: jnp.ndarray,
+    sigma2: float,
+    jitter: float = 1e-6,
+) -> jnp.ndarray:
+    """
+    Calculates Empirical Bayes Estimates (EBEs) in a fully vectorized way.
+
+    Args:
+        padded_J: Padded Jacobian matrix.
+                  Shape: (n_individuals, max_obs, n_random_effects)
+        padded_residuals: Padded residuals.
+                          Shape: (n_individuals, max_obs)
+        time_mask: Boolean mask indicating valid observations.
+                   Shape: (n_individuals, max_obs)
+        omegas2: Covariance matrix of the random effects.
+                 Shape: (n_random_effects, n_random_effects)
+        sigma2: Variance of the residual error.
+                Shape: scalar
+        jitter: Small value added to the diagonal of omega for numerical stability.
+
+    Returns:
+        The estimated EBEs for each individual.
+        Shape: (n_individuals, n_random_effects)
+    """
+    n_effects = omegas2.shape[-1]
+
+    # 1. Calculate the inverse of omega^2 using Cholesky decomposition.
+    # This is more numerically stable than a direct inverse.
+    # Add jitter to the diagonal to ensure the matrix is positive-definite.
+    omega_stable = omegas2 + jnp.eye(n_effects) * jitter
+    C, low = jax.scipy.linalg.cho_factor(omega_stable, lower=True)
+    omega_inv = jax.scipy.linalg.cho_solve((C, low), jnp.eye(n_effects))
+
+    # 2. Mask the padded values in the batched inputs.
+    # `jnp.where` is vectorized by default. `[:, :, None]` broadcasts the mask
+    # correctly over the last dimension of the Jacobian.
+    J_masked = jnp.where(time_mask[:, :, None], padded_J, 0.0)
+    residuals_masked = jnp.where(time_mask, padded_residuals, 0.0)
+
+    # 3. Calculate the left-hand side (A) and right-hand side (rhs)
+    #    for all subjects at once using batched matrix multiplication.
+
+    # Transpose the last two dimensions of J_masked for matmul.
+    # Shape becomes (n_individuals, n_random_effects, max_obs).
+    J_masked_T = jnp.swapaxes(J_masked, -1, -2)
+
+    # Batched matrix-matrix multiplication: (B, N, M) @ (B, M, N) -> (B, N, N)
+    A_J = J_masked_T @ J_masked
+
+    # Batched matrix-vector multiplication: (B, N, M) @ (B, M, 1) -> (B, N, 1)
+    # We add a dimension to the residuals and squeeze it out after.
+    rhs = (J_masked_T @ residuals_masked[..., None]).squeeze(axis=-1)
+
+    # 4. Construct the full A matrix for the linear system.
+    # The (sigma2 * omega_inv) term is automatically broadcast across the
+    # batch dimension of A_J.
+    A = A_J + sigma2 * omega_inv
+
+    # 5. Solve the batched linear system A * b_i = rhs.
+    # `jnp.linalg.solve` automatically maps over the leading batch dimension.
+    b_i_approx = jnp.linalg.solve(A, rhs)
+
+    return b_i_approx
+
 #@partial(jax.jit, static_argnames = ( 
 #                                        # SHAPES for jnp.zeros
 #                                    "theta_total_len",
@@ -574,6 +642,7 @@ def estimate_b_i_vmapped(
     omega2,
     n_random_effects,
     compiled_ivp_solver,
+    compiled_augdyn_ivp_solver,
     pop_coeff_w_bi_idx,
     **kwargs
 ):
@@ -630,6 +699,7 @@ def estimate_b_i_vmapped(
             time_mask_y_i=time_mask_y_i,
             n_random_effects=n_random_effects, 
             compiled_ivp_solver=compiled_ivp_solver,
+            #compiled_augdyn_ivp_solver = compiled_augdyn_ivp_solver,
             pop_coeff_w_bi_idx = pop_coeff_w_bi_idx,
             
         )
@@ -652,10 +722,32 @@ def estimate_b_i_vmapped(
         estimated_b_i, opt_state = jax.lax.fori_loop(
             0, num_inner_steps, update_step, (initial_b_i, opt_state)
         )
+        def predict_fn(b_i_for_pred):
+            # This logic is copied from your FOCE_inner_loss_fn
+            b_i_work = jnp.zeros_like(pop_coeff)
+            b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(b_i_for_pred)
+            combined_coeffs = pop_coeff + b_i_work
+            model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
+            
+            # We don't need the "safe_coeffs" logic here, as we're already at the optimum
+            _, _, _, J_conc_full = compiled_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
+            
+            # We need the predictions corresponding to the mask
+            return  J_conc_full
         
-        hessian_matrix = jnp.ones_like(estimated_b_i)
+        final_inner_loss_value = obj_fn(estimated_b_i)
+
+        J = predict_fn(estimated_b_i)
+        mask_expanded = time_mask_y_i[:, None]
+        J_masked = J * mask_expanded
+        #mask J here, but what shape is it, how should `time_mask_y_i` be reshaped/tiled?
+        _sigma2 = sigma2[0]
+        H_approx = (J_masked.T @ J_masked) / _sigma2
+        
+        
+        #hessian_matrix = jnp.ones_like(estimated_b_i)
         # Return the optimized parameters
-        return estimated_b_i, hessian_matrix
+        return estimated_b_i, H_approx, final_inner_loss_value
 
     # Vmap the single-subject optimization function
     # `in_axes` specifies which arguments to map over. `None` means broadcast.
@@ -665,7 +757,7 @@ def estimate_b_i_vmapped(
     )
     
     # Execute the vmapped function
-    all_b_i_estimates, all_hessians = vmapped_optimizer(
+    all_b_i_estimates, all_hessians, all_final_inner_loss = vmapped_optimizer(
         initial_b_i_batch,
         padded_y_batch,
         data_contribution_batch,
@@ -674,7 +766,7 @@ def estimate_b_i_vmapped(
         #unpadded_y_len_batch
     )
     
-    return all_b_i_estimates, all_hessians
+    return all_b_i_estimates, all_hessians, all_final_inner_loss
 
 def FOCE_inner_loss_fn(
     b_i,  # The parameters we are optimizing (random effects)
@@ -817,12 +909,153 @@ def FOCE_inner_loss_fn(
     #jax.debug.print("Inner Loss Out val: {s}", s = loss_out)
     return loss_out
 
+def foc_interaction_term(all_hessians: jnp.ndarray, jitter: float = 1e-6) -> jnp.ndarray:
+    """
+    Calculates the FOCEi interaction term in a vectorized manner.
+
+    Args:
+        all_hessians: A batched array of Hessian matrices, with shape
+                      (num_subjects, n_params, n_params).
+        jitter: A small value added to the diagonal for numerical stability.
+
+    Returns:
+        A scalar JAX array containing the interaction term.
+    """
+    # 1. Add a small "jitter" to the diagonal of each Hessian.
+    # This improves numerical stability and helps ensure the matrices are
+    # positive-definite, preventing the Cholesky decomposition from failing.
+    num_params = all_hessians.shape[-1]
+    jitter_matrix = jnp.eye(num_params) * jitter
+    stable_hessians = all_hessians + jitter_matrix
+
+    # 2. Perform Cholesky decomposition on the entire batch of Hessians at once.
+    # `cholesky` will operate on the last two dimensions.
+    try:
+        L = jnp.linalg.cholesky(stable_hessians)
+    except Exception as e:
+        # This will only be caught in eager mode, but it's good for debugging.
+        print("Cholesky decomposition failed. Hessians may not be positive-definite.")
+        raise e
+
+    # 3. Extract the diagonal elements from each matrix in the batch.
+    # The result `diags` will have a shape of (num_subjects, n_params).
+    diags = jnp.diagonal(L, axis1=-2, axis2=-1)
+    
+    # 4. Calculate the log-determinant for each subject.
+    # This sums the log-diagonals over the last axis. The result is a
+    # vector of shape (num_subjects,).
+    # We use nan_to_num to handle cases where a diagonal is zero or negative.
+    log_determinants = 2 * jnp.sum(jnp.nan_to_num(jnp.log(diags), nan=0.0, neginf=-1e6), axis=-1)
+
+    # 5. Sum the log-determinants across all subjects for the final term.
+    interaction_term = jnp.sum(log_determinants)
+    
+    return interaction_term
+
+def foc_interaction_term_chol(all_hessians: jnp.ndarray, jitter: float = 1e-6) -> jnp.ndarray:
+    """
+    Calculates the FOCEi interaction term using a stable Cholesky decomposition.
+
+    Args:
+        all_hessians: A batched array of Hessian matrices, with shape
+                      (num_subjects, n_params, n_params).
+        jitter: A small value added to the diagonal for numerical stability.
+
+    Returns:
+        A scalar JAX array containing the interaction term.
+    """
+    # 1. Stabilize: Add jitter to the diagonal of each Hessian to ensure
+    #    they are all strictly positive-definite.
+    num_params = all_hessians.shape[-1]
+    jitter_matrix = jnp.eye(num_params) * jitter
+    stable_hessians = all_hessians + jitter_matrix
+
+    # 2. Calculate: Perform Cholesky decomposition on the stabilized matrices.
+    #    This is now guaranteed to be safe.
+    L = jnp.linalg.cholesky(stable_hessians)
+
+    # 3. Extract the diagonal elements from each Cholesky factor `L`.
+    diags = jnp.diagonal(L, axis1=-2, axis2=-1)
+    
+    # 4. Compute the log-determinant from the diagonals.
+    #    The log-determinant of H is 2 * sum(log(diag(L))).
+    #    We use nan_to_num as a final safeguard against log(0) if jitter is
+    #    insufficient, preventing NaNs from poisoning the entire loss.
+    log_determinants = 2 * jnp.sum(jnp.nan_to_num(jnp.log(diags), nan=0.0, neginf=0.0), axis=-1)
+
+    # 5. Sum across all subjects for the final interaction term.
+    interaction_term = jnp.sum(log_determinants)
+    
+    return interaction_term
+
+def foc_interaction_term_passthrough(all_hessians, **kwargs):
+    return 0.0
+
 def estimate_b_i_foce_passthrough(initial_b_i_batch, **kwargs):
     hessian_placeholder = 1
-    return initial_b_i_batch, hessian_placeholder
+    inner_loss_placeholder = 1
+    return initial_b_i_batch, hessian_placeholder, inner_loss_placeholder
 
 def estimate_b_i_fo_passthrough(b_i, **kwargs):
     return b_i
+
+def sum_neg2ll_terms_passthrough(neg2ll, **kwargs):
+    return neg2ll
+
+def focei_sum_neg2ll_terms(neg2ll, interaction_term, **kwargs):
+    return neg2ll + interaction_term
+
+class FOCEi_approx_neg2ll_loss_jax():
+    
+    def __init__(self):
+        pass
+    
+    @staticmethod
+    def loss_fn(
+    pop_coeff, 
+    sigma2, 
+    omega2, 
+    theta, 
+    theta_data,
+    padded_y,
+    unpadded_y_len,
+    time_mask_y,
+    time_mask_J,
+    compiled_augdyn_ivp_solver_arr,
+    compiled_augdyn_ivp_solver_novmap_arr,
+    compiled_ivp_solver_arr,
+    ode_t0_vals,
+    pop_coeff_for_J_idx,
+    **kwargs,
+    ):
+        print("Compiling `FOCEi_approx_neg2ll_loss_jax`")
+        loss = approx_neg2ll_loss_jax(
+            pop_coeff = pop_coeff, 
+            sigma2 = sigma2, 
+            omega2 = omega2, 
+            theta = theta, 
+            theta_data = theta_data,
+            padded_y = padded_y,
+            unpadded_y_len = unpadded_y_len,
+            time_mask_y = time_mask_y,
+            time_mask_J = time_mask_J,
+            compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
+            compiled_augdyn_ivp_solver_novmap_arr = compiled_augdyn_ivp_solver_novmap_arr,
+            compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+            ode_t0_vals = ode_t0_vals,
+            pop_coeff_for_J_idx = pop_coeff_for_J_idx,
+            compiled_estimate_b_i_foce = estimate_b_i_vmapped,
+            compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
+            jittable_estimate_foc_i=foc_interaction_term_chol, 
+            jittable_sum_neg2ll_terms=focei_sum_neg2ll_terms
+            
+        )
+        
+        return loss
+    @staticmethod
+    def grad_method():
+        return None
+
 
 class FOCE_approx_neg2ll_loss_jax():
     
@@ -841,6 +1074,7 @@ class FOCE_approx_neg2ll_loss_jax():
     time_mask_y,
     time_mask_J,
     compiled_augdyn_ivp_solver_arr,
+    compiled_augdyn_ivp_solver_novmap_arr,
     compiled_ivp_solver_arr,
     ode_t0_vals,
     pop_coeff_for_J_idx,
@@ -858,11 +1092,15 @@ class FOCE_approx_neg2ll_loss_jax():
             time_mask_y = time_mask_y,
             time_mask_J = time_mask_J,
             compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
+            compiled_augdyn_ivp_solver_novmap_arr = compiled_augdyn_ivp_solver_novmap_arr,
             compiled_ivp_solver_arr = compiled_ivp_solver_arr,
             ode_t0_vals = ode_t0_vals,
             pop_coeff_for_J_idx = pop_coeff_for_J_idx,
             compiled_estimate_b_i_foce = estimate_b_i_vmapped,
-            compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough
+            compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
+            jittable_estimate_foc_i=foc_interaction_term_passthrough, 
+            jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough
+            
         )
         
         return loss
@@ -886,6 +1124,7 @@ class FO_approx_neg2ll_loss_jax():
     time_mask_y,
     time_mask_J,
     compiled_augdyn_ivp_solver_arr,
+    compiled_augdyn_ivp_solver_novmap_arr,
     compiled_ivp_solver_arr,
     ode_t0_vals,
     pop_coeff_for_J_idx,
@@ -903,11 +1142,14 @@ class FO_approx_neg2ll_loss_jax():
             time_mask_y = time_mask_y,
             time_mask_J = time_mask_J,
             compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
+            compiled_augdyn_ivp_solver_novmap_arr = compiled_augdyn_ivp_solver_novmap_arr,
             compiled_ivp_solver_arr = compiled_ivp_solver_arr,
             ode_t0_vals = ode_t0_vals,
             pop_coeff_for_J_idx = pop_coeff_for_J_idx,
             compiled_estimate_b_i_foce = estimate_b_i_foce_passthrough,
-            compiled_estimate_b_i_fo = estimate_ebes_jax
+            compiled_estimate_b_i_fo = estimate_ebes_jax, 
+            jittable_estimate_foc_i=foc_interaction_term_passthrough, 
+            jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough
         )
     
         return loss
@@ -942,6 +1184,7 @@ def approx_neg2ll_loss_jax(
     time_mask_J,
     #compiled_ivp_solver_keys,
     compiled_augdyn_ivp_solver_arr,
+    compiled_augdyn_ivp_solver_novmap_arr,
     compiled_ivp_solver_arr,
     ode_t0_vals,
     #compiled_gen_ode_coeff,
@@ -950,6 +1193,8 @@ def approx_neg2ll_loss_jax(
     #solve_for_omegas=False,
     compiled_estimate_b_i_foce, 
     compiled_estimate_b_i_fo,
+    jittable_estimate_foc_i,
+    jittable_sum_neg2ll_terms
 ):
     print("Compiling `approx_neg2ll_loss_jax`")
     #jax.debug.print("theta shape: {s}", s = theta.shape )
@@ -980,7 +1225,7 @@ def approx_neg2ll_loss_jax(
     #jax.debug.print("n_subject_level_eff shape: {s}", s = n_subject_level_eff.shape )
     #jax.debug.print("pop_coeff_for_J_idx shape: {s}", s = pop_coeff_for_J_idx.shape )
     
-    b_i, hessian_i = compiled_estimate_b_i_foce(
+    b_i, hessian_i, inner_loss_i = compiled_estimate_b_i_foce(
                                                initial_b_i_batch = b_i,
                                                 padded_y_batch = padded_y,
                                                 data_contribution_batch = data_contribution,
@@ -992,6 +1237,7 @@ def approx_neg2ll_loss_jax(
                                                 omega2 = omega2,
                                                 n_random_effects = n_subject_level_eff,
                                                 compiled_ivp_solver = compiled_ivp_solver_arr,
+                                                compiled_augdyn_ivp_solver = compiled_augdyn_ivp_solver_novmap_arr,
                                                 pop_coeff_w_bi_idx = pop_coeff_for_J_idx,
                                                
                                                
@@ -1025,7 +1271,7 @@ def approx_neg2ll_loss_jax(
     J_dense = J_conc_full#shape (n_subject, max_obs_per_subject, n_s)
     J = jnp.where(time_mask_J, J_dense, 0.0) # time_mask_J shape  (n_subject, max_obs_per_subject, n_s)
     
-    
+    interaction_term = jittable_estimate_foc_i(all_hessians = hessian_i)
 
     # Estimate the covariance matrix, then estimate neg log likelihood
     neg2_ll = neg2_ll_chol_jit(
@@ -1036,6 +1282,7 @@ def approx_neg2ll_loss_jax(
         omega2,           # Shape: (n_effects, n_effects)
         unpadded_y_len,
     )
+    neg2_ll_combined = jittable_sum_neg2ll_terms(neg2ll = neg2_ll, interaction_term = interaction_term)
     #jax.debug.print("neg2_ll: {neg2_ll}", neg2_ll=neg2_ll)
     #jax.debug.print("is_bad_state: {is_bad_state}", is_bad_state=is_bad_state)
     b_i_approx = compiled_estimate_b_i_fo(padded_J=J, padded_residuals=masked_residuals, 
@@ -1043,6 +1290,6 @@ def approx_neg2ll_loss_jax(
                                    omegas2=omega2, sigma2=sigma2, b_i = b_i
                                    )
     large_penalty = 1e12
-    neg2_ll_out = jnp.where(is_bad_state, large_penalty, neg2_ll)
+    neg2_ll_out = jnp.where(is_bad_state, large_penalty, neg2_ll_combined)
     #jax.debug.print("Outer Loss Out val: {s}", s = neg2_ll_out)
     return neg2_ll_out, (b_i_approx, (padded_pred_y, padded_full_preds))
