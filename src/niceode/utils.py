@@ -3507,8 +3507,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         pred_dynamic_opt_kwargs = deepcopy(self.dynamic_opt_kwargs_)
         _, _jax_objective_function_predict_ = create_jax_objective(static_opt_kwargs=pred_static_opt_kwargs, 
                                                        dynamic_opt_kwargs=pred_dynamic_opt_kwargs,
-                                                       compiled_augdyn_solver=self.jax_augdyn_ivp_stiff_compiled_solver_, 
-                                                       compiled_solver = self.jax_ivp_stiff_compiled_solver_,
+                                                       compiled_augdyn_solver=self.jax_augdyn_ivp_stiff_jittable_,  
+                                                       compiled_solver = self.jax_ivp_stiff_jittable_novmap_,
                                                        jittable_loss = self.jax_loss,
                                                        )
         ode_t0_vals_are_subject_y0_init_status = deepcopy(
@@ -3950,14 +3950,40 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             "init_params_for_scaling": init_params_for_scaling,
             "omega_lower_chol_idx": list(zip(*self.omega_lower_chol_idx)),
         }
-        #should we jit this wrapper?
+        
         self._compile_jax_ivp_solvers(pop_coeffs_for_J_idx=pop_coeffs_for_J_idx)
+        unpacker_static_kwargs = {
+            "theta_total_len": theta_total_len,
+            "params_idx": params_idx_struct,
+            "total_n_params": _total_n_params,
+            "omega_diag_size": self.n_subject_level_intercept_sds,
+            "theta_update_to_indices": theta_update_to_indices,
+            "theta_update_from_indices": theta_update_from_indices,
+            "fixed_params": _fixed_params,
+            "opt_params_combined_params_idx": opt_params_combined_params_idx,
+            "fixed_params_combined_params_idx": fixed_params_combined_params_idx,
+            "init_params_for_scaling": init_params_for_scaling,
+            "omega_lower_chol_idx": list(zip(*self.omega_lower_chol_idx)),
+        }
+        loss_static_kwargs = {
+            "theta_data": jax_bundle_out["td_tensor"],
+            "pop_coeff_for_J_idx": pop_coeffs_for_J_idx,
+            "padded_y": jax_bundle_out["padded_y"],
+            "time_mask_y": jax_bundle_out["time_mask_y"],
+            "time_mask_J": jax_bundle_out["time_mask_J"],
+            "unpadded_y_len": jax_bundle_out["unpadded_y_len"],
+            "ode_t0_vals": np.array(self.ode_t0_vals.to_numpy(dtype=np.float64)),
+            "compiled_augdyn_ivp_solver_arr":self.jax_augdyn_ivp_stiff_jittable_,
+            "compiled_ivp_solver_arr":self.jax_ivp_stiff_jittable_novmap_, 
+        }
+        #should we jit this wrapper?
+        
         self.static_opt_kwargs_ = deepcopy(static_opt_kwargs)
         self.dynamic_opt_kwargs_ = deepcopy(dynamic_opt_kwargs)
-        _jax_objective_function, _ = create_jax_objective(static_opt_kwargs=static_opt_kwargs, 
-                                                       dynamic_opt_kwargs=dynamic_opt_kwargs,
-                                                       compiled_augdyn_solver=self.jax_augdyn_ivp_stiff_jittable_, 
-                                                        compiled_solver=self.jax_ivp_stiff_jittable_novmap_, 
+        self.unpacker_static_kwargs_ = deepcopy(unpacker_static_kwargs)
+        self.loss_static_kwargs_ = deepcopy(loss_static_kwargs)
+        _jax_objective_function, _ = create_jax_objective(unpacker_static_kwargs=unpacker_static_kwargs, 
+                                                          loss_static_kwargs=loss_static_kwargs,
                                                        jittable_loss = self.jax_loss,
                                                        )
         if debugging_jax:
