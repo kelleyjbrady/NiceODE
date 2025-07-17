@@ -5,6 +5,7 @@ import jax
 from functools import partial
 import numdifftools as nd
 import jaxopt
+import optax
 
 
 def make_jittable_pk_coeff(expected_len_out):
@@ -517,8 +518,8 @@ def create_jax_objective(#static_opt_kwargs,
     #**static_opt_kwargs, 
     #**dynamic_opt_kwargs                 
     #                           )
-    #return jax.jit(_jax_objective_function), jax.jit(_jax_objective_function_predict)
-    return _jax_objective_function, _jax_objective_function_predict
+    return jax.jit(_jax_objective_function), jax.jit(_jax_objective_function_predict)
+    #return _jax_objective_function, _jax_objective_function_predict
 
 #@partial(jax.jit, static_argnames = (
 #                                    "compiled_ivp_solver_arr",
@@ -629,16 +630,25 @@ def estimate_b_i_vmapped(
             
         )
 
-        # Initialize the L-BFGS optimizer
-        optimizer = jaxopt.LBFGS(fun = obj_fn, tol=1e-3, maxiter=50, jit = True)
+        # 2. Set up an optax optimizer
+        learning_rate = 0.1  # Tune as needed
+        optimizer = optax.adam(learning_rate)
+        opt_state = optimizer.init(initial_b_i)
         
-        # Run the optimization to find the parameters (b_i) that minimize the objective
-        # The `run` method is a convenient wrapper for stateful optimizers
-        results = optimizer.run(init_params=initial_b_i)
-        estimated_b_i = results.params
-        jax.debug.print("Inner Opt State: {s}", s = results.state)
-        #hessian_of_loss = jax.hessian(obj_fn)
-        #hessian_matrix = hessian_of_loss(estimated_b_i)
+        grad_fn = jax.grad(obj_fn)
+        
+        def update_step(i, state_tuple):
+            params, opt_state = state_tuple
+            grads = grad_fn(params)
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            new_params = optax.apply_updates(params, updates)
+            return new_params, opt_state
+        
+        num_inner_steps = 100 # Tune as needed
+        estimated_b_i, opt_state = jax.lax.fori_loop(
+            0, num_inner_steps, update_step, (initial_b_i, opt_state)
+        )
+        
         hessian_matrix = jnp.ones_like(estimated_b_i)
         # Return the optimized parameters
         return estimated_b_i, hessian_matrix

@@ -1522,9 +1522,13 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         center_log_scale_params = True,
         use_surrogate_neg2ll = False, 
         jax_loss = None,
+        jit_jax_ivp_solver = True, 
+        jit_jax_loss = True, 
     ):
         #defaults related to ODE solving
         self.jax_loss = jax_loss
+        self.jit_jax_ivp_solver = jit_jax_ivp_solver
+        self.jit_jax_loss = jit_jax_loss
         self.stiff_ode = stiff_ode
         self.jax_augdyn_ivp_stiff_compiled_solver_ = None
         self.jax_augdyn_ivp_stiff_solver_is_compiled = False
