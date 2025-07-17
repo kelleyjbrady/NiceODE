@@ -475,13 +475,15 @@ def create_jax_objective(#static_opt_kwargs,
                          
                          ):
     
-              
+    initialized_loss = jittable_loss() 
+    jittable_loss_fn = initialized_loss.loss_fn
+    grad_method = initialized_loss.grad_method()       
     #all_other_kwargs = {**static_opt_kwargs, **dynamic_opt_kwargs}
     p_jittable_param_unpack_fit = partial(_jittable_param_unpack, **unpacker_static_kwargs)
-    jittable_loss_p_fit = partial(jittable_loss, **loss_static_kwargs)
+    jittable_loss_p_fit = partial(jittable_loss_fn, **loss_static_kwargs)
     
     p_jittable_param_unpack_predict = partial(_jittable_param_unpack, **unpacker_static_kwargs)
-    jittable_loss_p_predict = partial(jittable_loss, **loss_static_kwargs)
+    jittable_loss_p_predict = partial(jittable_loss_fn, **loss_static_kwargs)
     
     
     def _jax_objective_function(opt_params, ):
@@ -517,8 +519,10 @@ def create_jax_objective(#static_opt_kwargs,
     #compiled_solver = compiled_solver,   
     #**static_opt_kwargs, 
     #**dynamic_opt_kwargs                 
-    #                           )
-    return jax.jit(_jax_objective_function), jax.jit(_jax_objective_function_predict)
+    #
+    fit_obj = jax.jit(_jax_objective_function)
+    fit_grad = jax.jit(grad_method(fit_obj)) if grad_method is not None else None
+    return (fit_obj, fit_grad), jax.jit(_jax_objective_function_predict)
     #return _jax_objective_function, _jax_objective_function_predict
 
 #@partial(jax.jit, static_argnames = (
@@ -820,7 +824,13 @@ def estimate_b_i_foce_passthrough(initial_b_i_batch, **kwargs):
 def estimate_b_i_fo_passthrough(b_i, **kwargs):
     return b_i
 
-def FOCE_approx_neg2ll_loss_jax(
+class FOCE_approx_neg2ll_loss_jax():
+    
+    def __init__(self):
+        pass
+    
+    @staticmethod
+    def loss_fn(
     pop_coeff, 
     sigma2, 
     omega2, 
@@ -835,29 +845,37 @@ def FOCE_approx_neg2ll_loss_jax(
     ode_t0_vals,
     pop_coeff_for_J_idx,
     **kwargs,
-):
-    print("Compiling `FOCE_approx_neg2ll_loss_jax`")
-    loss = approx_neg2ll_loss_jax(
-        pop_coeff = pop_coeff, 
-        sigma2 = sigma2, 
-        omega2 = omega2, 
-        theta = theta, 
-        theta_data = theta_data,
-        padded_y = padded_y,
-        unpadded_y_len = unpadded_y_len,
-        time_mask_y = time_mask_y,
-        time_mask_J = time_mask_J,
-        compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
-        compiled_ivp_solver_arr = compiled_ivp_solver_arr,
-        ode_t0_vals = ode_t0_vals,
-        pop_coeff_for_J_idx = pop_coeff_for_J_idx,
-        compiled_estimate_b_i_foce = estimate_b_i_vmapped,
-        compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough
-    )
+    ):
+        print("Compiling `FOCE_approx_neg2ll_loss_jax`")
+        loss = approx_neg2ll_loss_jax(
+            pop_coeff = pop_coeff, 
+            sigma2 = sigma2, 
+            omega2 = omega2, 
+            theta = theta, 
+            theta_data = theta_data,
+            padded_y = padded_y,
+            unpadded_y_len = unpadded_y_len,
+            time_mask_y = time_mask_y,
+            time_mask_J = time_mask_J,
+            compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
+            compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+            ode_t0_vals = ode_t0_vals,
+            pop_coeff_for_J_idx = pop_coeff_for_J_idx,
+            compiled_estimate_b_i_foce = estimate_b_i_vmapped,
+            compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough
+        )
+        
+        return loss
+    @staticmethod
+    def grad_method():
+        return None
+class FO_approx_neg2ll_loss_jax():
     
-    return loss
-
-def FO_approx_neg2ll_loss_jax(
+    def __init__(self):
+        pass
+    
+    @staticmethod
+    def loss_fn(
     pop_coeff, 
     sigma2, 
     omega2, 
@@ -872,27 +890,31 @@ def FO_approx_neg2ll_loss_jax(
     ode_t0_vals,
     pop_coeff_for_J_idx,
     **kwargs,
-):
-    print("Compiling `FO_approx_neg2ll_loss_jax`")
-    loss = approx_neg2ll_loss_jax(
-        pop_coeff = pop_coeff, 
-        sigma2 = sigma2, 
-        omega2 = omega2, 
-        theta = theta, 
-        theta_data = theta_data,
-        padded_y = padded_y,
-        unpadded_y_len = unpadded_y_len,
-        time_mask_y = time_mask_y,
-        time_mask_J = time_mask_J,
-        compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
-        compiled_ivp_solver_arr = compiled_ivp_solver_arr,
-        ode_t0_vals = ode_t0_vals,
-        pop_coeff_for_J_idx = pop_coeff_for_J_idx,
-        compiled_estimate_b_i_foce = estimate_b_i_foce_passthrough,
-        compiled_estimate_b_i_fo = estimate_ebes_jax
-    )
+    ):
+        print("Compiling `FO_approx_neg2ll_loss_jax`")
+        loss = approx_neg2ll_loss_jax(
+            pop_coeff = pop_coeff, 
+            sigma2 = sigma2, 
+            omega2 = omega2, 
+            theta = theta, 
+            theta_data = theta_data,
+            padded_y = padded_y,
+            unpadded_y_len = unpadded_y_len,
+            time_mask_y = time_mask_y,
+            time_mask_J = time_mask_J,
+            compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
+            compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+            ode_t0_vals = ode_t0_vals,
+            pop_coeff_for_J_idx = pop_coeff_for_J_idx,
+            compiled_estimate_b_i_foce = estimate_b_i_foce_passthrough,
+            compiled_estimate_b_i_fo = estimate_ebes_jax
+        )
     
-    return loss
+        return loss
+    
+    @staticmethod
+    def grad_method():
+        return jax.grad
 
 def approx_neg2ll_loss_jax(
     pop_coeff, 

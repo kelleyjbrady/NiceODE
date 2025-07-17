@@ -3864,7 +3864,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         
         #----------JAX Setup-------------
-        debugging_jax = True
+        debugging_jax = False
         params_idx_jax = deepcopy(params_idx)
         required_keys = ['pop', 'sigma', 'omega', 'theta']
         existing_keys = [i for i in params_idx_jax]
@@ -3986,10 +3986,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.dynamic_opt_kwargs_ = deepcopy(dynamic_opt_kwargs)
         self.unpacker_static_kwargs_ = deepcopy(unpacker_static_kwargs)
         self.loss_static_kwargs_ = deepcopy(loss_static_kwargs)
-        _jax_objective_function, _ = create_jax_objective(unpacker_static_kwargs=unpacker_static_kwargs, 
+        fit_objective_and_grad, _ = create_jax_objective(unpacker_static_kwargs=unpacker_static_kwargs, 
                                                           loss_static_kwargs=loss_static_kwargs,
                                                        jittable_loss = self.jax_loss,
                                                        )
+        _jax_objective_function, _jax_objective_grad = fit_objective_and_grad
         if debugging_jax:
             return _jax_objective_function, _opt_params
         
@@ -4136,7 +4137,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                             This function is NOT jitted. It's a simple Python function
                             that shields our JAX code from SciPy.
                             """
-                            [print(i) for i in numpy_params]
+                            #[print(i) for i in numpy_params]
                             # a. Convert SciPy's NumPy array to a JAX array with a specific dtype
                             jax_params = jnp.asarray(numpy_params, dtype=jnp.float64)
 
@@ -4145,12 +4146,21 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
 
                             # c. Return a standard Python float, which optimizers expect
                             return float(loss)
+                        if _jax_objective_grad is not None:
+                            def scipy_jac_wrapper(numpy_params):
+                                jax_params = jnp.asarray(numpy_params, dtype=jnp.float64)
+                                grad = _jax_objective_grad(jax_params)
+                            
+                                return grad
+                        else:
+                            scipy_jac_wrapper = None
                         self.fit_result_ = minimize(
                                 scipy_wrapper,
                                 _opt_params,
+                                jac = scipy_jac_wrapper,
                                 method=self.minimize_method,
                                 tol=self.optimizer_tol,
-                                options={"disp": True, 
+                                options={"disp": False, 
                                         },
                                 callback = callback,
                             )
