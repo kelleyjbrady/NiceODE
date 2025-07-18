@@ -284,7 +284,48 @@ def _calculate_per_subject_likelihood_terms(
     return log_det_Vi, quadratic_term
 
 #@jax.jit
-def neg2_ll_chol_jit(
+def outer_neg2ll_chol_jit(
+    J_dense,           # Shape: (n_subjects, max_obs, n_effects)
+    masked_residuals,  # Shape: (n_subjects, max_obs)
+    mask,              # Shape: (n_subjects, max_obs)
+    sigma2,            # Shape: scalar
+    omegas2,           # Shape: (n_effects, n_effects)
+    num_total_obs,     # Static integer: total number of actual observations
+    use_surrogate_neg2ll,
+):
+    """
+    Calculates the negative 2 log-likelihood using a batched Cholesky decomposition.
+    """
+    # Vmap the per-subject function over the subjects axis (axis 0).
+    # `in_axes` tells vmap how to handle each argument:
+    #   0: Map over the first axis of J_dense, masked_residuals, and mask.
+    #   None: Do not map over sigma2 and omegas2; broadcast them to every call.
+    vmapped_calculator = jax.vmap(
+        _calculate_per_subject_likelihood_terms, in_axes=(0, 0, 0, None, None)
+    )
+
+    # Run the vmapped function. It returns two arrays, one for each value returned
+    # by the helper function.
+    all_log_dets, all_quadratic_terms = vmapped_calculator(
+        J_dense, masked_residuals, mask, sigma2, omegas2
+    )
+
+    # Aggregate the results from all subjects using jnp.sum
+    total_log_det = jnp.sum(all_log_dets)
+    total_quadratic = jnp.sum(all_quadratic_terms)
+
+    # Final likelihood calculation
+    if use_surrogate_neg2ll:
+        #calculate surrogate neg2ll
+        outer_loss = total_log_det + total_quadratic
+    else:
+        #calculate neg2ll
+        neg2_ll = total_log_det + total_quadratic + num_total_obs * jnp.log(2 * jnp.pi)
+        outer_loss = neg2_ll
+
+    return outer_loss
+
+def surrogate_neg2_ll_chol_jit(
     J_dense,           # Shape: (n_subjects, max_obs, n_effects)
     masked_residuals,  # Shape: (n_subjects, max_obs)
     mask,              # Shape: (n_subjects, max_obs)
@@ -314,9 +355,10 @@ def neg2_ll_chol_jit(
     total_quadratic = jnp.sum(all_quadratic_terms)
 
     # Final likelihood calculation
-    neg2_ll = total_log_det + total_quadratic + num_total_obs * jnp.log(2 * jnp.pi)
+    neg2_ll = total_log_det + total_quadratic
 
     return neg2_ll
+
 
 def estimate_ebes_jax(
     padded_J, padded_residuals, time_mask, omegas2, sigma2, **kwargs
@@ -648,6 +690,7 @@ def estimate_b_i_vmapped(
     compiled_ivp_solver,
     compiled_augdyn_ivp_solver,
     pop_coeff_w_bi_idx,
+    use_surrogate_neg2ll,
     **kwargs
 ):
     """
@@ -705,6 +748,7 @@ def estimate_b_i_vmapped(
             compiled_ivp_solver=compiled_ivp_solver,
             #compiled_augdyn_ivp_solver = compiled_augdyn_ivp_solver,
             pop_coeff_w_bi_idx = pop_coeff_w_bi_idx,
+            use_surrogate_neg2ll = use_surrogate_neg2ll,
             
         )
 
@@ -713,12 +757,18 @@ def estimate_b_i_vmapped(
         optimizer = optax.adam(learning_rate)
         opt_state = optimizer.init(initial_b_i)
         
+        
         grad_fn = jax.grad(obj_fn)
+        #if omega is near zero, then optimzing b_i will probably lead to 
+        #very large pop coeffs w/ very small b_i, effectively canceling 
+        #eachother out in a mathematically valid, but practicaly invalid way
         omega_is_near_zero = jnp.diag(jnp.sqrt(omega2)) < 1e-5 
         
         def update_step(i, state_tuple):
             params, opt_state = state_tuple
             grads = grad_fn(params)
+            #sanitize the grads for the whole inner optmization for the current iteration 
+            #based on the heuristic calculated above (`omega_is_near_zero`)
             safe_grads = jnp.where(omega_is_near_zero, 0.0, grads)
             updates, opt_state = optimizer.update(safe_grads, opt_state, params)
             new_params = optax.apply_updates(params, updates)
@@ -788,6 +838,7 @@ def FOCE_inner_loss_fn(
     n_random_effects,
     compiled_ivp_solver,
     pop_coeff_w_bi_idx,
+    use_surrogate_neg2ll,
 ):
     """
     Calculates the conditional negative 2 log-likelihood for a single subject.
@@ -834,11 +885,14 @@ def FOCE_inner_loss_fn(
     #jax.debug.print("sum_sq_residuals shape: {s}", s = sum_sq_residuals.shape)
     # This assumes an additive error model, as in the original code
     _sigma2 = sigma2[0]
-    log_likelihood_constant = jnp.log(2 * jnp.pi) + jnp.log(_sigma2)
+    if use_surrogate_neg2ll:
+        log_likelihood_constant = jnp.log(_sigma2)
+    else:
+        log_likelihood_constant = jnp.log(2 * jnp.pi) + jnp.log(_sigma2)
     #tmp_ll_const = jnp.repeat(log_likelihood_constant, time_mask_y_i.shape[0])
     n_t_term = jnp.sum(jnp.where(time_mask_y_i, log_likelihood_constant, 0.0))
     residuals_term = sum_sq_residuals / _sigma2
-    neg2_ll_data = n_t_term + residuals_term
+    loss_data = n_t_term + residuals_term
     
     #below does not work when n_t is different for each subject
     #apparently this litteraly lays out a loop like 'sum jnp.log( . . . ) n_t times'
@@ -855,13 +909,16 @@ def FOCE_inner_loss_fn(
     
     # Use Cholesky solve for stability and efficiency
     prior_penalty = b_i @ jax.scipy.linalg.cho_solve((L, True), b_i)
-
-    neg2ll_prior = (n_random_effects * jnp.log(2 * jnp.pi) 
-                    + log_det_omega2 
-                    + prior_penalty)
+    if use_surrogate_neg2ll:
+        loss_prior = log_det_omega2 + prior_penalty
+    else:
+        neg2ll_prior = (n_random_effects * jnp.log(2 * jnp.pi) 
+                        + log_det_omega2 
+                        + prior_penalty)
+        loss_prior = neg2ll_prior
     #jax.debug.print("neg2ll_prior shape: {s}", s = neg2ll_prior.shape)
     #jax.debug.print("neg2_ll_data shape: {s}", s = neg2_ll_data.shape)
-    loss =  neg2_ll_data + neg2ll_prior
+    loss =  loss_data + loss_prior
     
     large_penalty = 1e12
     loss_out = jnp.where(is_bad_state, large_penalty, loss)
@@ -1032,6 +1089,7 @@ class FOCEi_approx_neg2ll_loss_jax():
     compiled_ivp_solver_arr,
     ode_t0_vals,
     pop_coeff_for_J_idx,
+    use_surrogate_neg2ll,
     **kwargs,
     ):
         print("Compiling `FOCEi_approx_neg2ll_loss_jax`")
@@ -1053,7 +1111,8 @@ class FOCEi_approx_neg2ll_loss_jax():
             compiled_estimate_b_i_foce = estimate_b_i_vmapped,
             compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
             jittable_estimate_foc_i=foc_interaction_term_chol, 
-            jittable_sum_neg2ll_terms=focei_sum_neg2ll_terms
+            jittable_sum_neg2ll_terms=focei_sum_neg2ll_terms,
+            use_surrogate_neg2ll = use_surrogate_neg2ll,
             
         )
         
@@ -1084,6 +1143,7 @@ class FOCE_approx_neg2ll_loss_jax():
     compiled_ivp_solver_arr,
     ode_t0_vals,
     pop_coeff_for_J_idx,
+    use_surrogate_neg2ll,
     **kwargs,
     ):
         print("Compiling `FOCE_approx_neg2ll_loss_jax`")
@@ -1105,7 +1165,8 @@ class FOCE_approx_neg2ll_loss_jax():
             compiled_estimate_b_i_foce = estimate_b_i_vmapped,
             compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
             jittable_estimate_foc_i=foc_interaction_term_passthrough, 
-            jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough
+            jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
+            use_surrogate_neg2ll = use_surrogate_neg2ll,
             
         )
         
@@ -1134,6 +1195,7 @@ class FO_approx_neg2ll_loss_jax():
     compiled_ivp_solver_arr,
     ode_t0_vals,
     pop_coeff_for_J_idx,
+    use_surrogate_neg2ll,
     **kwargs,
     ):
         print("Compiling `FO_approx_neg2ll_loss_jax`")
@@ -1155,7 +1217,8 @@ class FO_approx_neg2ll_loss_jax():
             compiled_estimate_b_i_foce = estimate_b_i_foce_passthrough,
             compiled_estimate_b_i_fo = estimate_ebes_jax, 
             jittable_estimate_foc_i=foc_interaction_term_passthrough, 
-            jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough
+            jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
+            use_surrogate_neg2ll = use_surrogate_neg2ll,
         )
     
         return loss
@@ -1200,7 +1263,8 @@ def approx_neg2ll_loss_jax(
     compiled_estimate_b_i_foce, 
     compiled_estimate_b_i_fo,
     jittable_estimate_foc_i,
-    jittable_sum_neg2ll_terms
+    jittable_sum_neg2ll_terms, 
+    use_surrogate_neg2ll,
 ):
     print("Compiling `approx_neg2ll_loss_jax`")
     #jax.debug.print("theta shape: {s}", s = theta.shape )
@@ -1245,6 +1309,7 @@ def approx_neg2ll_loss_jax(
                                                 compiled_ivp_solver = compiled_ivp_solver_arr,
                                                 compiled_augdyn_ivp_solver = compiled_augdyn_ivp_solver_novmap_arr,
                                                 pop_coeff_w_bi_idx = pop_coeff_for_J_idx,
+                                                use_surrogate_neg2ll = use_surrogate_neg2ll,
                                                
                                                
                                                )
@@ -1280,15 +1345,16 @@ def approx_neg2ll_loss_jax(
     interaction_term = jittable_estimate_foc_i(all_hessians = hessian_i)
 
     # Estimate the covariance matrix, then estimate neg log likelihood
-    neg2_ll = neg2_ll_chol_jit(
+    outer_loss = outer_neg2ll_chol_jit(
         J,           # Shape: (n_subjects, max_obs, n_effects)
         masked_residuals,  # Shape: (n_subjects, max_obs)
         time_mask_y,              # Shape: (n_subjects, max_obs)
         sigma2,            # Shape: scalar
         omega2,           # Shape: (n_effects, n_effects)
         unpadded_y_len,
+        use_surrogate_neg2ll=use_surrogate_neg2ll,
     )
-    neg2_ll_combined = jittable_sum_neg2ll_terms(neg2ll = neg2_ll, interaction_term = interaction_term)
+    outer_loss_combined = jittable_sum_neg2ll_terms(neg2ll = outer_loss, interaction_term = interaction_term)
     #jax.debug.print("neg2_ll: {neg2_ll}", neg2_ll=neg2_ll)
     #jax.debug.print("is_bad_state: {is_bad_state}", is_bad_state=is_bad_state)
     b_i_approx = compiled_estimate_b_i_fo(padded_J=J, padded_residuals=masked_residuals, 
@@ -1296,6 +1362,6 @@ def approx_neg2ll_loss_jax(
                                    omegas2=omega2, sigma2=sigma2, b_i = b_i
                                    )
     large_penalty = 1e12
-    neg2_ll_out = jnp.where(is_bad_state, large_penalty, neg2_ll_combined)
+    outer_loss_out = jnp.where(is_bad_state, large_penalty, outer_loss_combined)
     #jax.debug.print("Outer Loss Out val: {s}", s = neg2_ll_out)
-    return neg2_ll_out, (b_i_approx, (padded_pred_y, padded_full_preds))
+    return outer_loss_out, (b_i_approx, (padded_pred_y, padded_full_preds))

@@ -37,7 +37,9 @@ from itertools import product
 from .jax_utils import (FO_approx_neg2ll_loss_jax,
                         FOCE_approx_neg2ll_loss_jax,
                         create_jax_objective,
-                        create_aug_dynamics_ode
+                        create_aug_dynamics_ode,
+                        surrogate_neg2_ll_chol_jit, 
+                        neg2_ll_chol_jit,
                         
                         )
 from mlflow.data.pandas_dataset import from_pandas
@@ -3989,6 +3991,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             "compiled_augdyn_ivp_solver_arr":self.jax_augdyn_ivp_stiff_jittable_,
             "compiled_augdyn_ivp_solver_novmap_arr":self.jax_augdyn_ivp_stiff_jittable_novmap_,
             "compiled_ivp_solver_arr":self.jax_ivp_stiff_jittable_novmap_, 
+            "jittable_outer_loss": self.use_surrogate_neg2ll,
+            
         }
         #should we jit this wrapper?
         
