@@ -471,7 +471,7 @@ def _jittable_param_unpack(opt_params,
                             total_n_params = None,
                             init_params_for_scaling = None,
                                 #ode_t0_vals = None,
-                            #use_full_omega = None, 
+                            use_full_omega = None, 
                             omega_lower_chol_idx = None,
                             omega_diag_size = None,
                             #optimize_omega_on_log_scale = None,
@@ -500,13 +500,17 @@ def _jittable_param_unpack(opt_params,
     #unpack omega, assume opt on log scale
     omega = params[params_idx.omega[0]:params_idx.omega[-1]]
     #update_idx = omega_lower_chol_idx
-    rows, cols = omega_lower_chol_idx
-    omega_lchol = jnp.zeros((omega_diag_size, omega_diag_size), dtype = np.float64)
-    omega_lchol = omega_lchol.at[rows, cols].set(omega)
-    omegas_diag = jnp.diag(omega_lchol)
-    omegas_diag = jnp.exp(omegas_diag)
-    omega_lchol = omega_lchol.at[jnp.diag_indices_from(omega_lchol)].set(omegas_diag)
-    omega2 = omega_lchol @ omega_lchol.T
+    if use_full_omega:
+        rows, cols = omega_lower_chol_idx
+        omega_lchol = jnp.zeros((omega_diag_size, omega_diag_size), dtype = np.float64)
+        omega_lchol = omega_lchol.at[rows, cols].set(omega)
+        omegas_diag = jnp.diag(omega_lchol)
+        omegas_diag = jnp.exp(omegas_diag)
+        omega_lchol = omega_lchol.at[jnp.diag_indices_from(omega_lchol)].set(omegas_diag)
+        omega2 = omega_lchol @ omega_lchol.T
+    else:
+        omega = jnp.exp(omega)
+        omega2 = jnp.diag(omega**2)
     
     #unpack theta
     theta = params[params_idx.theta[0]:params_idx.theta[-1]]
@@ -710,11 +714,13 @@ def estimate_b_i_vmapped(
         opt_state = optimizer.init(initial_b_i)
         
         grad_fn = jax.grad(obj_fn)
+        omega_is_near_zero = jnp.diag(jnp.sqrt(omega2)) < 1e-5 
         
         def update_step(i, state_tuple):
             params, opt_state = state_tuple
             grads = grad_fn(params)
-            updates, opt_state = optimizer.update(grads, opt_state, params)
+            safe_grads = jnp.where(omega_is_near_zero, 0.0, grads)
+            updates, opt_state = optimizer.update(safe_grads, opt_state, params)
             new_params = optax.apply_updates(params, updates)
             return new_params, opt_state
         

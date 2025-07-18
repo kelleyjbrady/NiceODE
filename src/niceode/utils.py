@@ -3768,7 +3768,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             init_params_fix_status.extend(subject_level_effect_fix_status)
             omega_jax = omegas.to_dict(orient = 'list')
             omega_jax = {i:np.array(omega_jax[i]) for i in omega_jax}
-            omega_diag_names_jax = [i for i in omegas.columns if i[0] == i[1]]
+            if self.use_full_omega:
+                omega_diag_names_jax = [i for i in omegas.columns if i[0] == i[1]]
+            else:
+                omega_diag_names_jax = [i for i in omegas.columns]
             init_params_jax.update(omega_jax)
             if self.use_full_omega:
                 param_names.extend(
@@ -3881,7 +3884,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         jax_bundle_out = self._assemble_pred_matrices_jax(init_params_jax, theta_data_jax, params_idx)
         pop_coeff_cols = {c:idx for idx, c in enumerate(pop_coeffs_jax)}
         omega_diag_cols = omega_diag_names_jax
-        pop_coeffs_for_J_idx = [pop_coeff_cols[i] for i in pop_coeff_cols if i[0] in [i[0][0] for i in omega_diag_cols]]
+        if self.use_full_omega:
+            pop_coeffs_for_J_idx = [pop_coeff_cols[i] for i in pop_coeff_cols if i[0] in [i[0][0] for i in omega_diag_cols]]
+        else:
+            pop_coeffs_for_J_idx = [pop_coeff_cols[i] for i in pop_coeff_cols if i[0] in [i[0] for i in omega_diag_cols]]
+
         pop_coeffs_for_J_idx = np.array(pop_coeffs_for_J_idx)
         if theta_jax is not None:
             theta_base_cols = {c:idx for idx, c in enumerate(theta_jax)}
