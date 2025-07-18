@@ -34,12 +34,10 @@ import mlflow
 import multiprocessing
 import jax.numpy as jnp
 from itertools import product
-from .jax_utils import (FO_approx_neg2ll_loss_jax,
-                        FOCE_approx_neg2ll_loss_jax,
+from .jax_utils import (
                         create_jax_objective,
                         create_aug_dynamics_ode,
-                        surrogate_neg2_ll_chol_jit, 
-                        neg2_ll_chol_jit,
+
                         
                         )
 from mlflow.data.pandas_dataset import from_pandas
@@ -1962,74 +1960,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.population_coeff = deepcopy(population_coeff)
         self.dep_vars = deepcopy(dep_vars)
 
-    def _populate_model_betas(self, other_params):
-        self.n_model_vars = len([i for i in self.dep_vars])
-        self.n_dep_vars_per_model_var = {
-            i: len(self.dep_vars[i]) for i in self.dep_vars
-        }
-        dep_vars = self.dep_vars
-        betas = {}
-        betas_np = {}
-        params = []
-        other_params_idx = 0
-        for model_param in dep_vars:
-            # beta_names.extend([f'{model_param}_i' for i in dep_vars[model_param]])
-            betas[model_param] = {}
-            betas_np[model_param] = {}
-            for param_col_obj in dep_vars[model_param]:
-                param_col = param_col_obj.column_name
-                betas[model_param][param_col] = ObjectiveFunctionBeta(
-                    column_name=param_col,
-                    model_method=param_col_obj.model_method,
-                    value=other_params[other_params_idx],
-                    allometric_norm_value=param_col_obj.allometric_norm_value,
-                )
-                param_col_obj.optimization_history.append(
-                    other_params[other_params_idx]
-                )
-                params.append(param_col)
-                other_params_idx = other_params_idx + 1
-        self.betas = deepcopy(betas)
-        self.dep_vars = deepcopy(self.dep_vars)
-        return deepcopy(betas)
-
-    def _subject_iterator(self, data):
-        # data_out = {}
-        subject_id_c = self.groupby_col
-        # data_out['subject_id_c'] = deepcopy(self.groupby_col)
-        conc_at_time_c = self.conc_at_time_col
-        # data_out['conc_at_time_c'] = deepcopy(self.conc_at_time_col)
-        # data_out['pk_model_function'] = deepcopy(self.pk_model_function)
-        pk_model_function = deepcopy(self.pk_model_function)
-        verbose = self.verbose
-
-        population_coeff = deepcopy(self.population_coeff)
-        # data_out['betas'] = deepcopy(self.betas)
-        # data_out['time_c'] = deepcopy(self.time_col)
-        betas = deepcopy(self.betas)
-        time_col = deepcopy(self.time_col)
-        subs = data[subject_id_c].unique()
-        for subject in subs:
-            data_out = {}
-            data_out["subject_id_c"] = subject_id_c
-            data_out["conc_at_time_c"] = conc_at_time_c
-            data_out["pk_model_function"] = pk_model_function
-            data_out["time_c"] = time_col
-            data_out["betas"] = deepcopy(betas)
-            subject_filt = data[subject_id_c] == subject
-            subject_data = data.loc[subject_filt, :].copy()
-            initial_conc = subject_data[conc_at_time_c].values[0]
-            subject_coeff = deepcopy(population_coeff)
-            # subject_coeff = deepcopy(population_coeff)
-            subject_coeff = {
-                obj.coeff_name: obj.optimization_history[-1] for obj in subject_coeff
-            }
-            # subject_coeff_history = [subject_coeff]
-            data_out["subject_coeff"] = deepcopy(subject_coeff)
-            data_out["subject_data"] = deepcopy(subject_data)
-            data_out["initial_conc"] = deepcopy(initial_conc)
-            yield deepcopy(data_out)
-
     #@profile
     def _homongenize_timepoints(self, ode_data, subject_data, subject_id_c, time_col):
         data = ode_data.copy()
@@ -3700,23 +3630,26 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         data = self._validate_data_chronology(data)
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data, )
         subject_level_intercept_init_vals = self.subject_level_intercept_init_vals
-        sigma_check_1 = len(omegas.values) > 0
-        sigma_check_2 = self.no_me_loss_needs_sigma
+        
+        
         _pop_coeffs_fix_status = [self.pop_coeff_fix_status[i] 
                                  for i in self.pop_coeff_fix_status]
         theta_fix_status = [self.theta_fix_status[i] 
                             for i in self.theta_fix_status]
         subject_level_effect_fix_status = [self.subject_level_effect_fix_status[i]
                                            for i in self.subject_level_effect_fix_status]
+        
+        sigma_check_1 = len(omegas.values) > 0
+        sigma_check_2 = self.no_me_loss_needs_sigma
         if sigma_check_1 or sigma_check_2:
             sigma = pop_coeffs.iloc[:, [-1]]
             sigma_fix_status = _pop_coeffs_fix_status[-1]
             sigma_fix_status = [sigma_fix_status] if isinstance(sigma_fix_status, bool) else sigma_fix_status
             pop_coeffs = pop_coeffs.iloc[:, :-1]
             pop_coeffs_fix_status = _pop_coeffs_fix_status[:-1]
-            
-        params_idx, next_start_idx = self._record_params_idx(pop_coeffs, 'pop')
         
+        #build up a vector of parameters suitable for input into opt apis like scipy minimize()   
+        params_idx, next_start_idx = self._record_params_idx(pop_coeffs, 'pop')
         init_params = [
             pop_coeffs.values,
         ]  # pop coeffs already includes sigma if needed, this is confusing
@@ -3991,7 +3924,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             "compiled_augdyn_ivp_solver_arr":self.jax_augdyn_ivp_stiff_jittable_,
             "compiled_augdyn_ivp_solver_novmap_arr":self.jax_augdyn_ivp_stiff_jittable_novmap_,
             "compiled_ivp_solver_arr":self.jax_ivp_stiff_jittable_novmap_, 
-            "jittable_outer_loss": self.use_surrogate_neg2ll,
+            "use_surrogate_neg2ll": self.use_surrogate_neg2ll,
             
         }
         #should we jit this wrapper?

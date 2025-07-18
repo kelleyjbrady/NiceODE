@@ -1,47 +1,9 @@
 import numpy as np
 import jax.numpy as jnp
-import pandas as pd
 import jax
 from functools import partial
 import numdifftools as nd
-import jaxopt
 import optax
-
-
-def make_jittable_pk_coeff(expected_len_out):
-    #@jax.jit
-    def generate_pk_model_coeff_jax(pop_coeffs, thetas, theta_data):
-
-
-        model_coeffs = {}
-        pop_coeffs_l0 = [i[0] for i in pop_coeffs]
-        thetas_l0 = [i[0] for i in thetas]
-        theta_data_l0 = [i[0] for i in theta_data]
-        for c in pop_coeffs:
-            pop_coeff = pop_coeffs[c]
-            theta = (
-                jnp.array([thetas[i] for i in thetas if i[0] == c[0]]).flatten()
-                if c[0] in thetas_l0
-                else jnp.zeros_like(pop_coeff)
-            )
-            X = (
-                jnp.vstack(jnp.array([theta_data[i] for i in theta_data if i[0] == c[0]])).T
-                if c[0] in theta_data_l0
-                #else jnp.zeros_like(pop_coeff)
-                else jnp.zeros((expected_len_out, 1))
-            )
-            #jax.debug.print("--- Debugging Shapes ---")
-            #jax.debug.print("X shape: {x_shape}", x_shape=X.shape)
-            #jax.debug.print("theta shape: {theta_shape}", theta_shape=theta.shape)
-            data_contribution = (X @ theta)
-            out = jnp.exp(data_contribution + pop_coeff)   + 1e-6
-            #if len(out) != expected_len_out:
-            #    out = jnp.repeat(out, expected_len_out)
-            #out = jnp.where(len(out) != expected_len_out,jnp.repeat(out, expected_len_out), out )
-            model_coeffs[c[0]] = out
-
-        return model_coeffs
-    return generate_pk_model_coeff_jax
 
 
 def _predict_jax_jacobian(
@@ -199,35 +161,6 @@ def _estimate_jacobian_finite_diff(
     jacobian_dict = jacobian_fd_with_fo_grad(jac_values_jax)
 
     return jacobian_dict
-
-
-
-def neg2_ll_chol(J, y_groups_idx,
-                 y_groups_unique,
-                 y, residuals, sigma2, omegas2,):
-    # V_all = []
-    log_det_V = 0
-    L_all = []
-    for sub in y_groups_unique:
-        filt = y_groups_idx == sub
-        J_sub = J[filt]
-        n_timepoints = len(J_sub)
-        R_i = sigma2 * np.eye(n_timepoints)  # Constant error
-        # Omega = np.diag(omegas**2) # Construct D matrix from omegas
-        V_i = R_i + J_sub @ omegas2 @ J_sub.T
-
-        L_i, lower = jax.scipy.linalg.cho_factor(V_i)  # Cholesky of each V_i
-        L_all.append(L_i)
-        log_det_V += 2 * np.sum(np.log(np.diag(L_i)))  # log|V_i|
-
-    L_block = jax.scipy.linalg.block_diag(*L_all)  # key change from before
-    V_inv_residuals = jax.scipy.linalg.cho_solve((L_block, True), residuals)
-    neg2_ll_chol = (
-        log_det_V + residuals.T @ V_inv_residuals + len(y) * np.log(2 * np.pi)
-    )
-
-    return neg2_ll_chol
-
 
 
 def _calculate_per_subject_likelihood_terms(
@@ -480,45 +413,25 @@ def estimate_ebes_jax_vectorized(
 
     return b_i_approx
 
-#@partial(jax.jit, static_argnames = ( 
-#                                        # SHAPES for jnp.zeros
-#                                    "theta_total_len",
-#                                    "total_n_params",  
-#                                    "omega_diag_size",
-#                                    
-#                                    # DICTIONARY for lookups                                
-#                                    "params_idx", 
-#                                    
-#                                    # BOOLEAN FLAGS for potential `if` statements
-#                                    "use_full_omega", 
-#                                    "optimize_omega_on_log_scale", 
-#                                    "optimize_sigma_on_log_scale", 
-#                                    "use_surrogate_neg2ll",) )
-def _jittable_param_unpack(opt_params, 
-                                #theta_data_tensor, 
+
+def _jittable_param_unpack(opt_params, #parameters being optmized by something like scipy's minimize
+                            
+                            
                             theta_update_to_indices,
                             theta_update_from_indices,
                             theta_total_len,
-                                #padded_y, 
-                                #time_mask_y, 
-                                #time_mask_J, 
-                                #unpadded_y_len,
+
                             params_idx,
                             fixed_params = None,
-                            #pop_coeff_cols = None,
-                            #omega_diag_cols = None,
-                                #pop_coeffs_for_J_idx = None,
                             opt_params_combined_params_idx = None, 
                             fixed_params_combined_params_idx = None,
                             total_n_params = None,
                             init_params_for_scaling = None,
-                                #ode_t0_vals = None,
+
                             use_full_omega = None, 
                             omega_lower_chol_idx = None,
                             omega_diag_size = None,
-                            #optimize_omega_on_log_scale = None,
-                            #optimize_sigma_on_log_scale = None,
-                            #use_surrogate_neg2ll = None,
+
                             ):
     
     #pop_coeffs_for_J_idx = [pop_coeff_cols[i] for i in pop_coeff_cols if i[0] in [i[0][0] for i in omega_diag_cols]]
@@ -541,7 +454,7 @@ def _jittable_param_unpack(opt_params,
     
     #unpack omega, assume opt on log scale
     omega = params[params_idx.omega[0]:params_idx.omega[-1]]
-    #update_idx = omega_lower_chol_idx
+
     if use_full_omega:
         rows, cols = omega_lower_chol_idx
         omega_lchol = jnp.zeros((omega_diag_size, omega_diag_size), dtype = np.float64)
@@ -566,23 +479,11 @@ def _jittable_param_unpack(opt_params,
         'theta':thetas_work, 
         
     } 
-    #static_loss_kwargs = {
-    #    'pop_coeff_for_J_idx':pop_coeffs_for_J_idx,
-    #    'theta_data':theta_data_tensor, 
-    #    'padded_y':padded_y,
-    #    'time_mask_y':time_mask_y,
-    #    'time_mask_J':time_mask_J,
-    #    'unpadded_y_len':unpadded_y_len, 
-    #    'ode_t0_vals':ode_t0_vals,
-    #    'omega2_diag_size':omega_diag_size
-    #    }
-    return dynamic_loss_kwargs#, static_loss_kwargs
+
+    return dynamic_loss_kwargs
 
 
-def create_jax_objective(#static_opt_kwargs,
-                         #dynamic_opt_kwargs,
-                         #compiled_augdyn_solver,
-                         #compiled_solver,
+def create_jax_objective(
                          unpacker_static_kwargs, 
                          loss_static_kwargs,
                          jittable_loss, 
@@ -592,13 +493,12 @@ def create_jax_objective(#static_opt_kwargs,
     initialized_loss = jittable_loss() 
     jittable_loss_fn = initialized_loss.loss_fn
     grad_method = initialized_loss.grad_method()       
-    #all_other_kwargs = {**static_opt_kwargs, **dynamic_opt_kwargs}
+    
     p_jittable_param_unpack_fit = partial(_jittable_param_unpack, **unpacker_static_kwargs)
     jittable_loss_p_fit = partial(jittable_loss_fn, **loss_static_kwargs)
     
     p_jittable_param_unpack_predict = partial(_jittable_param_unpack, **unpacker_static_kwargs)
     jittable_loss_p_predict = partial(jittable_loss_fn, **loss_static_kwargs)
-    
     
     def _jax_objective_function(opt_params, ):
         
@@ -611,7 +511,6 @@ def create_jax_objective(#static_opt_kwargs,
             )
         
         return loss
-    
     
     def _jax_objective_function_predict(opt_params, ):
         
@@ -671,9 +570,6 @@ def create_aug_dynamics_ode(diffrax_ode,  pop_coeff_for_J_idx):
     
     return aug_dynamics_ode
 
-def aug_dynamics_jax_worker():
-    raise NotImplementedError
-
 def estimate_b_i_vmapped(
     # Batched inputs (one entry per subject)
     initial_b_i_batch,
@@ -730,14 +626,11 @@ def estimate_b_i_vmapped(
                              time_mask_y_i,
                              #unpadded_y_i_len,
                              ):
-        # The objective function with data for this subject closed over
-        # We also unpad the subject's observation vector here
-        #y_i = padded_y_batch[:n_obs]
         
+        # The objective function with data for this subject closed over
         obj_fn = lambda b_i: FOCE_inner_loss_fn(
             b_i = b_i, 
             padded_y_i = padded_y_i,
-            #unpadded_y_i_len=unpadded_y_i_len,
             pop_coeff_i=pop_coeff,
             data_contribution_i = data_contrib_i,
             sigma2 = sigma2,
@@ -746,7 +639,6 @@ def estimate_b_i_vmapped(
             time_mask_y_i=time_mask_y_i,
             n_random_effects=n_random_effects, 
             compiled_ivp_solver=compiled_ivp_solver,
-            #compiled_augdyn_ivp_solver = compiled_augdyn_ivp_solver,
             pop_coeff_w_bi_idx = pop_coeff_w_bi_idx,
             use_surrogate_neg2ll = use_surrogate_neg2ll,
             
@@ -1174,6 +1066,7 @@ class FOCE_approx_neg2ll_loss_jax():
     @staticmethod
     def grad_method():
         return None
+    
 class FO_approx_neg2ll_loss_jax():
     
     def __init__(self):
@@ -1233,33 +1126,15 @@ def approx_neg2ll_loss_jax(
     omega2, 
     theta, 
     theta_data,
-    #params,
-    #params_order,
-    #theta_data,
-    #theta_data_tensor,
-    #theta_data_tensor_names,
     padded_y,
     unpadded_y_len,
-    #y_groups_idx, 
-    #y_groups_unique,
-    #n_population_coeff, 
-    #pop_coeff_names,
-    #omega2_diag_size,
-    #subject_level_effect_names,
-    #sigma_names,
-    #n_thetas,
-    #theta_names,
     time_mask_y,
     time_mask_J,
-    #compiled_ivp_solver_keys,
     compiled_augdyn_ivp_solver_arr,
     compiled_augdyn_ivp_solver_novmap_arr,
     compiled_ivp_solver_arr,
-    ode_t0_vals,
-    #compiled_gen_ode_coeff,
+    ode_t0_vals, 
     pop_coeff_for_J_idx,
-    #compiled_ivp_predictor,
-    #solve_for_omegas=False,
     compiled_estimate_b_i_foce, 
     compiled_estimate_b_i_fo,
     jittable_estimate_foc_i,
