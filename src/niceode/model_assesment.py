@@ -2,6 +2,12 @@ import numpy as np
 from scipy.stats import chi2
 from scipy.optimize import minimize, brentq
 from copy import deepcopy
+import numdifftools as nd
+import jax
+import jax.numpy as jnp
+from scipy.stats import t as scipy_t
+from .jax_utils import per_subject_neg2ll
+from functools import partial
 
 def construct_profile_ci(model_obj,df, param_index,init_bounds_factor = 1.01, profile_bounds = None, profile_bounds_factor = 2.0, ci_level = 0.95, result_list = None ):
     print(f"Starting profiling CI construction for parameter {param_index}")
@@ -134,3 +140,82 @@ def find_profile_bound(objective_func, param_index,
     if use_brentq:
         bound = brentq(root_function, a, b)
     return bound
+
+
+def get_robust_ci_foce_ndt(
+    scipy_result,
+    _jax_objective_function_predict_,
+    #static_args_for_vmap,
+    n_subjects, 
+    ci_level
+):
+    """
+    Calculates robust CIs for a FOCE/FOCEi model using a sandwich estimator
+    with gradients from the numdifftools library.
+    """
+    final_params_np = scipy_result.x
+    
+    # 1. Extract the Hessian ("Bread") from the optimizer result
+    H_inv_scipy = scipy_result.hess_inv.todense()
+    #H = np.linalg.inv(H_inv) # Keep as numpy for now
+
+    # --- Calculate the "Filling" (G) using numdifftools ---
+    
+    # 2. Define the JIT-compiled function that returns the vector of per-subject losses.
+    per_sub_neg2ll_partial = jax.jit(partial(per_subject_neg2ll,
+                                    _jax_objective_function_predict_ = _jax_objective_function_predict_,
+                                    ))
+        
+    # 3. Create a wrapper for numdifftools.
+    #    It must take a NumPy array and return a NumPy array.
+    def loss_vector_func_for_ndt(params_np: np.ndarray) -> np.ndarray:
+        # a. Convert NumPy input to JAX array
+        params_jax = jnp.asarray(params_np)
+        # b. Call the fast, JIT-compiled JAX function
+        losses_jax = per_sub_neg2ll_partial(params_jax)
+        # c. Convert JAX output back to NumPy array
+        return np.asarray(losses_jax)
+    
+    def total_loss_vector_func_for_ndt(params_np: np.ndarray) -> np.ndarray:
+        # a. Convert NumPy input to JAX array
+        params_jax = jnp.asarray(params_np)
+        # b. Call the fast, JIT-compiled JAX function
+        losses_jax = per_sub_neg2ll_partial(params_jax)
+        # c. Convert JAX output back to NumPy array
+        return np.asarray(jnp.sum(losses_jax))
+    
+    print("Calculating Hessian of total loss (H)...")
+    H_calculator = nd.Hessian(total_loss_vector_func_for_ndt)
+    H = H_calculator(final_params_np)
+    H_inv = np.linalg.inv(H)
+    print("Hessian calculation complete.")
+
+    # 4. Use numdifftools.Jacobian to calculate the per-subject gradients.
+    #    The result, J_scores, will have shape (n_subjects, n_params).
+    print("Calculating Jacobian of per-subject losses with numdifftools...")
+    J_calculator = nd.Jacobian(loss_vector_func_for_ndt)
+    J_scores = J_calculator(final_params_np)
+    print("Jacobian calculation complete.")
+
+    # 5. Calculate the cross-product of the gradients (G).
+    G = J_scores.T @ J_scores
+    
+    # --- Assemble the Sandwich ---
+    
+    # 6. Calculate the robust covariance matrix: Cov = H_inv @ G @ H_inv
+    robust_cov_matrix = H_inv @ G @ H_inv
+
+    # 7. Calculate Standard Errors and Confidence Intervals
+    std_errors = np.sqrt(np.diag(robust_cov_matrix))
+    alpha = (1 - ci_level) 
+    t_crit = scipy_t.ppf(1 - alpha / 2, df=n_subjects - len(final_params_np))
+    
+    lower_ci = final_params_np - t_crit * std_errors
+    upper_ci = final_params_np + t_crit * std_errors
+
+    return {
+        "std_errors": std_errors,
+        "lower_ci_95": lower_ci,
+        "upper_ci_95": upper_ci,
+        "robust_cov_matrix": robust_cov_matrix
+    }

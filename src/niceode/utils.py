@@ -37,8 +37,8 @@ from itertools import product
 from .jax_utils import (
                         create_jax_objective,
                         create_aug_dynamics_ode,
-
-                        
+                        predict_with_params,
+                        per_subject_neg2ll
                         )
 import jaxopt
 from mlflow.data.pandas_dataset import from_pandas
@@ -57,8 +57,9 @@ from diffrax import (ODETerm, SaveAt, diffeqsolve,
                      )
 import jax
 from io import BytesIO
-from .model_assesment import construct_profile_ci
+from .model_assesment import construct_profile_ci, get_robust_ci_foce_ndt
 import re
+
 
 
 from jax import lax
@@ -3941,17 +3942,19 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             "ode_t0_vals": np.array(self.ode_t0_vals.to_numpy(dtype=np.float64)),
             "compiled_augdyn_ivp_solver_arr":self.jax_augdyn_ivp_stiff_jittable_,
             "compiled_augdyn_ivp_solver_novmap_arr":self.jax_augdyn_ivp_stiff_jittable_novmap_,
-            "compiled_ivp_solver_arr":self.jax_ivp_stiff_jittable_novmap_, 
+            "compiled_ivp_solver_arr":self.jax_ivp_stiff_jittable_,
+            "compiled_ivp_solver_novmap_arr": self.jax_ivp_stiff_jittable_novmap_, 
             "use_surrogate_neg2ll": self.use_surrogate_neg2ll,
             
         }
         
         self.unpacker_static_kwargs_ = deepcopy(unpacker_static_kwargs)
         self.loss_static_kwargs_ = deepcopy(loss_static_kwargs)
-        fit_objective_and_grad, _jax_objective_function_predict_ = create_jax_objective(unpacker_static_kwargs=unpacker_static_kwargs, 
+        fit_objective_and_grad, predict_objective_and_unpack = create_jax_objective(unpacker_static_kwargs=unpacker_static_kwargs, 
                                                           loss_static_kwargs=loss_static_kwargs,
                                                        jittable_loss = self.jax_loss,
                                                        )
+        _jax_objective_function_predict_, predict_unpack =  predict_objective_and_unpack
         _jax_objective_function, _jax_objective_grad = fit_objective_and_grad
         if debugging_jax:
             return _jax_objective_function, _opt_params
@@ -4067,7 +4070,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             mlflow.log_param('n_optimized_params', self.n_optimized_coeff)
             
             mlflow.log_param('model_has_subj_effects', model_has_subj_level_effects)
-            
+            if self.fit_jax_objective:
+                mlflow_loss = self.jax_loss
             mlf_callback = MLflowCallback(objective_name=mlflow_loss.__name__, 
                                           parameter_names=fit_result_summary['log_name'].values,
                                           params_idx = params_idx,  
@@ -4130,10 +4134,88 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                          self.fit_result_.x, 
                                                          
                                                          )
-                        self.b_i_approx = deepcopy(loss_bundle[1][0])
+                        self.b_i_approx_ = deepcopy(loss_bundle[1][0])
                         self.fit_predict_result_ = deepcopy(loss_bundle[1][1][0][self.time_mask])
                         self.fit_loss_bundle_ = deepcopy(loss_bundle)
+                        self.fit_neg2ll_ = deepcopy(loss_bundle[0])
+                        #neg2ll_i = per_subject_neg2ll(self.fit_result_.x, loss_bundle=loss_bundle)
+                        #`fit_predict_params` is a dict with keys `pop_coeff` sigma2 omega2 `theta`
+                        self.fit_predict_params_ = predict_unpack(self.fit_result_.x)
+                        predict_params = deepcopy(loss_static_kwargs)
+                        predict_params.update(self.fit_predict_params_)
+                        predict_params['b_i'] = self.b_i_approx_
+                        me_alt_preds, me_padded_pred_and_mask, me_fitted_subject_coeff = predict_with_params(**predict_params)
+                        predict_params['b_i'] = None
+                        no_me_alt_preds, no_me_padded_pred_and_mask, no_me_fitted_subject_coeff = predict_with_params(**predict_params)
+                        #get_robust_ci_foce_ndt(scipy_result = self.fit_result_.x,
+                        #                       per_subject_loss_fn= scipy_wrapper,
+                        #                       
+                        #                       
+                        #                       )
+                        fit_preds_df = data[[self.groupby_col, self.time_col, self.conc_at_time_col]].copy()
+                        fit_preds_df[f"population_pred_{self.conc_at_time_col}"] = no_me_alt_preds
+                        fit_preds_df[f"indiv_pred_{self.conc_at_time_col}"] = me_alt_preds
+                        
+                        if ci_level is not None:
+                            self.fit_result_ci_ = get_robust_ci_foce_ndt(self.fit_result_,
+                                                                _jax_objective_function_predict_ = _jax_objective_function_predict_, 
+                                                                n_subjects= loss_static_kwargs['time_mask_y'].shape[0], 
+                                                                ci_level = ci_level,
+                                                                )
+                        
+                        mlflow.log_metric(f"final_{mlflow_loss.__name__}", self.fit_result_.fun)
+                        mlflow.log_metric(f"final_{self.loss_summary_name}", self.fit_result_.fun)
+                        mlflow.log_metric('final_nfev', self.fit_result_.nfev)
+                        mlflow.log_metric('final_nit', self.fit_result_.nit)
+                        mlflow.log_metric('final_success', bool(self.fit_result_.success))
+                        mlflow.log_text(str(self.fit_result_), 'OptimizeResult.txt')
+                        fit_result_summary_data = {
+                            'fitted_param_val':self.fit_result_.x, 
+                            "fitted_param_sd":self.fit_result_ci_['std_errors'] if ci_level is not None else None,
+                            "fitted_params_lower_ci95":self.fit_result_ci_['lower_ci_95'] if ci_level is not None else None,
+                            "fitted_params_upper_ci95":self.fit_result_ci_['upper_ci_95'] if ci_level is not None else None,
+                            
+                        }
+                        for k in fit_result_summary_data:
+                            fit_result_summary[k] = pd.NA
+                            fit_result_summary[k] = fit_result_summary[
+                                k
+                            ].astype(pd.Float64Dtype())
+                            fit_result_summary[k] = fit_result_summary_data[k]
+                        self.fit_result_summary_ = fit_result_summary.copy()
+                        mlflow.log_table(self.fit_result_summary_, 'fit_result_summary.json')
+                        
+                        #self.ode
+                        fitted_subject_ode_params = {
+                            "no_me": pd.DataFrame(dtype = pd.Float64Dtype()), 
+                            "with_me": pd.DataFrame(dtype = pd.Float64Dtype())
+                        }
 
+                        fitted_subject_ode_params["no_me"][self.pk_args_diffeq] = no_me_fitted_subject_coeff
+
+                        fitted_subject_ode_params["with_me"][self.pk_args_diffeq] = me_fitted_subject_coeff
+                        self.fitted_subject_ode_params_ = deepcopy(fitted_subject_ode_params)
+                        
+                        summary_pk_stats = {
+                            "no_me": (self._fitted_subject_ode_params["no_me"]
+                                .apply(self.pk_model_class.summary_calculations,
+                                                                        axis = 1, result_type = 'expand')), 
+                            "with_me": (self._fitted_subject_ode_params["with_me"]
+                                .apply(self.pk_model_class.summary_calculations,
+                                                                        axis = 1, result_type = 'expand'))
+                        }
+                        self.summary_pk_stats = deepcopy(summary_pk_stats)
+                        
+                        self.aic_ = self.fit_neg2ll_ + 2*(len(self.fit_result_.x))
+                        self.bic_ = self.fit_neg2ll + (len(self.fit_result_.x)) * loss_static_kwargs["unpadded_y_len"] 
+                        
+                        run_summary = pd.Series(dtype = pd.Float64Dtype())
+                        run_summary['OBJF'] = self.fit_result_.fun
+                        run_summary['Negative 2 Log-Likelihood'] =  self.fit_neg2ll_
+                        run_summary['Log-Likelihood'] = self.fit_neg2ll_ / -2.0
+                        run_summary['AIC'] = self.aic_
+                        run_summary['AIC'] = self.bic_
+                        self.fit_result_summary_metrics_ = run_summary.copy()
                 else:
                     self.fit_result_ = optimize_with_checkpoint_joblib(
                         objective_function,
@@ -4149,73 +4231,73 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         
                     )
                 # hess_fun = nd.Hessian()
-                log_postfit_metrics = True
-                if log_postfit_metrics:
-                    mlflow.log_metric(f"final_{mlflow_loss.__name__}", self.fit_result_.fun)
-                    mlflow.log_metric(f"final_{self.loss_summary_name}", self.fit_result_.fun)
-                    mlflow.log_metric('final_nfev', self.fit_result_.nfev)
-                    mlflow.log_metric('final_nit', self.fit_result_.nit)
-                    mlflow.log_metric('final_success', bool(self.fit_result_.success))
-                    mlflow.log_text(str(self.fit_result_), 'OptimizeResult.txt')
-                    
-                    
-                    
-                    fit_result_summary["best_fit_param_val"] = pd.NA
-                    fit_result_summary["best_fit_param_val"] = fit_result_summary[
-                        "best_fit_param_val"
-                    ].astype(pd.Float64Dtype())
-                    combined_params = np.zeros(_total_n_params)
-                    combined_params[opt_params_combined_params_idx] = self.fit_result_.x
-                    combined_params[fixed_params_combined_params_idx] = _fixed_params
-                    final_params = combined_params + init_params_for_scaling
-                    fit_result_summary["best_fit_param_val"] = final_params
-                    if ci_level is not None:
-                        ci_df = self._generate_profile_ci(data=data)
-                        fit_result_summary = fit_result_summary.merge(
-                            ci_df, how = 'left', right_index=True, left_index=True
-                        )
-                        ci_re = re.compile('^ci[0-9]{1,2}')
-                        ci_cols = [i for i in fit_result_summary.columns if bool(re.search(ci_re, i))]
-                        for idx, row in fit_result_summary.iterrows():
-                            for c in ci_cols:
-                                log_str = f"param_{row['log_name']}_{c}"
-                                mlflow.log_metric(log_str, row[c])
-                    
-                    self.fit_result_summary_ = fit_result_summary.copy()
-                    mlflow.log_table(self.fit_result_summary_, 'fit_result_summary.json')
-                    
-                    # after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
-                    #
-                    preds, apprx_neg2ll = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs, return_loss = True)
-                    mlflow.log_metric('final_apprx_neg2ll', apprx_neg2ll)
-                    pred_loss_sigma = (fit_result_summary
-                                    .loc[fit_result_summary['model_error'], 'best_fit_param_val'])
-                    if self.optimize_sigma_on_log_scale:
-                        pred_loss_sigma = np.exp(pred_loss_sigma)
-                    pred_loss = neg2_log_likelihood_loss(self.y, preds, pred_loss_sigma)
-                    mlflow.log_metric('fit_predict_neg2ll', pred_loss)
-                    if len(omegas.values) > 0:
-                        mlflow.log_table(self.b_i_approx, 'subject_level_effects.json')
+                    log_postfit_metrics = True
+                    if log_postfit_metrics:
+                        mlflow.log_metric(f"final_{mlflow_loss.__name__}", self.fit_result_.fun)
+                        mlflow.log_metric(f"final_{self.loss_summary_name}", self.fit_result_.fun)
+                        mlflow.log_metric('final_nfev', self.fit_result_.nfev)
+                        mlflow.log_metric('final_nit', self.fit_result_.nit)
+                        mlflow.log_metric('final_success', bool(self.fit_result_.success))
+                        mlflow.log_text(str(self.fit_result_), 'OptimizeResult.txt')
+                        
+                        
+                        
+                        fit_result_summary["best_fit_param_val"] = pd.NA
+                        fit_result_summary["best_fit_param_val"] = fit_result_summary[
+                            "best_fit_param_val"
+                        ].astype(pd.Float64Dtype())
+                        combined_params = np.zeros(_total_n_params)
+                        combined_params[opt_params_combined_params_idx] = self.fit_result_.x
+                        combined_params[fixed_params_combined_params_idx] = _fixed_params
+                        final_params = combined_params + init_params_for_scaling
+                        fit_result_summary["best_fit_param_val"] = final_params
+                        if ci_level is not None:
+                            ci_df = self._generate_profile_ci(data=data)
+                            fit_result_summary = fit_result_summary.merge(
+                                ci_df, how = 'left', right_index=True, left_index=True
+                            )
+                            ci_re = re.compile('^ci[0-9]{1,2}')
+                            ci_cols = [i for i in fit_result_summary.columns if bool(re.search(ci_re, i))]
+                            for idx, row in fit_result_summary.iterrows():
+                                for c in ci_cols:
+                                    log_str = f"param_{row['log_name']}_{c}"
+                                    mlflow.log_metric(log_str, row[c])
+                        
+                        self.fit_result_summary_ = fit_result_summary.copy()
+                        mlflow.log_table(self.fit_result_summary_, 'fit_result_summary.json')
+                        
+                        # after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
+                        #
+                        preds, apprx_neg2ll = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs, return_loss = True)
+                        mlflow.log_metric('final_apprx_neg2ll', apprx_neg2ll)
+                        pred_loss_sigma = (fit_result_summary
+                                        .loc[fit_result_summary['model_error'], 'best_fit_param_val'])
+                        if self.optimize_sigma_on_log_scale:
+                            pred_loss_sigma = np.exp(pred_loss_sigma)
+                        pred_loss = neg2_log_likelihood_loss(self.y, preds, pred_loss_sigma)
+                        mlflow.log_metric('fit_predict_neg2ll', pred_loss)
+                        if len(omegas.values) > 0:
+                            mlflow.log_table(self.b_i_approx, 'subject_level_effects.json')
 
-        
-                    mlflow.log_table(self._fitted_subject_ode_params, 'fitted_subject_ode_params_base.json')
-                    
-                    self._summary_pk_stats = (self._fitted_subject_ode_params
-                                            .apply(self.pk_model_class.summary_calculations,
-                                                                                    axis = 1, result_type = 'expand'))
-                    #For some reason this writing and reloading is required to get the df to be serializable.
-                    #Related to: https://github.com/pandas-dev/pandas/issues/55490
-                    with BytesIO() as f:
-                        self._summary_pk_stats.to_csv(f,index=False)
-                        f.seek(0)
-                        self._summary_pk_stats = pd.read_csv(f, dtype = pd.Float64Dtype())
-                    mlflow.log_table(self._summary_pk_stats, 'fitted_subject_ode_params.json')
-                    self._summary_pk_stats_descr = self._summary_pk_stats.describe()
-                    mlflow.log_table(self._summary_pk_stats_descr, 'fitted_subject_ode_params_descr.json')
-                    for c in self._summary_pk_stats_descr.columns:
-                        tmp = self._summary_pk_stats_descr[c]
-                        [mlflow.log_metric(f"fitted_subject_{c}_{idx.replace('%', 'quantile')}", tmp[idx])
-                        for idx in tmp.index[1:]] 
+            
+                        mlflow.log_table(self._fitted_subject_ode_params, 'fitted_subject_ode_params_base.json')
+                        
+                        self._summary_pk_stats = (self._fitted_subject_ode_params
+                                                .apply(self.pk_model_class.summary_calculations,
+                                                                                        axis = 1, result_type = 'expand'))
+                        #For some reason this writing and reloading is required to get the df to be serializable.
+                        #Related to: https://github.com/pandas-dev/pandas/issues/55490
+                        with BytesIO() as f:
+                            self._summary_pk_stats.to_csv(f,index=False)
+                            f.seek(0)
+                            self._summary_pk_stats = pd.read_csv(f, dtype = pd.Float64Dtype())
+                        mlflow.log_table(self._summary_pk_stats, 'fitted_subject_ode_params.json')
+                        self._summary_pk_stats_descr = self._summary_pk_stats.describe()
+                        mlflow.log_table(self._summary_pk_stats_descr, 'fitted_subject_ode_params_descr.json')
+                        for c in self._summary_pk_stats_descr.columns:
+                            tmp = self._summary_pk_stats_descr[c]
+                            [mlflow.log_metric(f"fitted_subject_{c}_{idx.replace('%', 'quantile')}", tmp[idx])
+                            for idx in tmp.index[1:]] 
             
             
                 

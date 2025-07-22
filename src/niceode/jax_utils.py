@@ -256,7 +256,7 @@ def outer_neg2ll_chol_jit(
         neg2_ll = total_log_det + total_quadratic + num_total_obs * jnp.log(2 * jnp.pi)
         outer_loss = neg2_ll
 
-    return outer_loss
+    return outer_loss, (all_log_dets, all_quadratic_terms)
 
 def surrogate_neg2_ll_chol_jit(
     J_dense,           # Shape: (n_subjects, max_obs, n_effects)
@@ -482,6 +482,48 @@ def _jittable_param_unpack(opt_params, #parameters being optmized by something l
 
     return dynamic_loss_kwargs
 
+def predict_with_params(pop_coeff, 
+    sigma2, 
+    omega2, 
+    theta, 
+    theta_data,
+    padded_y,
+    unpadded_y_len,
+    time_mask_y,
+    time_mask_J,
+    compiled_augdyn_ivp_solver_arr,
+    compiled_augdyn_ivp_solver_novmap_arr,
+    compiled_ivp_solver_arr,
+    compiled_ivp_solver_novmap_arr,
+    ode_t0_vals, 
+    pop_coeff_for_J_idx,
+    use_surrogate_neg2ll,
+    b_i):
+
+    n_subjects = time_mask_y.shape[0]
+    n_coeffs = pop_coeff.shape[0]
+    n_subject_level_eff = pop_coeff_for_J_idx.shape[0]
+    
+    if theta.shape[0] == 0:
+        data_contribution = jnp.zeros((n_subjects, n_coeffs))
+    else:
+        data_contribution = theta @ theta_data
+    
+    if b_i is None:
+        b_i = jnp.zeros((n_subjects, n_subject_level_eff))
+        
+    b_i_work = jnp.zeros((n_subjects, n_coeffs))
+    b_i_work = b_i_work.at[:,pop_coeff_for_J_idx].set(b_i)
+    subject_coeff = b_i_work + pop_coeff
+    model_coeffs_i = jnp.exp(data_contribution + subject_coeff)
+    padded_full_preds, padded_pred_y = compiled_ivp_solver_arr(ode_t0_vals,
+        model_coeffs_i, )
+    preds_out = padded_pred_y[time_mask_y]
+    
+    return preds_out, (padded_pred_y, time_mask_y), model_coeffs_i
+    
+    
+    
 
 def create_jax_objective(
                          unpacker_static_kwargs, 
@@ -498,6 +540,8 @@ def create_jax_objective(
     jittable_loss_p_fit = partial(jittable_loss_fn, **loss_static_kwargs)
     
     p_jittable_param_unpack_predict = partial(_jittable_param_unpack, **unpacker_static_kwargs)
+    #the predict version of this will be called post fit to generate the fitted set of b_i, the neg2ll for reporting/model comparison, and a set of "fit preds"
+    loss_static_kwargs["use_surrogate_neg2ll"] = False
     jittable_loss_p_predict = partial(jittable_loss_fn, **loss_static_kwargs)
     
     def _jax_objective_function(opt_params, ):
@@ -535,7 +579,10 @@ def create_jax_objective(
     #
     fit_obj = jax.jit(_jax_objective_function)
     fit_grad = jax.jit(grad_method(fit_obj)) if grad_method is not None else None
-    return (fit_obj, fit_grad), jax.jit(_jax_objective_function_predict)
+    
+    predict_objective = jax.jit(_jax_objective_function_predict)
+    predict_unpack = jax.jit(p_jittable_param_unpack_predict)
+    return (fit_obj, fit_grad), (predict_objective, predict_unpack)
     #return _jax_objective_function, _jax_objective_function_predict
 
 #@partial(jax.jit, static_argnames = (
@@ -936,19 +983,21 @@ def foc_interaction_term_chol(all_hessians: jnp.ndarray, jitter: float = 1e-6) -
     #    The log-determinant of H is 2 * sum(log(diag(L))).
     #    We use nan_to_num as a final safeguard against log(0) if jitter is
     #    insufficient, preventing NaNs from poisoning the entire loss.
-    log_determinants = 2 * jnp.sum(jnp.nan_to_num(jnp.log(diags), nan=0.0, neginf=0.0), axis=-1)
+    interaction_term_i = 2 * jnp.sum(jnp.nan_to_num(jnp.log(diags), nan=0.0, neginf=0.0), axis=-1)
 
     # 5. Sum across all subjects for the final interaction term.
-    interaction_term = jnp.sum(log_determinants)
-    
-    return interaction_term
+    interaction_term = jnp.sum(interaction_term_i)
+
+    return interaction_term, interaction_term_i
 
 def foc_interaction_term_passthrough(all_hessians, **kwargs):
-    return 0.0
+    interaction_term_placeholder = 0.0
+    interaction_term_i_placeholder = 0.0
+    return interaction_term_placeholder, interaction_term_i_placeholder
 
 def estimate_b_i_foce_passthrough(initial_b_i_batch, **kwargs):
-    hessian_placeholder = 1
-    inner_loss_placeholder = 1
+    hessian_placeholder = 0.0
+    inner_loss_placeholder = 0.0
     return initial_b_i_batch, hessian_placeholder, inner_loss_placeholder
 
 def estimate_b_i_fo_passthrough(b_i, **kwargs):
@@ -979,6 +1028,7 @@ class FOCEi_approx_neg2ll_loss_jax():
     compiled_augdyn_ivp_solver_arr,
     compiled_augdyn_ivp_solver_novmap_arr,
     compiled_ivp_solver_arr,
+    compiled_ivp_solver_novmap_arr,
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
@@ -998,6 +1048,7 @@ class FOCEi_approx_neg2ll_loss_jax():
             compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
             compiled_augdyn_ivp_solver_novmap_arr = compiled_augdyn_ivp_solver_novmap_arr,
             compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+            compiled_ivp_solver_novmap_arr = compiled_ivp_solver_novmap_arr,
             ode_t0_vals = ode_t0_vals,
             pop_coeff_for_J_idx = pop_coeff_for_J_idx,
             compiled_estimate_b_i_foce = estimate_b_i_vmapped,
@@ -1033,6 +1084,7 @@ class FOCE_approx_neg2ll_loss_jax():
     compiled_augdyn_ivp_solver_arr,
     compiled_augdyn_ivp_solver_novmap_arr,
     compiled_ivp_solver_arr,
+    compiled_ivp_solver_novmap_arr,
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
@@ -1052,6 +1104,7 @@ class FOCE_approx_neg2ll_loss_jax():
             compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
             compiled_augdyn_ivp_solver_novmap_arr = compiled_augdyn_ivp_solver_novmap_arr,
             compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+            compiled_ivp_solver_novmap_arr = compiled_ivp_solver_novmap_arr,
             ode_t0_vals = ode_t0_vals,
             pop_coeff_for_J_idx = pop_coeff_for_J_idx,
             compiled_estimate_b_i_foce = estimate_b_i_vmapped,
@@ -1086,6 +1139,7 @@ class FO_approx_neg2ll_loss_jax():
     compiled_augdyn_ivp_solver_arr,
     compiled_augdyn_ivp_solver_novmap_arr,
     compiled_ivp_solver_arr,
+    compiled_ivp_solver_novmap_arr,
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
@@ -1105,6 +1159,7 @@ class FO_approx_neg2ll_loss_jax():
             compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
             compiled_augdyn_ivp_solver_novmap_arr = compiled_augdyn_ivp_solver_novmap_arr,
             compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+            compiled_ivp_solver_novmap_arr = compiled_ivp_solver_novmap_arr,
             ode_t0_vals = ode_t0_vals,
             pop_coeff_for_J_idx = pop_coeff_for_J_idx,
             compiled_estimate_b_i_foce = estimate_b_i_foce_passthrough,
@@ -1133,6 +1188,7 @@ def approx_neg2ll_loss_jax(
     compiled_augdyn_ivp_solver_arr,
     compiled_augdyn_ivp_solver_novmap_arr,
     compiled_ivp_solver_arr,
+    compiled_ivp_solver_novmap_arr,
     ode_t0_vals, 
     pop_coeff_for_J_idx,
     compiled_estimate_b_i_foce, 
@@ -1146,7 +1202,7 @@ def approx_neg2ll_loss_jax(
     n_subjects = time_mask_y.shape[0]
     n_coeffs = pop_coeff.shape[0]
     n_subject_level_eff = pop_coeff_for_J_idx.shape[0]
-    #unpadded_y_len_batch = jnp.sum(time_mask_y, axis = 1)
+    unpadded_y_len_batch = jnp.sum(time_mask_y, axis = 1)
     if theta.shape[0] == 0:
         
         data_contribution = jnp.zeros((n_subjects, n_coeffs))
@@ -1181,7 +1237,7 @@ def approx_neg2ll_loss_jax(
                                                 sigma2 = sigma2,
                                                 omega2 = omega2,
                                                 n_random_effects = n_subject_level_eff,
-                                                compiled_ivp_solver = compiled_ivp_solver_arr,
+                                                compiled_ivp_solver = compiled_ivp_solver_novmap_arr,
                                                 compiled_augdyn_ivp_solver = compiled_augdyn_ivp_solver_novmap_arr,
                                                 pop_coeff_w_bi_idx = pop_coeff_for_J_idx,
                                                 use_surrogate_neg2ll = use_surrogate_neg2ll,
@@ -1217,10 +1273,10 @@ def approx_neg2ll_loss_jax(
     J_dense = J_conc_full#shape (n_subject, max_obs_per_subject, n_s)
     J = jnp.where(time_mask_J, J_dense, 0.0) # time_mask_J shape  (n_subject, max_obs_per_subject, n_s)
     
-    interaction_term = jittable_estimate_foc_i(all_hessians = hessian_i)
+    interaction_term, interaction_term_i = jittable_estimate_foc_i(all_hessians = hessian_i)
 
     # Estimate the covariance matrix, then estimate neg log likelihood
-    outer_loss = outer_neg2ll_chol_jit(
+    outer_loss, per_subject_outer_loss = outer_neg2ll_chol_jit(
         J,           # Shape: (n_subjects, max_obs, n_effects)
         masked_residuals,  # Shape: (n_subjects, max_obs)
         time_mask_y,              # Shape: (n_subjects, max_obs)
@@ -1238,5 +1294,18 @@ def approx_neg2ll_loss_jax(
                                    )
     large_penalty = 1e12
     outer_loss_out = jnp.where(is_bad_state, large_penalty, outer_loss_combined)
+    per_subject_loss = (per_subject_outer_loss, interaction_term_i, unpadded_y_len_batch)
     #jax.debug.print("Outer Loss Out val: {s}", s = neg2_ll_out)
-    return outer_loss_out, (b_i_approx, (padded_pred_y, padded_full_preds))
+    return outer_loss_out, (b_i_approx, (padded_pred_y, padded_full_preds), model_coeffs_i, per_subject_loss)
+
+def per_subject_neg2ll(params_jax, _jax_objective_function_predict_ = None, loss_bundle = None):
+    if loss_bundle is None:
+        loss_bundle = _jax_objective_function_predict_(params_jax)
+    per_subject_loss_components = loss_bundle[1][-1]
+    log_det_i = per_subject_loss_components[0][0]
+    quadratic_i = per_subject_loss_components[0][1]
+    inner_loss_i = per_subject_loss_components[1]
+    n_t_i = per_subject_loss_components[2]
+    n_t_scaler_i = n_t_i.reshape(-1,1) @ jnp.array([jnp.log(2 * jnp.pi)])
+    per_subject_neg2ll = log_det_i + quadratic_i + n_t_scaler_i + inner_loss_i
+    return per_subject_neg2ll
