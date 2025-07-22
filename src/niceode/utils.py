@@ -40,6 +40,7 @@ from .jax_utils import (
 
                         
                         )
+import jaxopt
 from mlflow.data.pandas_dataset import from_pandas
 from .mlflow_utils import (get_class_source_without_docstrings,
                                   generate_class_contents_hash, 
@@ -1524,8 +1525,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         jax_loss = None,
         jit_jax_ivp_solver = True, 
         jit_jax_loss = True, 
+        fit_jax_objective = True,
     ):
         #defaults related to ODE solving
+        self.fit_jax_objective = fit_jax_objective
         self.jax_loss = jax_loss
         self.jit_jax_ivp_solver = jit_jax_ivp_solver
         self.jit_jax_loss = jit_jax_loss
@@ -3401,6 +3404,31 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             jb.dump(dump_obj, f)
         del(dump_obj)
 
+    def _predict_jax(self,
+        data,
+        params = None,
+        predict_all_ode_outputs = False,
+        parallel=None,
+        parallel_n_jobs=None,
+        timepoints=None,
+        subject_level_prediction=True,
+        predict_unknown_t0=False,
+        return_loss = False,):
+        
+        _, _, _, theta_data = self._assemble_pred_matrices(data)
+        params_idx = self._fit_params_idx
+        pop_coeffs_for_J_idx = self.loss_static_kwargs_['pop_coeffs_for_J_idx']
+        self._compile_jax_ivp_solvers(timepoints=timepoints, pop_coeffs_for_J_idx=pop_coeffs_for_J_idx)
+        pred_unpacker_static_kwargs_ = deepcopy(self.unpacker_static_kwargs_)
+        pred_loss_static_kwargs_ = deepcopy(self.loss_static_kwargs_)
+        #if timepoints is NOT the same as what was fit, need to update AT LEAST padded_y, time_mask_y
+        # time_mask_J unpadded_y_len so that there is not padding when predicting at every timepoint for 
+        #each subject. 
+        _, _jax_objective_function_predict_ = create_jax_objective(unpacker_static_kwargs=pred_unpacker_static_kwargs_, 
+                                                        loss_static_kwargs=pred_loss_static_kwargs_,
+                                                    jittable_loss = self.jax_loss,
+                                                    )
+    
     #@profile
     def predict2(
         self,
@@ -3421,8 +3449,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.jax_ivp_pymcstiff_solver_is_compiled = False
         self.jax_augdyn_ivp_stiff_solver_is_compiled = False
         
-        
-        
+        self._compile_jax_ivp_solvers(timepoints=timepoints, )
+    
         if params is None:
             if self.fit_result_ is None:
                 raise ValueError("The Model must be fit before prediction")
@@ -3435,19 +3463,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 self.fit2(data, perform_fit=False)
                 
         _, _, _, beta_data = self._assemble_pred_matrices(data)
-        pop_coeffs_for_J_idx = self.dynamic_opt_kwargs_['pop_coeffs_for_J_idx']
-        self._compile_jax_ivp_solvers(timepoints=timepoints, pop_coeffs_for_J_idx=pop_coeffs_for_J_idx)
-        #if timepoints is NOT the same as what was fit, need to update AT LEAST padded_y, time_mask_y
-        # time_mask_J unpadded_y_len so that there is not padding when predicting at every timepoint for 
-        #each subject. 
-        pred_static_opt_kwargs = deepcopy(self.static_opt_kwargs_)
-        pred_dynamic_opt_kwargs = deepcopy(self.dynamic_opt_kwargs_)
-        _, _jax_objective_function_predict_ = create_jax_objective(static_opt_kwargs=pred_static_opt_kwargs, 
-                                                       dynamic_opt_kwargs=pred_dynamic_opt_kwargs,
-                                                       compiled_augdyn_solver=self.jax_augdyn_ivp_stiff_jittable_,  
-                                                       compiled_solver = self.jax_ivp_stiff_jittable_novmap_,
-                                                       jittable_loss = self.jax_loss,
-                                                       )
         ode_t0_vals_are_subject_y0_init_status = deepcopy(
             self.ode_t0_vals_are_subject_y0
         )
@@ -3628,6 +3643,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
     ) -> Self:
         fit_id = uuid.uuid4() if fit_id is None else fit_id
         data = self._validate_data_chronology(data)
+        #use the data in combination with the values in self.init_params_pd to create 
+        #the initial pop_coeffs, omegas, thetas and generate theta_data
         pop_coeffs, omegas, thetas, theta_data = self._assemble_pred_matrices(data, )
         subject_level_intercept_init_vals = self.subject_level_intercept_init_vals
         
@@ -3816,6 +3833,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             omega=params_idx_jax['omega'],
             theta=params_idx_jax['theta'],
         )
+        
         jax_bundle_out = self._assemble_pred_matrices_jax(init_params_jax, theta_data_jax, params_idx)
         pop_coeff_cols = {c:idx for idx, c in enumerate(pop_coeffs_jax)}
         omega_diag_cols = omega_diag_names_jax
@@ -3927,13 +3945,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             "use_surrogate_neg2ll": self.use_surrogate_neg2ll,
             
         }
-        #should we jit this wrapper?
         
-        self.static_opt_kwargs_ = deepcopy(static_opt_kwargs)
-        self.dynamic_opt_kwargs_ = deepcopy(dynamic_opt_kwargs)
         self.unpacker_static_kwargs_ = deepcopy(unpacker_static_kwargs)
         self.loss_static_kwargs_ = deepcopy(loss_static_kwargs)
-        fit_objective_and_grad, _ = create_jax_objective(unpacker_static_kwargs=unpacker_static_kwargs, 
+        fit_objective_and_grad, _jax_objective_function_predict_ = create_jax_objective(unpacker_static_kwargs=unpacker_static_kwargs, 
                                                           loss_static_kwargs=loss_static_kwargs,
                                                        jittable_loss = self.jax_loss,
                                                        )
@@ -4070,14 +4085,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                             total_n_params = _total_n_params
                                           )
             if perform_fit:
-                fit_jax_objective = True
+                #self.fit_jax_objective = True
                 optimize_with_scipy = True
                 use_logger = True
                 if use_logger:
                     callback = mlf_callback
                 else:
                     callback = None
-                if fit_jax_objective:
+                if self.fit_jax_objective:
                     if optimize_with_scipy:
                         def scipy_wrapper(numpy_params):
                             """
@@ -4100,7 +4115,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                             
                                 return grad
                         else:
-                            scipy_jac_wrapper = None
+                            scipy_jac_wrapper = None                        
                         self.fit_result_ = minimize(
                                 scipy_wrapper,
                                 _opt_params,
@@ -4111,6 +4126,13 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                         },
                                 callback = callback,
                             )
+                        loss_bundle = _jax_objective_function_predict_(
+                                                         self.fit_result_.x, 
+                                                         
+                                                         )
+                        self.b_i_approx = deepcopy(loss_bundle[1][0])
+                        self.fit_predict_result_ = deepcopy(loss_bundle[1][1][0][self.time_mask])
+                        self.fit_loss_bundle_ = deepcopy(loss_bundle)
 
                 else:
                     self.fit_result_ = optimize_with_checkpoint_joblib(
@@ -4127,71 +4149,73 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         
                     )
                 # hess_fun = nd.Hessian()
-                mlflow.log_metric(f"final_{mlflow_loss.__name__}", self.fit_result_.fun)
-                mlflow.log_metric(f"final_{self.loss_summary_name}", self.fit_result_.fun)
-                mlflow.log_metric('final_nfev', self.fit_result_.nfev)
-                mlflow.log_metric('final_nit', self.fit_result_.nit)
-                mlflow.log_metric('final_success', bool(self.fit_result_.success))
-                mlflow.log_text(str(self.fit_result_), 'OptimizeResult.txt')
-                
-                
-                
-                fit_result_summary["best_fit_param_val"] = pd.NA
-                fit_result_summary["best_fit_param_val"] = fit_result_summary[
-                    "best_fit_param_val"
-                ].astype(pd.Float64Dtype())
-                combined_params = np.zeros(_total_n_params)
-                combined_params[opt_params_combined_params_idx] = self.fit_result_.x
-                combined_params[fixed_params_combined_params_idx] = _fixed_params
-                final_params = combined_params + init_params_for_scaling
-                fit_result_summary["best_fit_param_val"] = final_params
-                if ci_level is not None:
-                    ci_df = self._generate_profile_ci(data=data)
-                    fit_result_summary = fit_result_summary.merge(
-                        ci_df, how = 'left', right_index=True, left_index=True
-                    )
-                    ci_re = re.compile('^ci[0-9]{1,2}')
-                    ci_cols = [i for i in fit_result_summary.columns if bool(re.search(ci_re, i))]
-                    for idx, row in fit_result_summary.iterrows():
-                        for c in ci_cols:
-                            log_str = f"param_{row['log_name']}_{c}"
-                            mlflow.log_metric(log_str, row[c])
-                
-                self.fit_result_summary_ = fit_result_summary.copy()
-                mlflow.log_table(self.fit_result_summary_, 'fit_result_summary.json')
-                
-                # after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
-                #
-                preds, apprx_neg2ll = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs, return_loss = True)
-                mlflow.log_metric('final_apprx_neg2ll', apprx_neg2ll)
-                pred_loss_sigma = (fit_result_summary
-                                .loc[fit_result_summary['model_error'], 'best_fit_param_val'])
-                if self.optimize_sigma_on_log_scale:
-                    pred_loss_sigma = np.exp(pred_loss_sigma)
-                pred_loss = neg2_log_likelihood_loss(self.y, preds, pred_loss_sigma)
-                mlflow.log_metric('fit_predict_neg2ll', pred_loss)
-                if len(omegas.values) > 0:
-                    mlflow.log_table(self.b_i_approx, 'subject_level_effects.json')
+                log_postfit_metrics = True
+                if log_postfit_metrics:
+                    mlflow.log_metric(f"final_{mlflow_loss.__name__}", self.fit_result_.fun)
+                    mlflow.log_metric(f"final_{self.loss_summary_name}", self.fit_result_.fun)
+                    mlflow.log_metric('final_nfev', self.fit_result_.nfev)
+                    mlflow.log_metric('final_nit', self.fit_result_.nit)
+                    mlflow.log_metric('final_success', bool(self.fit_result_.success))
+                    mlflow.log_text(str(self.fit_result_), 'OptimizeResult.txt')
+                    
+                    
+                    
+                    fit_result_summary["best_fit_param_val"] = pd.NA
+                    fit_result_summary["best_fit_param_val"] = fit_result_summary[
+                        "best_fit_param_val"
+                    ].astype(pd.Float64Dtype())
+                    combined_params = np.zeros(_total_n_params)
+                    combined_params[opt_params_combined_params_idx] = self.fit_result_.x
+                    combined_params[fixed_params_combined_params_idx] = _fixed_params
+                    final_params = combined_params + init_params_for_scaling
+                    fit_result_summary["best_fit_param_val"] = final_params
+                    if ci_level is not None:
+                        ci_df = self._generate_profile_ci(data=data)
+                        fit_result_summary = fit_result_summary.merge(
+                            ci_df, how = 'left', right_index=True, left_index=True
+                        )
+                        ci_re = re.compile('^ci[0-9]{1,2}')
+                        ci_cols = [i for i in fit_result_summary.columns if bool(re.search(ci_re, i))]
+                        for idx, row in fit_result_summary.iterrows():
+                            for c in ci_cols:
+                                log_str = f"param_{row['log_name']}_{c}"
+                                mlflow.log_metric(log_str, row[c])
+                    
+                    self.fit_result_summary_ = fit_result_summary.copy()
+                    mlflow.log_table(self.fit_result_summary_, 'fit_result_summary.json')
+                    
+                    # after fitting, predict2 to set self.ab_i_approx if the model was mixed effects
+                    #
+                    preds, apprx_neg2ll = self.predict2(data, parallel=parallel, parallel_n_jobs=parallel_n_jobs, return_loss = True)
+                    mlflow.log_metric('final_apprx_neg2ll', apprx_neg2ll)
+                    pred_loss_sigma = (fit_result_summary
+                                    .loc[fit_result_summary['model_error'], 'best_fit_param_val'])
+                    if self.optimize_sigma_on_log_scale:
+                        pred_loss_sigma = np.exp(pred_loss_sigma)
+                    pred_loss = neg2_log_likelihood_loss(self.y, preds, pred_loss_sigma)
+                    mlflow.log_metric('fit_predict_neg2ll', pred_loss)
+                    if len(omegas.values) > 0:
+                        mlflow.log_table(self.b_i_approx, 'subject_level_effects.json')
 
-    
-                mlflow.log_table(self._fitted_subject_ode_params, 'fitted_subject_ode_params_base.json')
-                
-                self._summary_pk_stats = (self._fitted_subject_ode_params
-                                        .apply(self.pk_model_class.summary_calculations,
-                                                                                axis = 1, result_type = 'expand'))
-                #For some reason this writing and reloading is required to get the df to be serializable.
-                #Related to: https://github.com/pandas-dev/pandas/issues/55490
-                with BytesIO() as f:
-                    self._summary_pk_stats.to_csv(f,index=False)
-                    f.seek(0)
-                    self._summary_pk_stats = pd.read_csv(f, dtype = pd.Float64Dtype())
-                mlflow.log_table(self._summary_pk_stats, 'fitted_subject_ode_params.json')
-                self._summary_pk_stats_descr = self._summary_pk_stats.describe()
-                mlflow.log_table(self._summary_pk_stats_descr, 'fitted_subject_ode_params_descr.json')
-                for c in self._summary_pk_stats_descr.columns:
-                    tmp = self._summary_pk_stats_descr[c]
-                    [mlflow.log_metric(f"fitted_subject_{c}_{idx.replace('%', 'quantile')}", tmp[idx])
-                    for idx in tmp.index[1:]] 
+        
+                    mlflow.log_table(self._fitted_subject_ode_params, 'fitted_subject_ode_params_base.json')
+                    
+                    self._summary_pk_stats = (self._fitted_subject_ode_params
+                                            .apply(self.pk_model_class.summary_calculations,
+                                                                                    axis = 1, result_type = 'expand'))
+                    #For some reason this writing and reloading is required to get the df to be serializable.
+                    #Related to: https://github.com/pandas-dev/pandas/issues/55490
+                    with BytesIO() as f:
+                        self._summary_pk_stats.to_csv(f,index=False)
+                        f.seek(0)
+                        self._summary_pk_stats = pd.read_csv(f, dtype = pd.Float64Dtype())
+                    mlflow.log_table(self._summary_pk_stats, 'fitted_subject_ode_params.json')
+                    self._summary_pk_stats_descr = self._summary_pk_stats.describe()
+                    mlflow.log_table(self._summary_pk_stats_descr, 'fitted_subject_ode_params_descr.json')
+                    for c in self._summary_pk_stats_descr.columns:
+                        tmp = self._summary_pk_stats_descr[c]
+                        [mlflow.log_metric(f"fitted_subject_{c}_{idx.replace('%', 'quantile')}", tmp[idx])
+                        for idx in tmp.index[1:]] 
             
             
                 
