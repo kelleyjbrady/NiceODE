@@ -5,7 +5,7 @@ from copy import deepcopy
 import numdifftools as nd
 import jax
 import jax.numpy as jnp
-from scipy.stats import t as scipy_t
+from scipy.stats import t as scipy_t, norm as scipy_norm
 from functools import partial
 
 def construct_profile_ci(model_obj,df, param_index,init_bounds_factor = 1.01, profile_bounds = None, profile_bounds_factor = 2.0, ci_level = 0.95, result_list = None ):
@@ -141,7 +141,7 @@ def find_profile_bound(objective_func, param_index,
     return bound
 
 
-def per_subject_neg2ll(params_jax, _jax_objective_function_predict_ = None, loss_bundle = None):
+def estimate_per_subject_loss(params_jax, use_surrogate_neg2ll = True, _jax_objective_function_predict_ = None, loss_bundle = None):
     if loss_bundle is None:
         loss_bundle = _jax_objective_function_predict_(params_jax)
     per_subject_loss_components = loss_bundle[1][-1]
@@ -149,21 +149,31 @@ def per_subject_neg2ll(params_jax, _jax_objective_function_predict_ = None, loss
     quadratic_i = per_subject_loss_components[0][1]
     inner_loss_i = per_subject_loss_components[1]
     n_t_i = per_subject_loss_components[2]
-    n_t_scaler_i = n_t_i.reshape(-1,1) @ jnp.array([jnp.log(2 * jnp.pi)])
-    per_subject_neg2ll = log_det_i + quadratic_i + n_t_scaler_i + inner_loss_i
-    return per_subject_neg2ll
+    if use_surrogate_neg2ll:
+        n_t_scaler_i = 0.0
+    else:
+        n_t_scaler_i = n_t_i.reshape(-1,1) @ jnp.array([jnp.log(2 * jnp.pi)])
+    per_subject_loss = log_det_i + quadratic_i + n_t_scaler_i + inner_loss_i
+    return per_subject_loss
 
 def get_robust_ci_foce_ndt(
     scipy_result,
     _jax_objective_function_predict_,
+    predict_unpack,
     #static_args_for_vmap,
+    init_params_for_scaling,
     n_subjects, 
-    ci_level
+    ci_level, 
+    n_boot = 5000, 
+    ci_dist = 't',
 ):
     """
     Calculates robust CIs for a FOCE/FOCEi model using a sandwich estimator
     with gradients from the numdifftools library.
     """
+    
+    ci_dist = scipy_t if ci_dist == 't' else scipy_norm
+    
     final_params_np = scipy_result.x
     
     # 1. Extract the Hessian ("Bread") from the optimizer result
@@ -173,7 +183,7 @@ def get_robust_ci_foce_ndt(
     # --- Calculate the "Filling" (G) using numdifftools ---
     
     # 2. Define the JIT-compiled function that returns the vector of per-subject losses.
-    per_sub_neg2ll_partial = jax.jit(partial(per_subject_neg2ll,
+    per_sub_loss_partial = jax.jit(partial(estimate_per_subject_loss,
                                     _jax_objective_function_predict_ = _jax_objective_function_predict_,
                                     ))
         
@@ -183,7 +193,7 @@ def get_robust_ci_foce_ndt(
         # a. Convert NumPy input to JAX array
         params_jax = jnp.asarray(params_np)
         # b. Call the fast, JIT-compiled JAX function
-        losses_jax = per_sub_neg2ll_partial(params_jax)
+        losses_jax = per_sub_loss_partial(params_jax)
         # c. Convert JAX output back to NumPy array
         return np.asarray(losses_jax)
     
@@ -191,7 +201,7 @@ def get_robust_ci_foce_ndt(
         # a. Convert NumPy input to JAX array
         params_jax = jnp.asarray(params_np)
         # b. Call the fast, JIT-compiled JAX function
-        losses_jax = per_sub_neg2ll_partial(params_jax)
+        losses_jax = per_sub_loss_partial(params_jax)
         # c. Convert JAX output back to NumPy array
         return np.asarray(jnp.sum(losses_jax))
     
@@ -218,15 +228,86 @@ def get_robust_ci_foce_ndt(
 
     # 7. Calculate Standard Errors and Confidence Intervals
     std_errors = np.sqrt(np.diag(robust_cov_matrix))
-    alpha = (1 - ci_level) 
-    t_crit = scipy_t.ppf(1 - alpha / 2, df=n_subjects - len(final_params_np))
+    #std_errors_log_centered = std_errors
+    #std_errors_log_scale = std_errors_log_centered 
     
-    lower_ci = final_params_np - t_crit * std_errors
-    upper_ci = final_params_np + t_crit * std_errors
+    alpha = (1 - ci_level)
+    ci_label = int(100*ci_level) 
+    t_crit = ci_dist.ppf(1 - alpha / 2, df=n_subjects - len(final_params_np))
+    
+    lower_ci_centered = final_params_np - t_crit * std_errors
+    upper_ci_centered = final_params_np + t_crit * std_errors
+    
+    params_log_scale = final_params_np + init_params_for_scaling
+    lower_ci_log = lower_ci_centered + init_params_for_scaling
+    upper_ci_log = upper_ci_centered + init_params_for_scaling
+    
+    params_true_scale = np.exp(params_log_scale)
+    lower_ci_true_scale = np.exp(lower_ci_log)
+    upper_ci_true_scale = np.exp(upper_ci_log)
+    
+    #lower_ci_log = params_log_scale - t_crit * std_errors_log_scale
+    #upper_ci_log = params_log_scale + t_crit * std_errors_log_scale
+    
+    
+    
+    std_errors_true_scale = params_true_scale * std_errors
+    
+    #For now lets focus on the ndt ci's for pop coeffs and thetas
+    boot_additional_ci = False
+    if boot_additional_ci:
+        param_samples = np.random.multivariate_normal(
+            mean=final_params_np,
+            cov=robust_cov_matrix,
+            size=n_boot
+        )
+        
+        sigma2_samples = []
+        omega2_samples = []
+        correlation_samples = []
+        omega_diag_samples = []
+        
+        for i in range(n_boot):
+            sample = param_samples[i, :]
+            boot_params = predict_unpack(sample)
+            
+            sigma2_sample = boot_params['sigma2']
+            omega2_sample = boot_params['omega2']
+            omegas1_diag = np.diag(omega2_sample)
+            omegas1_diag = np.sqrt(omegas1_diag)
+            sd_matrix = np.outer(omegas1_diag, omegas1_diag)
+            corr_matrix_sample = np.copy(omega2_sample / (sd_matrix + 1e-9))
 
+            sigma2_samples.append(sigma2_sample)
+            omega2_samples.append(omega2_sample)
+            correlation_samples.append(corr_matrix_sample)
+            omega_diag_samples.append(omegas1_diag)
+        
+        lower_p = alpha / 2 * 100
+        upper_p = (1 - alpha / 2) * 100
+        
+        sigma2_ci = np.percentile(np.array(sigma2_samples), [lower_p, upper_p])
+        omega2_ci = np.percentile(np.array(omega2_samples), [lower_p, upper_p], axis=0)
+        correlation_ci = np.percentile(np.array(correlation_samples), [lower_p, upper_p], axis=0)
+        
+        # Also get the mean of the simulations as the point estimate
+        final_omega2 = np.mean(np.array(omega2_samples), axis=0)
+        final_sigma2 = np.mean(np.array(sigma2_samples))
+        final_correlations = np.mean(np.array(correlation_samples), axis=0)
+    
     return {
-        "std_errors": std_errors,
-        "lower_ci_95": lower_ci,
-        "upper_ci_95": upper_ci,
-        "robust_cov_matrix": robust_cov_matrix
-    }
+        "opt_std_errors": std_errors,
+        f"opt_lower_ci{ci_label}": lower_ci_centered,
+        f"opt_upper_ci{ci_label}": lower_ci_centered,
+        "opt_robust_cov_matrix": robust_cov_matrix, 
+        
+        "log_params":params_log_scale,
+        "log_std_errors": std_errors,
+        f"log_lower_ci{ci_label}": lower_ci_log,
+        f"log_upper_ci{ci_label}": upper_ci_log,
+        
+        "true_params":params_true_scale,
+        "true_std_errors": std_errors_true_scale,
+        f"true_lower_ci{ci_label}": lower_ci_true_scale,
+        f"true_upper_ci{ci_label}": upper_ci_true_scale,
+    }, (ci_level, ci_label)

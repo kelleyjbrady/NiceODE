@@ -328,7 +328,7 @@ class MLflowCallback:
         log_corr = corr_matrix[corr_log_idx]
 
         
-        return (log_omegas, self.omega_diag_names), (log_corr, self.omega_ltri_nodiag_names)
+        return (log_omegas, self.omega_diag_names), (log_corr, self.omega_ltri_nodiag_names), 
     
     def log_vals_names(self, vals, names):
         iter_obj = zip(vals, names)
