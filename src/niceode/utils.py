@@ -3172,69 +3172,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             sol_full = sol_full[time_mask.flatten()]
         return sol_dep_var, sol_full
     
-    def _unpack_no_me_params(self, params, beta_data):
-        pop_coeffs = pd.DataFrame(
-                params[: self.n_population_coeff].reshape(1, -1),
-                dtype=pd.Float64Dtype(),
-                columns=self.init_pop_coeffs.columns,
-            )
-        thetas = pd.DataFrame(
-            params[self.n_population_coeff :].reshape(1, -1),
-            dtype=pd.Float64Dtype(),
-            columns=self.init_thetas.columns,
-        )
-        model_coeffs = self._generate_pk_model_coeff_vectorized(
-            pop_coeffs, thetas, beta_data
-        )
-        return [model_coeffs, thetas, beta_data]
-    
-    def _unpack_me_params(self, ):
-        raise NotImplementedError
-        
-    #@profile
-    @staticmethod
-    def _me_objective_jax(params:Dict[str, jnp.array],
-                          theta_data,
-                          subject_level_effect_init_vals, 
-                          n_subject_level_effects, 
-                          n_population_coeff,
-                          loss_function,
-                          ):
-        
-        
-
-        pop_coeffs = {i:params[i] 
-                      for idx, i in enumerate(params) 
-                      if idx < n_population_coeff}
-        
-        start_idx = n_population_coeff
-        end_idx = start_idx + 1
-        sigma = {i:params[i] 
-                      for idx, i in enumerate(params) 
-                      if idx >= start_idx and idx < end_idx}
-        
-        start_idx = end_idx
-        end_idx = start_idx + n_subject_level_effects
-        omegas = {i:params[i] 
-                      for idx, i in enumerate(params) 
-                      if idx >= start_idx and idx < end_idx}
-        
-        start_idx = end_idx
-        thetas = {i:params[i] 
-                      for idx, i in enumerate(params) 
-                      if idx >= start_idx}
-        
-        
-        error, _, preds = loss_function( #preds is a tuple containing the (dep_var_preds, full_preds)
-                    pop_coeffs,
-                    sigma,
-                    omegas,
-                    thetas,
-                    theta_data,
-                    self,
-                    FO_b_i_apprx=subject_level_effect_init_vals,
-                    stiff_ode = stiff_ode,
-                )
     
     def _objective_function2(
         self,
@@ -3961,21 +3898,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         
         #--------------------------------
-        objective_function = partial(
-            self._objective_function2,
-            init_params_for_scaling = init_params_for_scaling,
-            subject_level_intercept_init_vals=subject_level_intercept_init_vals,
-            parallel=parallel,
-            parallel_n_jobs=parallel_n_jobs,
-            use_full_omega = self.use_full_omega,
-            optimize_omega_on_log_scale = self.optimize_omega_on_log_scale,
-            optimize_sigma_on_log_scale = self.optimize_sigma_on_log_scale,
-            use_surrogate_neg2ll = self.use_surrogate_neg2ll,
-            fixed_params = _fixed_params, 
-            fixed_params_combined_params_idx = fixed_params_combined_params_idx, 
-            opt_params_combined_params_idx = opt_params_combined_params_idx, 
-            total_n_params = _total_n_params
-        )
+        
         self.fit_id = fit_id
         id_str = self._generate_fitted_model_name(ignore_fit_status=True)
         checkpoint_filename = f"{id_str}.jb"
@@ -4072,7 +3995,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             mlflow.log_param('model_has_subj_effects', model_has_subj_level_effects)
             if self.fit_jax_objective:
                 mlflow_loss = self.jax_loss
-            mlf_callback = MLflowCallback(objective_name=mlflow_loss.__name__, 
+                if self.use_surrogate_neg2ll:
+                    objective_name = f"surrogate_{mlflow_loss.__name__}__OBJF"
+                else:
+                    objective_name = mlflow_loss.__name__
+            mlf_callback = MLflowCallback(objective_name=objective_name, 
                                           parameter_names=fit_result_summary['log_name'].values,
                                           params_idx = params_idx,  
                                           omega_unpack_idx = self.omega_lower_chol_idx, 
@@ -4217,6 +4144,22 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         run_summary['AIC'] = self.bic_
                         self.fit_result_summary_metrics_ = run_summary.copy()
                 else:
+                    objective_function = partial(
+                        self._objective_function2,
+                        init_params_for_scaling = init_params_for_scaling,
+                        subject_level_intercept_init_vals=subject_level_intercept_init_vals,
+                        parallel=parallel,
+                        parallel_n_jobs=parallel_n_jobs,
+                        use_full_omega = self.use_full_omega,
+                        optimize_omega_on_log_scale = self.optimize_omega_on_log_scale,
+                        optimize_sigma_on_log_scale = self.optimize_sigma_on_log_scale,
+                        use_surrogate_neg2ll = self.use_surrogate_neg2ll,
+                        fixed_params = _fixed_params, 
+                        fixed_params_combined_params_idx = fixed_params_combined_params_idx, 
+                        opt_params_combined_params_idx = opt_params_combined_params_idx, 
+                        total_n_params = _total_n_params
+                    )
+                    
                     self.fit_result_ = optimize_with_checkpoint_joblib(
                         objective_function,
                         _opt_params,

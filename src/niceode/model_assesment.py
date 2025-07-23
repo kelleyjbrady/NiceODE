@@ -6,7 +6,6 @@ import numdifftools as nd
 import jax
 import jax.numpy as jnp
 from scipy.stats import t as scipy_t
-from .jax_utils import per_subject_neg2ll
 from functools import partial
 
 def construct_profile_ci(model_obj,df, param_index,init_bounds_factor = 1.01, profile_bounds = None, profile_bounds_factor = 2.0, ci_level = 0.95, result_list = None ):
@@ -141,6 +140,18 @@ def find_profile_bound(objective_func, param_index,
         bound = brentq(root_function, a, b)
     return bound
 
+
+def per_subject_neg2ll(params_jax, _jax_objective_function_predict_ = None, loss_bundle = None):
+    if loss_bundle is None:
+        loss_bundle = _jax_objective_function_predict_(params_jax)
+    per_subject_loss_components = loss_bundle[1][-1]
+    log_det_i = per_subject_loss_components[0][0]
+    quadratic_i = per_subject_loss_components[0][1]
+    inner_loss_i = per_subject_loss_components[1]
+    n_t_i = per_subject_loss_components[2]
+    n_t_scaler_i = n_t_i.reshape(-1,1) @ jnp.array([jnp.log(2 * jnp.pi)])
+    per_subject_neg2ll = log_det_i + quadratic_i + n_t_scaler_i + inner_loss_i
+    return per_subject_neg2ll
 
 def get_robust_ci_foce_ndt(
     scipy_result,

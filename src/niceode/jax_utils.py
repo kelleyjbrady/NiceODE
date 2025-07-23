@@ -1298,14 +1298,3 @@ def approx_neg2ll_loss_jax(
     #jax.debug.print("Outer Loss Out val: {s}", s = neg2_ll_out)
     return outer_loss_out, (b_i_approx, (padded_pred_y, padded_full_preds), model_coeffs_i, per_subject_loss)
 
-def per_subject_neg2ll(params_jax, _jax_objective_function_predict_ = None, loss_bundle = None):
-    if loss_bundle is None:
-        loss_bundle = _jax_objective_function_predict_(params_jax)
-    per_subject_loss_components = loss_bundle[1][-1]
-    log_det_i = per_subject_loss_components[0][0]
-    quadratic_i = per_subject_loss_components[0][1]
-    inner_loss_i = per_subject_loss_components[1]
-    n_t_i = per_subject_loss_components[2]
-    n_t_scaler_i = n_t_i.reshape(-1,1) @ jnp.array([jnp.log(2 * jnp.pi)])
-    per_subject_neg2ll = log_det_i + quadratic_i + n_t_scaler_i + inner_loss_i
-    return per_subject_neg2ll
