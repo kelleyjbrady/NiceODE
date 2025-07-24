@@ -530,7 +530,7 @@ def create_jax_objective(
                          unpacker_static_kwargs, 
                          loss_static_kwargs,
                          jittable_loss, 
-                         
+                         jit_returns = True,
                          ):
     
     initialized_loss = jittable_loss() 
@@ -578,11 +578,18 @@ def create_jax_objective(
     #**static_opt_kwargs, 
     #**dynamic_opt_kwargs                 
     #
-    fit_obj = jax.jit(_jax_objective_function)
-    fit_grad = jax.jit(grad_method(fit_obj)) if grad_method is not None else None
-    
-    predict_objective = jax.jit(_jax_objective_function_predict)
-    predict_unpack = jax.jit(p_jittable_param_unpack_predict)
+    if jit_returns:
+        fit_obj = jax.jit(_jax_objective_function)
+        fit_grad = jax.jit(grad_method(fit_obj)) if grad_method is not None else None
+        
+        predict_objective = jax.jit(_jax_objective_function_predict)
+        predict_unpack = jax.jit(p_jittable_param_unpack_predict)
+    else:
+        fit_obj = _jax_objective_function
+        fit_grad = grad_method(fit_obj) if grad_method is not None else None
+        
+        predict_objective = _jax_objective_function_predict
+        predict_unpack = p_jittable_param_unpack_predict
     return (fit_obj, fit_grad), (predict_objective, predict_unpack)
     #return _jax_objective_function, _jax_objective_function_predict
 
@@ -668,27 +675,31 @@ def estimate_single_b_i_impl(
     final_inner_loss_value = obj_fn(estimated_b_i)
 
     # --- Hessian Approximation ---
-    def predict_fn(pc, s2, o2):
-        b_i_work = jnp.zeros_like(pc)
-        b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(estimated_b_i) # Use the optimized b_i
-        combined_coeffs = pc + b_i_work
-        model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
-        _, _, _, J_conc_full = compiled_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
-        return J_conc_full
+    def predict_fn(b_i_for_pred):
+            # This logic is copied from your FOCE_inner_loss_fn
+            b_i_work = jnp.zeros_like(pop_coeff)
+            b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(b_i_for_pred)
+            combined_coeffs = pop_coeff + b_i_work
+            model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
+            
+            # We don't need the "safe_coeffs" logic here, as we're already at the optimum
+            _, _, _, J_conc_full = compiled_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
+            
+            # We need the elements in J corresponding to the mask, implemented below
+            return  J_conc_full
 
-    J = jax.jacfwd(predict_fn, argnums=0)(pop_coeff, sigma2, omega2)
-    J_masked = J * time_mask_y_i[:, None, None]
-    J_reshaped = J_masked.reshape(J_masked.shape[0], -1)
-    H_approx = (J_reshaped.T @ J_reshaped) / sigma2[0]
+    J = predict_fn(estimated_b_i)
+    mask_expanded = time_mask_y_i[:, None]
+    J_masked = J * mask_expanded
+    #mask J here, but what shape is it, how should `time_mask_y_i` be reshaped/tiled?
+    _sigma2 = sigma2[0]
+    H_approx = (J_masked.T @ J_masked) / _sigma2
 
     return estimated_b_i, H_approx, final_inner_loss_value
 
-@jax.custom_vjp(
-    nondiff_argnums=(
-        0, 1, 3, 4, # Per-subject static data
-        8, 9, 10, 11, 12 # Static configuration arguments
-    )
-)
+@partial(jax.custom_vjp, nondiff_argnums=(
+         8, 9, 10, 12  
+    ),)
 def estimate_single_b_i(
     initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
     pop_coeff, sigma2, omega2,
@@ -703,80 +714,67 @@ def estimate_single_b_i(
         pop_coeff_w_bi_idx, use_surrogate_neg2ll
     )
 
-def _estimate_single_b_i_fwd(
-    initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
-    pop_coeff, sigma2, omega2,
-    n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
-    pop_coeff_w_bi_idx, use_surrogate_neg2ll
-):
-    """Forward pass: execute the function and save inputs for the backward pass."""
-    outputs = estimate_single_b_i(
+def _estimate_single_b_i_fwd(nondiff_args, data_contrib_i, pop_coeff, sigma2, omega2):
+    """Forward pass with new signature."""
+    # Unpack the static, non-differentiable arguments
+    (initial_b_i, padded_y_i, ode_t0_i, time_mask_y_i,
+     n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
+     pop_coeff_w_bi_idx, use_surrogate_neg2ll) = nondiff_args
+    
+    # Execute the function
+    outputs = estimate_single_b_i_impl(
         initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
         pop_coeff, sigma2, omega2,
         n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
         pop_coeff_w_bi_idx, use_surrogate_neg2ll
     )
-    # Save all inputs as residuals for the backward pass
-    residuals = (
-        initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
-        pop_coeff, sigma2, omega2,
-        n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
-        pop_coeff_w_bi_idx, use_surrogate_neg2ll
-    )
+    # Only need to save the differentiable inputs as residuals
+    residuals = (data_contrib_i, pop_coeff, sigma2, omega2)
     return outputs, residuals
 
-def _estimate_single_b_i_bwd(residuals, g):
-    """Backward pass: compute the VJP using finite differences."""
-    # Unpack residuals and incoming gradients
-    ( initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
-      pop_coeff, sigma2, omega2,
-      n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
-      pop_coeff_w_bi_idx, use_surrogate_neg2ll) = residuals
+def _estimate_single_b_i_bwd(nondiff_args, residuals, g):
+    """Backward pass with new signature."""
+    # Unpack non-differentiable args and residuals
+    (initial_b_i, padded_y_i, ode_t0_i, time_mask_y_i,
+     n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
+     pop_coeff_w_bi_idx, use_surrogate_neg2ll) = nondiff_args
+    data_contrib_i, pop_coeff, sigma2, omega2 = residuals
     g_b_i, g_H, g_loss = g
 
-    # --- Helper functions that select one output at a time ---
-    def f_b_i(dc, pc, s2, o2): # Add dc for data_contrib_i
-        return estimate_single_b_i_impl(initial_b_i, padded_y_i, dc, ode_t0_i, time_mask_y_i,
-                                        pc, s2, o2,
-                                        n_random_effects, compiled_ivp_solver,
-                                        compiled_augdyn_ivp_solver,
-                                        pop_coeff_w_bi_idx, use_surrogate_neg2ll)[0]
-    
-    def f_H(dc, pc, s2, o2):
-        return estimate_single_b_i_impl(initial_b_i, padded_y_i, dc, ode_t0_i, time_mask_y_i,
-                                        pc, s2, o2,
-                                        n_random_effects, compiled_ivp_solver,
-                                        compiled_augdyn_ivp_solver,
-                                        pop_coeff_w_bi_idx, use_surrogate_neg2ll)[1]
+    # Helper functions are now simpler as they can close over nondiff_args
+    def f(dc, pc, s2, o2):
+        return estimate_single_b_i_impl(
+            initial_b_i, padded_y_i, dc, ode_t0_i, time_mask_y_i,
+            pc, s2, o2,
+            n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
+            pop_coeff_w_bi_idx, use_surrogate_neg2ll
+        )
 
-    def f_loss(dc, pc, s2, o2):
-        return estimate_single_b_i_impl(initial_b_i, padded_y_i, dc, ode_t0_i, time_mask_y_i,
-                                        pc, s2, o2,
-                                        n_random_effects, compiled_ivp_solver,
-                                        compiled_augdyn_ivp_solver,
-                                        pop_coeff_w_bi_idx, use_surrogate_neg2ll)[2]
+    # Selector functions for each output
+    f_b_i  = lambda *diff_args: f(*diff_args)[0]
+    f_H    = lambda *diff_args: f(*diff_args)[1]
+    f_loss = lambda *diff_args: f(*diff_args)[2]
 
-    # --- Compute VJPs for each differentiable input ---
-    # We now include data_contrib_i in the VJP calculation.
+    # Compute VJPs for each differentiable input
     vjp_dc_b, vjp_pc_b, vjp_s2_b, vjp_o2_b = fdx.vjp(f_b_i, data_contrib_i, pop_coeff, sigma2, omega2, cotangents=g_b_i)
     vjp_dc_H, vjp_pc_H, vjp_s2_H, vjp_o2_H = fdx.vjp(f_H, data_contrib_i, pop_coeff, sigma2, omega2, cotangents=g_H)
     vjp_dc_l, vjp_pc_l, vjp_s2_l, vjp_o2_l = fdx.vjp(f_loss, data_contrib_i, pop_coeff, sigma2, omega2, cotangents=g_loss)
 
-    # Sum the contributions for each parameter
+    # Sum the contributions
     grad_data_contrib = vjp_dc_b + vjp_dc_H + vjp_dc_l
-    grad_pop_coeff = vjp_pc_b + vjp_pc_H + vjp_pc_l
-    grad_sigma2 = vjp_s2_b + vjp_s2_H + vjp_s2_l
-    grad_omega2 = vjp_o2_b + vjp_o2_H + vjp_o2_l
-
-    # Return the computed gradient for data_contrib_i instead of None
-    return (
-        None, None, grad_data_contrib, None, None,
-        grad_pop_coeff, grad_sigma2, grad_omega2,
-        None, None, None, None, None
-    )
+    grad_pop_coeff    = vjp_pc_b + vjp_pc_H + vjp_pc_l
+    grad_sigma2       = vjp_s2_b + vjp_s2_H + vjp_s2_l
+    grad_omega2       = vjp_o2_b + vjp_o2_H + vjp_o2_l
+    
+    # Return a tuple of gradients for ONLY the differentiable arguments
+    return (grad_data_contrib, grad_pop_coeff, grad_sigma2, grad_omega2)
 
 # Link the forward and backward passes to the custom VJP function
-estimate_single_b_i.defvjp(_estimate_single_b_i_fwd, _estimate_single_b_i_bwd)
+estimate_single_b_i.defvjp(
+    _estimate_single_b_i_fwd,
+    _estimate_single_b_i_bwd,
+    
+)
 
 def estimate_b_i_vmapped_fdx(
     initial_b_i_batch, padded_y_batch, data_contribution_batch,
@@ -1476,6 +1474,36 @@ def approx_neg2ll_loss_jax(
     #jax.debug.print("omega2 shape: {s}", s = omega2.shape )
     #jax.debug.print("n_subject_level_eff shape: {s}", s = n_subject_level_eff.shape )
     #jax.debug.print("pop_coeff_for_J_idx shape: {s}", s = pop_coeff_for_J_idx.shape )
+    
+    jax.debug.print(
+    """
+    --- Calling estimate_b_i_vmapped_fdx ---
+    initial_b_i_batch type: {b_i_type}
+    padded_y_batch type: {padded_y_type}
+    data_contribution_batch type: {data_contrib_type}
+    ode_t0_vals_batch type: {ode_t0_type}
+    time_mask_y_batch type: {time_mask_type}
+    pop_coeff type: {pop_coeff_type}
+    sigma2 type: {sigma2_type}
+    n_random_effects type: {n_rand_type}
+    compiled_ivp_solver type: {ivp_solver_type}
+    compiled_augdyn_ivp_solver type: {augdyn_solver_type}
+    pop_coeff_w_bi_idx type: {pc_idx_type}
+    use_surrogate_neg2ll type: {use_surrogate_type}
+    """,
+    b_i_type=type(b_i),
+    padded_y_type=type(padded_y),
+    data_contrib_type=type(data_contribution),
+    ode_t0_type=type(ode_t0_vals),
+    time_mask_type=type(time_mask_y),
+    pop_coeff_type=type(pop_coeff),
+    sigma2_type=type(sigma2),
+    n_rand_type=type(n_subject_level_eff),
+    ivp_solver_type=type(compiled_ivp_solver_novmap_arr),
+    augdyn_solver_type=type(compiled_augdyn_ivp_solver_novmap_arr),
+    pc_idx_type=type(pop_coeff_for_J_idx),
+    use_surrogate_type=type(use_surrogate_neg2ll)
+)
     
     b_i, hessian_i, inner_loss_i = compiled_estimate_b_i_foce(
                                                initial_b_i_batch = b_i,

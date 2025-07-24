@@ -3578,6 +3578,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         ci_level:np.float64 = 0.95, 
         ci_distribution:Literal['t', 'z'] = 't',
         perform_fit = True,
+        debug_fit = False,
     ) -> Self:
         fit_id = uuid.uuid4() if fit_id is None else fit_id
         data = self._validate_data_chronology(data)
@@ -3848,6 +3849,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         fit_objective_and_grad, predict_objective_and_unpack = create_jax_objective(unpacker_static_kwargs=unpacker_static_kwargs, 
                                                           loss_static_kwargs=loss_static_kwargs,
                                                        jittable_loss = self.jax_loss,
+                                                       jit_returns= not debug_fit
                                                        )
         _jax_objective_function_predict_, predict_unpack =  predict_objective_and_unpack
         _jax_objective_function, _jax_objective_grad = fit_objective_and_grad
