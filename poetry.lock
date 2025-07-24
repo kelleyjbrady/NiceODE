@@ -883,6 +883,22 @@ testing = ["covdefaults (>=2.3)", "coverage (>=7.6.10)", "diff-cover (>=9.2.1)",
 typing = ["typing-extensions (>=4.12.2) ; python_version < \"3.11\""]
 
 [[package]]
+name = "finitediffx"
+version = "0.1.0"
+description = "Finite difference tools in JAX"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "finitediffx-0.1.0-py3-none-any.whl", hash = "sha256:0b4a900453d8c7317f5e6668e47371cfe27020f075dd9890182561ab19e11572"},
+    {file = "finitediffx-0.1.0.tar.gz", hash = "sha256:52d9e67e551f5cad2b555ddf0ef84ab3f61011172b30b738a07c4776e6f3afbc"},
+]
+
+[package.dependencies]
+jax = ">=0.4.7"
+typing-extensions = "*"
+
+[[package]]
 name = "flask"
 version = "3.0.3"
 description = "A simple framework for building complex web applications."
@@ -4929,4 +4945,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<3.14"
-content-hash = "961605a582ebe0c20d561056ef9d72a28c9ae9096f1b54d328ebb5b997081361"
+content-hash = "4e49c4efeaeff1d0ff095e6aa073d532b9f34373de7e5298d2a3dad068a89417"

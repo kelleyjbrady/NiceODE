@@ -4,6 +4,7 @@ import jax
 from functools import partial
 import numdifftools as nd
 import optax
+import finitediffx as fdx
 
 
 def _predict_jax_jacobian(
@@ -617,6 +618,201 @@ def create_aug_dynamics_ode(diffrax_ode,  pop_coeff_for_J_idx):
     
     return aug_dynamics_ode
 
+def estimate_single_b_i_impl(
+    initial_b_i,
+    padded_y_i,
+    data_contrib_i,
+    ode_t0_i,
+    time_mask_y_i,
+    # Shared parameters we want to differentiate with respect to
+    pop_coeff,
+    sigma2,
+    omega2,
+    # Other static arguments
+    n_random_effects,
+    compiled_ivp_solver,
+    compiled_augdyn_ivp_solver,
+    pop_coeff_w_bi_idx,
+    use_surrogate_neg2ll,
+):
+    """The implementation of the optimization for one subject."""
+    obj_fn = lambda b_i: FOCE_inner_loss_fn(
+        b_i=b_i,
+        padded_y_i=padded_y_i,
+        pop_coeff_i=pop_coeff,
+        data_contribution_i=data_contrib_i,
+        sigma2=sigma2,
+        omega2=omega2,
+        ode_t0_val_i=ode_t0_i,
+        time_mask_y_i=time_mask_y_i,
+        n_random_effects=n_random_effects,
+        compiled_ivp_solver=compiled_ivp_solver,
+        pop_coeff_w_bi_idx=pop_coeff_w_bi_idx,
+        use_surrogate_neg2ll=use_surrogate_neg2ll,
+    )
+
+    optimizer = optax.adam(learning_rate=0.1)
+    opt_state = optimizer.init(initial_b_i)
+    grad_fn = jax.grad(obj_fn)
+    omega_is_near_zero = jnp.diag(jnp.sqrt(omega2)) < 1e-5
+
+    def update_step(i, state_tuple):
+        params, opt_state = state_tuple
+        grads = grad_fn(params)
+        safe_grads = jnp.where(omega_is_near_zero, 0.0, grads)
+        updates, opt_state = optimizer.update(safe_grads, opt_state, params)
+        new_params = optax.apply_updates(params, updates)
+        return new_params, opt_state
+
+    estimated_b_i, _ = jax.lax.fori_loop(0, 100, update_step, (initial_b_i, opt_state))
+    final_inner_loss_value = obj_fn(estimated_b_i)
+
+    # --- Hessian Approximation ---
+    def predict_fn(pc, s2, o2):
+        b_i_work = jnp.zeros_like(pc)
+        b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(estimated_b_i) # Use the optimized b_i
+        combined_coeffs = pc + b_i_work
+        model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
+        _, _, _, J_conc_full = compiled_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
+        return J_conc_full
+
+    J = jax.jacfwd(predict_fn, argnums=0)(pop_coeff, sigma2, omega2)
+    J_masked = J * time_mask_y_i[:, None, None]
+    J_reshaped = J_masked.reshape(J_masked.shape[0], -1)
+    H_approx = (J_reshaped.T @ J_reshaped) / sigma2[0]
+
+    return estimated_b_i, H_approx, final_inner_loss_value
+
+@jax.custom_vjp(
+    nondiff_argnums=(
+        0, 1, 3, 4, # Per-subject static data
+        8, 9, 10, 11, 12 # Static configuration arguments
+    )
+)
+def estimate_single_b_i(
+    initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
+    pop_coeff, sigma2, omega2,
+    n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
+    pop_coeff_w_bi_idx, use_surrogate_neg2ll
+):
+    """A wrapper for the implementation that will have a custom VJP."""
+    return estimate_single_b_i_impl(
+        initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
+        pop_coeff, sigma2, omega2,
+        n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
+        pop_coeff_w_bi_idx, use_surrogate_neg2ll
+    )
+
+def _estimate_single_b_i_fwd(
+    initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
+    pop_coeff, sigma2, omega2,
+    n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
+    pop_coeff_w_bi_idx, use_surrogate_neg2ll
+):
+    """Forward pass: execute the function and save inputs for the backward pass."""
+    outputs = estimate_single_b_i(
+        initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
+        pop_coeff, sigma2, omega2,
+        n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
+        pop_coeff_w_bi_idx, use_surrogate_neg2ll
+    )
+    # Save all inputs as residuals for the backward pass
+    residuals = (
+        initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
+        pop_coeff, sigma2, omega2,
+        n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
+        pop_coeff_w_bi_idx, use_surrogate_neg2ll
+    )
+    return outputs, residuals
+
+def _estimate_single_b_i_bwd(residuals, g):
+    """Backward pass: compute the VJP using finite differences."""
+    # Unpack residuals and incoming gradients
+    ( initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
+      pop_coeff, sigma2, omega2,
+      n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
+      pop_coeff_w_bi_idx, use_surrogate_neg2ll) = residuals
+    g_b_i, g_H, g_loss = g
+
+    # --- Helper functions that select one output at a time ---
+    def f_b_i(dc, pc, s2, o2): # Add dc for data_contrib_i
+        return estimate_single_b_i_impl(initial_b_i, padded_y_i, dc, ode_t0_i, time_mask_y_i,
+                                        pc, s2, o2,
+                                        n_random_effects, compiled_ivp_solver,
+                                        compiled_augdyn_ivp_solver,
+                                        pop_coeff_w_bi_idx, use_surrogate_neg2ll)[0]
+    
+    def f_H(dc, pc, s2, o2):
+        return estimate_single_b_i_impl(initial_b_i, padded_y_i, dc, ode_t0_i, time_mask_y_i,
+                                        pc, s2, o2,
+                                        n_random_effects, compiled_ivp_solver,
+                                        compiled_augdyn_ivp_solver,
+                                        pop_coeff_w_bi_idx, use_surrogate_neg2ll)[1]
+
+    def f_loss(dc, pc, s2, o2):
+        return estimate_single_b_i_impl(initial_b_i, padded_y_i, dc, ode_t0_i, time_mask_y_i,
+                                        pc, s2, o2,
+                                        n_random_effects, compiled_ivp_solver,
+                                        compiled_augdyn_ivp_solver,
+                                        pop_coeff_w_bi_idx, use_surrogate_neg2ll)[2]
+
+    # --- Compute VJPs for each differentiable input ---
+    # We now include data_contrib_i in the VJP calculation.
+    vjp_dc_b, vjp_pc_b, vjp_s2_b, vjp_o2_b = fdx.vjp(f_b_i, data_contrib_i, pop_coeff, sigma2, omega2, cotangents=g_b_i)
+    vjp_dc_H, vjp_pc_H, vjp_s2_H, vjp_o2_H = fdx.vjp(f_H, data_contrib_i, pop_coeff, sigma2, omega2, cotangents=g_H)
+    vjp_dc_l, vjp_pc_l, vjp_s2_l, vjp_o2_l = fdx.vjp(f_loss, data_contrib_i, pop_coeff, sigma2, omega2, cotangents=g_loss)
+
+    # Sum the contributions for each parameter
+    grad_data_contrib = vjp_dc_b + vjp_dc_H + vjp_dc_l
+    grad_pop_coeff = vjp_pc_b + vjp_pc_H + vjp_pc_l
+    grad_sigma2 = vjp_s2_b + vjp_s2_H + vjp_s2_l
+    grad_omega2 = vjp_o2_b + vjp_o2_H + vjp_o2_l
+
+    # Return the computed gradient for data_contrib_i instead of None
+    return (
+        None, None, grad_data_contrib, None, None,
+        grad_pop_coeff, grad_sigma2, grad_omega2,
+        None, None, None, None, None
+    )
+
+# Link the forward and backward passes to the custom VJP function
+estimate_single_b_i.defvjp(_estimate_single_b_i_fwd, _estimate_single_b_i_bwd)
+
+def estimate_b_i_vmapped_fdx(
+    initial_b_i_batch, padded_y_batch, data_contribution_batch,
+    ode_t0_vals_batch, time_mask_y_batch,
+    pop_coeff, sigma2, omega2,
+    n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
+    pop_coeff_w_bi_idx, use_surrogate_neg2ll,
+    **kwargs # Absorb unused kwargs
+):
+    """Estimates b_i for all subjects by vmapping the custom VJP function."""
+    print('Compiling `estimate_b_i_vmapped` with custom VJP')
+
+    # Vmap the single-subject optimization function with the custom VJP.
+    # `in_axes` specifies which arguments to map over (0) vs. broadcast (None).
+    vmapped_optimizer = jax.vmap(
+        estimate_single_b_i,
+        in_axes=(
+            0, 0, 0, 0, 0,          # Map over per-subject data
+            None, None, None,         # Broadcast shared parameters
+            None, None, None, None, None # Broadcast static arguments
+        ),
+        out_axes=0
+    )
+
+    # Execute the vmapped function
+    all_b_i_estimates, all_hessians, all_final_inner_loss = vmapped_optimizer(
+        initial_b_i_batch, padded_y_batch, data_contribution_batch,
+        ode_t0_vals_batch, time_mask_y_batch,
+        pop_coeff, sigma2, omega2,
+        n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
+        pop_coeff_w_bi_idx, use_surrogate_neg2ll
+    )
+
+    return all_b_i_estimates, all_hessians, all_final_inner_loss
+
+
 def estimate_b_i_vmapped(
     # Batched inputs (one entry per subject)
     initial_b_i_batch,
@@ -1063,6 +1259,61 @@ class FOCEi_approx_neg2ll_loss_jax():
     @staticmethod
     def grad_method():
         return None
+
+class FOCE_approx_neg2ll_loss_jax_fdx():
+    
+    def __init__(self):
+        pass
+    
+    @staticmethod
+    def loss_fn(
+    pop_coeff, 
+    sigma2, 
+    omega2, 
+    theta, 
+    theta_data,
+    padded_y,
+    unpadded_y_len,
+    time_mask_y,
+    time_mask_J,
+    compiled_augdyn_ivp_solver_arr,
+    compiled_augdyn_ivp_solver_novmap_arr,
+    compiled_ivp_solver_arr,
+    compiled_ivp_solver_novmap_arr,
+    ode_t0_vals,
+    pop_coeff_for_J_idx,
+    use_surrogate_neg2ll,
+    **kwargs,
+    ):
+        print("Compiling `FOCE_approx_neg2ll_loss_jax`")
+        loss = approx_neg2ll_loss_jax(
+            pop_coeff = pop_coeff, 
+            sigma2 = sigma2, 
+            omega2 = omega2, 
+            theta = theta, 
+            theta_data = theta_data,
+            padded_y = padded_y,
+            unpadded_y_len = unpadded_y_len,
+            time_mask_y = time_mask_y,
+            time_mask_J = time_mask_J,
+            compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
+            compiled_augdyn_ivp_solver_novmap_arr = compiled_augdyn_ivp_solver_novmap_arr,
+            compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+            compiled_ivp_solver_novmap_arr = compiled_ivp_solver_novmap_arr,
+            ode_t0_vals = ode_t0_vals,
+            pop_coeff_for_J_idx = pop_coeff_for_J_idx,
+            compiled_estimate_b_i_foce = estimate_b_i_vmapped_fdx,
+            compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
+            jittable_estimate_foc_i=foc_interaction_term_passthrough, 
+            jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
+            use_surrogate_neg2ll = use_surrogate_neg2ll,
+            
+        )
+        
+        return loss
+    @staticmethod
+    def grad_method():
+        return jax.grad
 
 
 class FOCE_approx_neg2ll_loss_jax():
