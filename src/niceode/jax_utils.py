@@ -701,10 +701,19 @@ def estimate_single_b_i_impl(
          8, 9, 10, 12  
     ),)
 def estimate_single_b_i(
-    initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
-    pop_coeff, sigma2, omega2,
-    n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
-    pop_coeff_w_bi_idx, use_surrogate_neg2ll
+    initial_b_i,                #0
+    padded_y_i,                 #1
+    data_contrib_i,             #2
+    ode_t0_i,                   #3
+    time_mask_y_i,              #4
+    pop_coeff,                  #5
+    sigma2,                     #6
+    omega2,                     #7
+    n_random_effects,           #8
+    compiled_ivp_solver,        #9
+    compiled_augdyn_ivp_solver, #10
+    pop_coeff_w_bi_idx,         #11
+    use_surrogate_neg2ll,       #12
 ):
     """A wrapper for the implementation that will have a custom VJP."""
     return estimate_single_b_i_impl(
@@ -714,40 +723,95 @@ def estimate_single_b_i(
         pop_coeff_w_bi_idx, use_surrogate_neg2ll
     )
 
-def _estimate_single_b_i_fwd(nondiff_args, data_contrib_i, pop_coeff, sigma2, omega2):
+def _estimate_single_b_i_fwd(
+    nondiff_args,       #8,9,10,12
+    initial_b_i,        #0
+    padded_y_i,         #1
+    data_contrib_i,     #2   
+    ode_t0_i,           #3
+    time_mask_y_i,      #4   
+    pop_coeff,          #5
+    sigma2,             #6
+    omega2,             #7
+    pop_coeff_w_bi_idx, #11       
+):
     """Forward pass with new signature."""
     # Unpack the static, non-differentiable arguments
-    (initial_b_i, padded_y_i, ode_t0_i, time_mask_y_i,
-     n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
-     pop_coeff_w_bi_idx, use_surrogate_neg2ll) = nondiff_args
+    (
+        n_random_effects,#8
+        compiled_ivp_solver,#9
+        compiled_augdyn_ivp_solver,#10
+        use_surrogate_neg2ll,#12
+    ) = nondiff_args
     
     # Execute the function
     outputs = estimate_single_b_i_impl(
-        initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
-        pop_coeff, sigma2, omega2,
-        n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
-        pop_coeff_w_bi_idx, use_surrogate_neg2ll
+        initial_b_i,#0
+        padded_y_i,#1
+        data_contrib_i,#2
+        ode_t0_i,#3
+        time_mask_y_i,#4
+        pop_coeff,#5
+        sigma2,#6
+        omega2,#7
+        n_random_effects,#8
+        compiled_ivp_solver,#9
+        compiled_augdyn_ivp_solver,#10
+        pop_coeff_w_bi_idx,#11
+        use_surrogate_neg2ll,#12
     )
     # Only need to save the differentiable inputs as residuals
-    residuals = (data_contrib_i, pop_coeff, sigma2, omega2)
+    residuals = (
+        initial_b_i, #0
+        padded_y_i,#1
+        data_contrib_i,#2
+        ode_t0_i,#3
+        time_mask_y_i,#4
+        pop_coeff,#5
+        sigma2,#6
+        omega2,#7
+        pop_coeff_w_bi_idx,#11
+    )
     return outputs, residuals
 
 def _estimate_single_b_i_bwd(nondiff_args, residuals, g):
     """Backward pass with new signature."""
     # Unpack non-differentiable args and residuals
-    (initial_b_i, padded_y_i, ode_t0_i, time_mask_y_i,
-     n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
-     pop_coeff_w_bi_idx, use_surrogate_neg2ll) = nondiff_args
-    data_contrib_i, pop_coeff, sigma2, omega2 = residuals
+    (
+        n_random_effects,#8
+        compiled_ivp_solver,#9
+        compiled_augdyn_ivp_solver,#10
+        use_surrogate_neg2ll,#12
+    ) = nondiff_args
+    (
+        initial_b_i, #0
+        padded_y_i,#1
+        data_contrib_i,#2
+        ode_t0_i,#3
+        time_mask_y_i,#4
+        pop_coeff,#5
+        sigma2,#6
+        omega2,#7
+        pop_coeff_w_bi_idx,#11
+    ) = residuals
     g_b_i, g_H, g_loss = g
 
     # Helper functions are now simpler as they can close over nondiff_args
     def f(dc, pc, s2, o2):
         return estimate_single_b_i_impl(
-            initial_b_i, padded_y_i, dc, ode_t0_i, time_mask_y_i,
-            pc, s2, o2,
-            n_random_effects, compiled_ivp_solver, compiled_augdyn_ivp_solver,
-            pop_coeff_w_bi_idx, use_surrogate_neg2ll
+            initial_b_i,
+            padded_y_i,
+            dc,
+            ode_t0_i,
+            time_mask_y_i,
+            pc,
+            s2,
+            o2,
+            n_random_effects,
+            compiled_ivp_solver,
+            compiled_augdyn_ivp_solver,
+            pop_coeff_w_bi_idx,
+            use_surrogate_neg2ll,
         )
 
     # Selector functions for each output
@@ -767,7 +831,17 @@ def _estimate_single_b_i_bwd(nondiff_args, residuals, g):
     grad_omega2       = vjp_o2_b + vjp_o2_H + vjp_o2_l
     
     # Return a tuple of gradients for ONLY the differentiable arguments
-    return (grad_data_contrib, grad_pop_coeff, grad_sigma2, grad_omega2)
+    return (
+        None,                # grad for initial_b_i
+        None,                # grad for padded_y_i
+        grad_data_contrib,   # grad for data_contrib_i
+        None,                # grad for ode_t0_i
+        None,                # grad for time_mask_y_i
+        grad_pop_coeff,      # grad for pop_coeff
+        grad_sigma2,         # grad for sigma2
+        grad_omega2,         # grad for omega2
+        None                 # grad for pop_coeff_w_bi_idx
+    )
 
 # Link the forward and backward passes to the custom VJP function
 estimate_single_b_i.defvjp(
