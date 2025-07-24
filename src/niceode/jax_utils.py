@@ -724,75 +724,32 @@ def estimate_single_b_i(
     )
 
 def _estimate_single_b_i_fwd(
-    nondiff_args,       #8,9,10,12
-    initial_b_i,        #0
-    padded_y_i,         #1
-    data_contrib_i,     #2   
-    ode_t0_i,           #3
-    time_mask_y_i,      #4   
-    pop_coeff,          #5
-    sigma2,             #6
-    omega2,             #7
-    pop_coeff_w_bi_idx, #11       
+   *args      
 ):
     """Forward pass with new signature."""
     # Unpack the static, non-differentiable arguments
-    (
-        n_random_effects,#8
-        compiled_ivp_solver,#9
-        compiled_augdyn_ivp_solver,#10
-        use_surrogate_neg2ll,#12
-    ) = nondiff_args
-    
-    # Execute the function
-    outputs = estimate_single_b_i_impl(
-        initial_b_i,#0
-        padded_y_i,#1
-        data_contrib_i,#2
-        ode_t0_i,#3
-        time_mask_y_i,#4
-        pop_coeff,#5
-        sigma2,#6
-        omega2,#7
-        n_random_effects,#8
-        compiled_ivp_solver,#9
-        compiled_augdyn_ivp_solver,#10
-        pop_coeff_w_bi_idx,#11
-        use_surrogate_neg2ll,#12
-    )
-    # Only need to save the differentiable inputs as residuals
-    residuals = (
-        initial_b_i, #0
-        padded_y_i,#1
-        data_contrib_i,#2
-        ode_t0_i,#3
-        time_mask_y_i,#4
-        pop_coeff,#5
-        sigma2,#6
-        omega2,#7
-        pop_coeff_w_bi_idx,#11
-    )
+    outputs = estimate_single_b_i_impl(*args)
+    # Save all arguments as residuals for the backward pass
+    residuals = args
     return outputs, residuals
 
-def _estimate_single_b_i_bwd(nondiff_args, residuals, g):
+def _estimate_single_b_i_bwd(residuals, g):
     """Backward pass with new signature."""
     # Unpack non-differentiable args and residuals
     (
-        n_random_effects,#8
-        compiled_ivp_solver,#9
-        compiled_augdyn_ivp_solver,#10
-        use_surrogate_neg2ll,#12
-    ) = nondiff_args
-    (
-        initial_b_i, #0
-        padded_y_i,#1
-        data_contrib_i,#2
-        ode_t0_i,#3
-        time_mask_y_i,#4
-        pop_coeff,#5
-        sigma2,#6
-        omega2,#7
-        pop_coeff_w_bi_idx,#11
+        initial_b_i,
+        padded_y_i,
+        data_contrib_i,
+        ode_t0_i,
+        time_mask_y_i,
+        pop_coeff,
+        sigma2,
+        omega2,
+        n_random_effects,
+        compiled_ivp_solver,
+        compiled_augdyn_ivp_solver,
+        pop_coeff_w_bi_idx,
+        use_surrogate_neg2ll,
     ) = residuals
     g_b_i, g_H, g_loss = g
 
@@ -832,15 +789,19 @@ def _estimate_single_b_i_bwd(nondiff_args, residuals, g):
     
     # Return a tuple of gradients for ONLY the differentiable arguments
     return (
-        None,                # grad for initial_b_i
-        None,                # grad for padded_y_i
-        grad_data_contrib,   # grad for data_contrib_i
-        None,                # grad for ode_t0_i
-        None,                # grad for time_mask_y_i
-        grad_pop_coeff,      # grad for pop_coeff
-        grad_sigma2,         # grad for sigma2
-        grad_omega2,         # grad for omega2
-        None                 # grad for pop_coeff_w_bi_idx
+        None,               # 0: initial_b_i
+        None,               # 1: padded_y_i
+        grad_data_contrib,  # 2: data_contrib_i
+        None,               # 3: ode_t0_i
+        None,               # 4: time_mask_y_i
+        grad_pop_coeff,     # 5: pop_coeff
+        grad_sigma2,        # 6: sigma2
+        grad_omega2,        # 7: omega2
+        None,               # 8: n_random_effects
+        None,               # 9: compiled_ivp_solver
+        None,               # 10: compiled_augdyn_ivp_solver
+        None,               # 11: pop_coeff_w_bi_idx
+        None                # 12: use_surrogate_neg2ll
     )
 
 # Link the forward and backward passes to the custom VJP function
