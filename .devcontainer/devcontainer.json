@@ -8,8 +8,10 @@
   "service": "dev", // The name of your development service in the compose file
   "workspaceFolder": "/workspaces/PK-Analysis", // Target folder inside the container
 
+   "postCreateCommand": "chmod +x .devcontainer/post-start.sh",
+
   // Installs PK-Analysis project dependencies into its own venv after container starts
-  "postStartCommand": "cd /workspaces/PK-Analysis && poetry install",
+  "postStartCommand": ".devcontainer/post-start.sh 2>&1 | tee .devcontainer/post-start.log",
 
   "customizations": {
       "vscode": {

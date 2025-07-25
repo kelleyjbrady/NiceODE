@@ -8,6 +8,11 @@ description = "JAX project with CUDA support managed by Poetry"
 authors = ["Kelley Brady <kelleyjbrady@protonmail.com>"]
 
 
+[[tool.poetry.source]]
+name = "jax"
+url = "https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
+priority = "explicit"
+
 [tool.poetry.dependencies]
 python = ">=3.13,<3.14" 
 jax = {extras = ["cuda12-pip"], version = "^0.6.1"}
