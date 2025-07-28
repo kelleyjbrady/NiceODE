@@ -650,6 +650,7 @@ def estimate_b_i_vmapped_fdx(
     # Vmap the single-subject optimization function with the custom VJP.
     # `in_axes` specifies which arguments to map over (0) vs. broadcast (None).
     
+    @jax.jit
     def estimate_single_b_i_impl(
     initial_b_i,
     padded_y_i,
@@ -740,18 +741,15 @@ def estimate_b_i_vmapped_fdx(
                 pc, s2, o2, pop_coeff_w_bi_idx
             )
 
-        f_b_i  = lambda *diff_args: f(*diff_args)[0]
-        f_H    = lambda *diff_args: f(*diff_args)[1]
-        f_loss = lambda *diff_args: f(*diff_args)[2]
+        def scalar_loss(dc, pc, s2, o2):
+            y_b_i, y_H, y_loss = f(dc, pc, s2, o2)
+            return (jnp.sum(g_b_i * y_b_i) +
+                    jnp.sum(g_H * y_H) +
+                    jnp.sum(g_loss * y_loss))
 
-        vjp_dc_b, vjp_pc_b, vjp_s2_b, vjp_o2_b = fdx.vjp(f_b_i, data_contrib_i, pop_coeff, sigma2, omega2, cotangents=g_b_i)
-        vjp_dc_H, vjp_pc_H, vjp_s2_H, vjp_o2_H = fdx.vjp(f_H, data_contrib_i, pop_coeff, sigma2, omega2, cotangents=g_H)
-        vjp_dc_l, vjp_pc_l, vjp_s2_l, vjp_o2_l = fdx.vjp(f_loss, data_contrib_i, pop_coeff, sigma2, omega2, cotangents=g_loss)
-
-        grad_data_contrib = vjp_dc_b + vjp_dc_H + vjp_dc_l
-        grad_pop_coeff    = vjp_pc_b + vjp_pc_H + vjp_pc_l
-        grad_sigma2       = vjp_s2_b + vjp_s2_H + vjp_s2_l
-        grad_omega2       = vjp_o2_b + vjp_o2_H + vjp_o2_l
+        grad_fn = fdx.fgrad(scalar_loss, argnums=(0, 1, 2, 3))
+        grads_tuple = grad_fn(data_contrib_i, pop_coeff, sigma2, omega2)
+        grad_data_contrib, grad_pop_coeff, grad_sigma2, grad_omega2 = grads_tuple
 
         # Return tuple matches the new, shorter signature of `estimate_single_b_i`
         return (None, None, grad_data_contrib, None, None,
