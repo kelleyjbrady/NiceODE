@@ -2827,8 +2827,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             
             aug_ode_func = create_aug_dynamics_ode(self.pk_model_class.diffrax_ode, pop_coeffs_for_J_idx)
             
-            diffrax_solver = Kvaerno5()
-            
+            #diffrax_solver = Kvaerno5()
+            diffrax_solver = Tsit5()
             diffrax_step_ctrl = PIDController(rtol=1e-6, atol=1e-6)
             dt0 = 0.1
             
@@ -2855,7 +2855,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         
         if not (self.jax_ivp_stiff_solver_is_compiled):
-            diffrax_solver = Kvaerno5()
+            #diffrax_solver = Kvaerno5()
+            diffrax_solver = Tsit5()
             
             diffrax_step_ctrl = PIDController(rtol=1e-6, atol=1e-6)
             dt0 = 0.1
@@ -2883,7 +2884,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             print('Sucessfully complied stiff ODE solver')
         
         if not (self.jax_ivp_keys_stiff_solver_is_compiled):
-            diffrax_solver = Kvaerno5()
+            #diffrax_solver = Kvaerno5()
+            diffrax_solver = Tsit5()
             
             diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
             dt0 = 0.1
