@@ -58,6 +58,8 @@ import jax
 from io import BytesIO
 from .model_assesment import construct_profile_ci, get_robust_ci_foce_ndt
 import re
+import optax
+import jaxopt
 
 
 
@@ -3777,7 +3779,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         
         #----------JAX Setup-------------
-        debugging_jax = True
+        debugging_jax = False
         params_idx_jax = deepcopy(params_idx)
         required_keys = ['pop', 'sigma', 'omega', 'theta']
         existing_keys = [i for i in params_idx_jax]
@@ -3989,7 +3991,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     callback = None
                 if self.fit_jax_objective:
                     if optimize_with_scipy:
-                        def scipy_wrapper(numpy_params):
+                        def scipy_value_wrapper(numpy_params):
                             """
                             This function is NOT jitted. It's a simple Python function
                             that shields our JAX code from SciPy.
@@ -4003,25 +4005,80 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
 
                             # c. Return a standard Python float, which optimizers expect
                             return float(loss)
-                        if _jax_objective_grad is not None:
-                            def scipy_jac_wrapper(numpy_params):
+                        if _jax_obj_and_grad is not None:
+                            def scipy_value_and_grad_wrapper(numpy_params):
                                 jax_params = jnp.asarray(numpy_params, dtype=jnp.float64)
-                                grad = _jax_objective_grad(jax_params)
+                                loss_and_grad = _jax_obj_and_grad(jax_params)
                             
-                                return grad
+                                return loss_and_grad
+                            minimize_f = scipy_value_and_grad_wrapper
+                            minimize_jac = True
                         else:
-                            scipy_jac_wrapper = None
+                            minimize_jac = None
+                            minimize_f = scipy_value_wrapper
                         #fit the model                        
-                        self.fit_result_ = minimize(
-                                scipy_wrapper,
-                                _opt_params,
-                                jac = scipy_jac_wrapper,
-                                method=self.minimize_method,
-                                tol=self.optimizer_tol,
-                                options={"disp": False, 
-                                        },
-                                callback = callback,
-                            )
+                        scipy_opt = False
+                        if scipy_opt:
+                            self.fit_result_ = minimize(
+                                    minimize_f,
+                                    _opt_params,
+                                    jac = minimize_jac,
+                                    method=self.minimize_method,
+                                    tol=self.optimizer_tol,
+                                    options={"disp": False, 
+                                            },
+                                    callback = callback,
+                                )
+                        optax_opt = False
+                        if optax_opt:
+                            def run_optimization(initial_params):
+                                # The objective and solver are defined *inside* the function
+                                learning_rate = 1e-3  # Tune as needed
+                                optimizer = optax.adam(learning_rate)
+                                opt_state = optimizer.init(initial_params)
+                                
+                                
+                                value_and_grad_fn = _jax_obj_and_grad
+
+                                
+                                def update_step(i, state_tuple):
+                                    params, opt_state, _ = state_tuple
+                                    loss_val, grads = value_and_grad_fn(params)
+                                    #sanitize the grads for the whole inner optmization for the current iteration 
+                                    #based on the heuristic calculated above (`omega_is_near_zero`)
+                                    updates, opt_state = optimizer.update(grads, opt_state, params)
+                                    new_params = optax.apply_updates(params, updates)
+                                    return new_params, opt_state, loss_val
+                                
+                                num_inner_steps = 100 # Tune as needed
+                                initial_state = (initial_params, opt_state, 0.0)
+                                opt_params, opt_state, loss_val = jax.lax.fori_loop(
+                                    0, num_inner_steps, update_step, initial_state
+                                )
+                                return opt_params, opt_state, loss_val # Return final params and loss
+                            
+                            jitted_optimization = jax.jit(run_optimization)
+
+                            params, state, loss_val = jitted_optimization(jnp.array(_opt_params))
+                            return params, state, loss_val
+                        jaxopt_opt = True
+                        if jaxopt_opt:
+                            def run_optimization(opt_params):
+                                bounds = (jnp.full_like(opt_params, -8.0), 
+                                        jnp.full_like(opt_params, 8.0))
+                                solver = jaxopt.LBFGSB(fun = _jax_obj_and_grad, 
+                                                       maxiter=2000,
+                                                       tol=self.optimizer_tol,
+                                                    value_and_grad=True, 
+                                                    max_stepsize=0.1, 
+                                                    jit = not debug_fit
+                                                    )
+                                res = solver.run(init_params = opt_params, bounds = bounds)
+                                return res
+                            #run_opt = jax.jit(run_optimization)
+                            run_opt = run_optimization
+                            res = run_opt(jnp.array(_opt_params))
+                            return res
                         #use fitted params to fit the objective one more time, this time always computing neg2ll
                         #and returning useful things such as the b_i, per subject loss etc
                         #loss_bundle[0] is always the loss, be it neg2ll or surrogate neg2ll
