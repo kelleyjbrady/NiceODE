@@ -15,7 +15,7 @@ priority = "explicit"
 
 [tool.poetry.dependencies]
 python = ">=3.13,<3.14" 
-jax = {extras = ["cuda12-pip"], version = "^0.6.1"}
+jax = {extras = ["cuda12"], version = "0.6.2"}
 
 pandas = "^2.2"
 numpy = "^2.2"
