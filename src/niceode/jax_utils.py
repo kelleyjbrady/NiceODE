@@ -1453,35 +1453,35 @@ def approx_neg2ll_loss_jax(
     #jax.debug.print("n_subject_level_eff shape: {s}", s = n_subject_level_eff.shape )
     #jax.debug.print("pop_coeff_for_J_idx shape: {s}", s = pop_coeff_for_J_idx.shape )
     
-    jax.debug.print(
-    """
-    --- Calling estimate_b_i_vmapped_fdx ---
-    initial_b_i_batch type: {b_i_type}
-    padded_y_batch type: {padded_y_type}
-    data_contribution_batch type: {data_contrib_type}
-    ode_t0_vals_batch type: {ode_t0_type}
-    time_mask_y_batch type: {time_mask_type}
-    pop_coeff type: {pop_coeff_type}
-    sigma2 type: {sigma2_type}
-    n_random_effects type: {n_rand_type}
-    compiled_ivp_solver type: {ivp_solver_type}
-    compiled_augdyn_ivp_solver type: {augdyn_solver_type}
-    pop_coeff_w_bi_idx type: {pc_idx_type}
-    use_surrogate_neg2ll type: {use_surrogate_type}
-    """,
-    b_i_type=type(b_i),
-    padded_y_type=type(padded_y),
-    data_contrib_type=type(data_contribution),
-    ode_t0_type=type(ode_t0_vals),
-    time_mask_type=type(time_mask_y),
-    pop_coeff_type=type(pop_coeff),
-    sigma2_type=type(sigma2),
-    n_rand_type=type(n_subject_level_eff),
-    ivp_solver_type=type(compiled_ivp_solver_novmap_arr),
-    augdyn_solver_type=type(compiled_augdyn_ivp_solver_novmap_arr),
-    pc_idx_type=type(pop_coeff_for_J_idx),
-    use_surrogate_type=type(use_surrogate_neg2ll)
-)
+#     jax.debug.print(
+#     """
+#     --- Calling estimate_b_i_vmapped_fdx ---
+#     initial_b_i_batch type: {b_i_type}
+#     padded_y_batch type: {padded_y_type}
+#     data_contribution_batch type: {data_contrib_type}
+#     ode_t0_vals_batch type: {ode_t0_type}
+#     time_mask_y_batch type: {time_mask_type}
+#     pop_coeff type: {pop_coeff_type}
+#     sigma2 type: {sigma2_type}
+#     n_random_effects type: {n_rand_type}
+#     compiled_ivp_solver type: {ivp_solver_type}
+#     compiled_augdyn_ivp_solver type: {augdyn_solver_type}
+#     pop_coeff_w_bi_idx type: {pc_idx_type}
+#     use_surrogate_neg2ll type: {use_surrogate_type}
+#     """,
+#     b_i_type=type(b_i),
+#     padded_y_type=type(padded_y),
+#     data_contrib_type=type(data_contribution),
+#     ode_t0_type=type(ode_t0_vals),
+#     time_mask_type=type(time_mask_y),
+#     pop_coeff_type=type(pop_coeff),
+#     sigma2_type=type(sigma2),
+#     n_rand_type=type(n_subject_level_eff),
+#     ivp_solver_type=type(compiled_ivp_solver_novmap_arr),
+#     augdyn_solver_type=type(compiled_augdyn_ivp_solver_novmap_arr),
+#     pc_idx_type=type(pop_coeff_for_J_idx),
+#     use_surrogate_type=type(use_surrogate_neg2ll)
+# )
     
     b_i, hessian_i, inner_loss_i = compiled_estimate_b_i_foce(
                                                initial_b_i_batch = b_i,
@@ -1511,12 +1511,16 @@ def approx_neg2ll_loss_jax(
     #jax.debug.print("subject_coeff shape: {s}", s = subject_coeff.shape )
     #jax.debug.print("subject_coeff val: {s}", s = subject_coeff )
     model_coeffs_i = jnp.exp(data_contribution + subject_coeff)# + 1e-6
-    is_zero = (model_coeffs_i == 0)
+    is_apprx_zero = (model_coeffs_i < 1e-9)
     not_finite = ~jnp.isfinite(model_coeffs_i)
-    is_bad_state = jnp.any(not_finite | is_zero)
+    is_bad_state = jnp.any(not_finite | is_apprx_zero)
     safe_coeffs = jnp.ones_like(model_coeffs_i)
     solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
     #jax.debug.print("model_coeffs_i shape: {j}", j=model_coeffs_i.shape)
+    # jax.debug.print("""
+    #                 solver_coeffs: {x}
+                    
+    #                 """, x = solver_coeffs)
     padded_full_preds, padded_pred_y, J_full, J_conc_full = compiled_augdyn_ivp_solver_arr(
         ode_t0_vals,
         solver_coeffs
