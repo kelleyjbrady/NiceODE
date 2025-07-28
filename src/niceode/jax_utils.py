@@ -581,16 +581,18 @@ def create_jax_objective(
     if jit_returns:
         fit_obj = jax.jit(_jax_objective_function)
         fit_grad = jax.jit(grad_method(fit_obj)) if grad_method is not None else None
+        fit_obj_and_grad = jax.jit(jax.value_and_grad(fit_obj)) if grad_method is not None else None
         
         predict_objective = jax.jit(_jax_objective_function_predict)
         predict_unpack = jax.jit(p_jittable_param_unpack_predict)
     else:
         fit_obj = _jax_objective_function
         fit_grad = grad_method(fit_obj) if grad_method is not None else None
+        fit_obj_and_grad = jax.value_and_grad(fit_obj) if grad_method is not None else None
         
         predict_objective = _jax_objective_function_predict
         predict_unpack = p_jittable_param_unpack_predict
-    return (fit_obj, fit_grad), (predict_objective, predict_unpack)
+    return (fit_obj, fit_grad, fit_obj_and_grad), (predict_objective, predict_unpack)
     #return _jax_objective_function, _jax_objective_function_predict
 
 #@partial(jax.jit, static_argnames = (

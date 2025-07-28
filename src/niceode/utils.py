@@ -3852,7 +3852,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                        jit_returns= not debug_fit
                                                        )
         _jax_objective_function_predict_, predict_unpack =  predict_objective_and_unpack
-        _jax_objective_function, _jax_objective_grad = fit_objective_and_grad
+        _jax_objective_function, _jax_objective_grad, _jax_obj_and_grad = fit_objective_and_grad
         if debugging_jax:
             return _jax_objective_function, _opt_params
         
