@@ -720,8 +720,20 @@ def estimate_b_i_vmapped_fdx(
         #mask J here, but what shape is it, how should `time_mask_y_i` be reshaped/tiled?
         _sigma2 = sigma2[0]
         H_approx = (J_masked.T @ J_masked) / _sigma2
+        
+                
+        L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
 
-        return estimated_b_i, H_approx, final_inner_loss_value
+        # 2. Create an identity matrix of the same size
+        identity = jnp.eye(omega2.shape[0], dtype=omega2.dtype)
+
+        # 3. Efficiently solve for the inverse using the Cholesky factor
+        inv_omega2 = jax.scipy.linalg.cho_solve((L, True), identity)
+
+        # 4. Compute the full Hessian needed for the FOCEi term
+        H_foce = H_approx + 2 * inv_omega2
+
+        return estimated_b_i, H_foce, final_inner_loss_value
     
     def _estimate_single_b_i_fwd(*args):
         # args now only contains the 9 JAX array arguments
@@ -911,10 +923,21 @@ def estimate_b_i_vmapped(
         _sigma2 = sigma2[0]
         H_approx = (J_masked.T @ J_masked) / _sigma2
         
+        L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
+
+        # 2. Create an identity matrix of the same size
+        identity = jnp.eye(omega2.shape[0], dtype=omega2.dtype)
+
+        # 3. Efficiently solve for the inverse using the Cholesky factor
+        inv_omega2 = jax.scipy.linalg.cho_solve((L, True), identity)
+
+        # 4. Compute the full Hessian needed for the FOCEi term
+        H_foce = H_approx + 2 * inv_omega2
+        
         
         #hessian_matrix = jnp.ones_like(estimated_b_i)
         # Return the optimized parameters
-        return estimated_b_i, H_approx, final_inner_loss_value
+        return estimated_b_i, H_foce, final_inner_loss_value
 
     # Vmap the single-subject optimization function
     # `in_axes` specifies which arguments to map over. `None` means broadcast.
