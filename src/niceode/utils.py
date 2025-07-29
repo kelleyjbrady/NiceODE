@@ -2478,6 +2478,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                        ):
         print("Compiling `_solve_ivp_jax_worker`")
         ode_term = ODETerm(ode_func)
+        adjoint = diffrax.ForwardMode()
+        #adjoint = diffrax.BacksolveAdjoint()
         #adjoint = BacksolveAdjoint(solver = diffrax_solver, 
         #                           stepsize_controller=diffrax_step_ctrl, 
         #                           )
@@ -2492,7 +2494,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         max_steps=diffrax_max_steps,
         saveat=SaveAt(ts=teval), # Specify time points for output
         stepsize_controller=diffrax_step_ctrl, 
-        #adjoint=adjoint
+        adjoint=adjoint
         )
         
         central_mass_trajectory = solution.ys[:, 0]

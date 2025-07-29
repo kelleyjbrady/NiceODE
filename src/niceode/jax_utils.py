@@ -943,7 +943,7 @@ def estimate_b_i_vmapped_ift(
         #    This tells us how the inner gradient changes w.r.t. outer parameters.
         
         # Gradient w.r.t. data_contrib_i
-        J_cross_dc = jax.jacobian(grad_inner_loss_fn, argnums=1)(
+        J_cross_dc = jax.jacfwd(grad_inner_loss_fn, argnums=1)(
             estimated_b_i, data_contrib_i, pop_coeff, sigma2, omega2
         )
         grad_data_contrib = -v @ J_cross_dc
