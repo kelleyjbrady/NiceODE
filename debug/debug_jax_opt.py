@@ -8,7 +8,7 @@ import jax
 import pandas as pd
 from niceode.diffeqs import OneCompartmentAbsorption, TwoCompartmentAbsorption
 from niceode.utils import CompartmentalModel, ObjectiveFunctionColumn
-from niceode.jax_utils import FO_approx_ll_loss_jax
+#from niceode.jax_utils import FO_approx_ll_loss_jax
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -35,6 +35,7 @@ from niceode.nca import estimate_subject_slope_cv
 from niceode.nca import identify_low_conc_zones, estimate_k_halflife
 from niceode.nca import calculate_mrt
 from niceode.nca import prepare_section_aucs, calculate_auc_from_sections
+from niceode.jax_utils import FO_approx_neg2ll_loss_jax, FOCE_approx_neg2ll_loss_jax
 import jax.numpy as jnp
 from niceode.jax_utils import make_jittable_pk_coeff
 from functools import partial
@@ -132,33 +133,33 @@ me_mod_fo = CompartmentalModel(
             # , optimization_upper_bound = np.log(.05)
         ),
     ],
-    dep_vars={
-        "vd": [
-            ObjectiveFunctionColumn(
-                coeff_name = 'tmp',
-                column_name="WEIGHT",
-                allometric_norm_value=70,
-                model_method="allometric",
-            ),
-            ObjectiveFunctionColumn(
-                coeff_name = 'tmp',
-                column_name="sex_cat",
-            )
-        ], 
-        "cl": [
-            ObjectiveFunctionColumn(
-                coeff_name = 'tmp',
-                column_name="WEIGHT_tmp",
-                allometric_norm_value=70,
-                model_method="allometric",
-            ),
-            ObjectiveFunctionColumn(
-                coeff_name = 'tmp',
-                column_name="sex_cat_tmp",
-            )
-        ],
-        
-    },
+    #dep_vars={
+    #    "vd": [
+    #        ObjectiveFunctionColumn(
+    #            coeff_name = 'tmp',
+    #            column_name="WEIGHT",
+    #            allometric_norm_value=70,
+    #            model_method="allometric",
+    #        ),
+    #        ObjectiveFunctionColumn(
+    #            coeff_name = 'tmp',
+    #            column_name="sex_cat",
+    #        )
+    #    ], 
+    #    "cl": [
+    #        ObjectiveFunctionColumn(
+    #            coeff_name = 'tmp',
+    #            column_name="WEIGHT_tmp",
+    #            allometric_norm_value=70,
+    #            model_method="allometric",
+    #        ),
+    #        ObjectiveFunctionColumn(
+    #            coeff_name = 'tmp',
+    #            column_name="sex_cat_tmp",
+    #        )
+    #    ],
+    #    
+    #},
     dep_vars2=[
         ObjectiveFunctionColumn(
             coeff_name="vd",
@@ -186,6 +187,7 @@ me_mod_fo = CompartmentalModel(
     # ode_solver_method='BDF'
     batch_id="debug_datapipe",
     minimize_method="COBYQA",
+    jax_loss=FO_approx_neg2ll_loss_jax,
 )
 #tmp = me_mod_fo._assemble_pred_matrices(
 #        df_oral,
@@ -196,6 +198,8 @@ me_mod_fo = CompartmentalModel(
 _jax_objective, _opt_params = me_mod_fo.fit2(
     df_oral,
 )
+
+_jax_objective(_opt_params)
 #%%
 
 me_mod_fo._compile_jax_ivp_solvers()

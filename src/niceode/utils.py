@@ -2478,8 +2478,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                        ):
         print("Compiling `_solve_ivp_jax_worker`")
         ode_term = ODETerm(ode_func)
-        adjoint = diffrax.ForwardMode()
-        #adjoint = diffrax.BacksolveAdjoint()
+        #adjoint = diffrax.ForwardMode()
+        adjoint = diffrax.BacksolveAdjoint()
+        #adjoint = diffrax.DirectAdjoint()
         #adjoint = BacksolveAdjoint(solver = diffrax_solver, 
         #                           stepsize_controller=diffrax_step_ctrl, 
         #                           )
@@ -2831,8 +2832,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             
             aug_ode_func = create_aug_dynamics_ode(self.pk_model_class.diffrax_ode, pop_coeffs_for_J_idx)
             
-            #diffrax_solver = Kvaerno5()
-            diffrax_solver = Tsit5()
+            diffrax_solver = Kvaerno5()
+            #diffrax_solver = Tsit5()
             diffrax_step_ctrl = PIDController(rtol=1e-6, atol=1e-6)
             dt0 = 0.1
             
@@ -2859,8 +2860,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         
         if not (self.jax_ivp_stiff_solver_is_compiled):
-            #diffrax_solver = Kvaerno5()
-            diffrax_solver = Tsit5()
+            diffrax_solver = Kvaerno5()
+            #diffrax_solver = Tsit5()
             
             diffrax_step_ctrl = PIDController(rtol=1e-6, atol=1e-6)
             dt0 = 0.1
@@ -2888,8 +2889,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             print('Sucessfully complied stiff ODE solver')
         
         if not (self.jax_ivp_keys_stiff_solver_is_compiled):
-            #diffrax_solver = Kvaerno5()
-            diffrax_solver = Tsit5()
+            diffrax_solver = Kvaerno5()
+            #diffrax_solver = Tsit5()
             
             diffrax_step_ctrl = PIDController(rtol=1e-8, atol=1e-10)
             dt0 = 0.1
@@ -3859,6 +3860,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                        )
         _jax_objective_function_predict_, predict_unpack =  predict_objective_and_unpack
         _jax_objective_function, _jax_objective_grad, _jax_obj_and_grad = fit_objective_and_grad
+        if _jax_objective_grad is None:
+            _gradient_is_available = False
         if debugging_jax:
             return _jax_objective_function, _opt_params
         
@@ -4019,7 +4022,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                             minimize_jac = None
                             minimize_f = scipy_value_wrapper
                         #fit the model                        
-                        scipy_opt = False
+                        scipy_opt = True
                         if scipy_opt:
                             self.fit_result_ = minimize(
                                     minimize_f,
@@ -4063,7 +4066,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
 
                             params, state, loss_val = jitted_optimization(jnp.array(_opt_params))
                             return params, state, loss_val
-                        jaxopt_opt = True
+                        jaxopt_opt = False
                         if jaxopt_opt:
                             def run_optimization(opt_params):
                                 bounds = (jnp.full_like(opt_params, -8.0), 

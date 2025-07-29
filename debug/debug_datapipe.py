@@ -88,6 +88,7 @@ me_mod_fo = CompartmentalModel(
         ODEInitVals("DV_scale"),
         ODEInitVals("AMT_scale"),
     ],
+    dose_col=['AMT_scale'],
     conc_at_time_col="DV_scale",
     subject_id_col="ID_x",
     time_col="TIME_x",
@@ -162,7 +163,6 @@ me_mod_fo = CompartmentalModel(
     ],
     no_me_loss_function=neg2_log_likelihood_loss,
     no_me_loss_needs_sigma=True,
-    optimizer_tol=None,
     pk_model_class=OneCompartmentAbsorption,
     model_error_sigma=PopulationCoeffcient(
         "sigma",
@@ -180,9 +180,9 @@ me_mod_fo = CompartmentalModel(
     batch_id="debug_datapipe",
     minimize_method="COBYQA",
 )
-tmp = me_mod_fo._assemble_pred_matrices(
-        df_oral,
-    )
+#tmp = me_mod_fo._assemble_pred_matrices(
+#        df_oral,
+#    )
 #%%
 
 fit_model = True

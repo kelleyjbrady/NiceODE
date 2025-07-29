@@ -1,11 +1,28 @@
 #%%
-import pandas as pd
+
 import os
-os.environ['JAX_PLATFORMS'] = 'cpu'
-os.environ['JAX_ENABLE_X64']='True'
+
+# --- Control Flag ---
+USE_GPU = False
+# --------------------
+
+if USE_GPU:
+    # Set JAX to use the GPU. The device number (0) is for the first GPU.
+    os.environ['JAX_PLATFORMS'] = 'cuda,cpu'
+    # Optional: Pin JAX to a specific GPU
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0' 
+else:
+    os.environ['JAX_PLATFORMS'] = 'cpu'
+
+import jax
+print(f"JAX is running on: {jax.default_backend()}")
+print(f"JAX devices: {jax.devices()}")
+
+#%%
+import pandas as pd
 
 import numpyro
-numpyro.set_host_device_count(4)
+#numpyro.set_host_device_count(4)
 from niceode.pymc_utils import make_pymc_model
 import pymc as pm
 #%%
@@ -15,12 +32,20 @@ from niceode.utils import (CompartmentalModel,
                            neg2_log_likelihood_loss,
                            ObjectiveFunctionColumn,
                            FOCE_approx_ll_loss,
-                           FOCEi_approx_ll_loss
+                           FOCEi_approx_ll_loss,
+                           FO_approx_ll_loss
                            )
 from niceode.diffeqs import OneCompartmentAbsorption
 import numpy as np
 import joblib as jb
-
+from niceode.jax_utils import (FOCE_approx_neg2ll_loss_jax,
+                               FO_approx_neg2ll_loss_jax, 
+                               FOCEi_approx_neg2ll_loss_jax,
+                               FOCE_approx_neg2ll_loss_jax_fdxINNER,
+                               FOCE_approx_neg2ll_loss_jax_iftINNER_ALT,
+                               FOCE_approx_neg2ll_loss_jax_iftINNER, 
+                               FOCE_approx_neg2ll_loss_jax_fdxOUTER
+                               )
 #%%
 
 df = pd.read_csv(r"/workspaces/PK-Analysis/data/theo_nlmixr2.csv", ) 
@@ -177,7 +202,7 @@ if fit_model:
 #%%
 #%%
 me_mod_fo =  CompartmentalModel(
-        model_name = "debug_theoph_abs_ka-clME-vd_sse_nodep_dermal",
+        model_name = "debug_theoph_abs_ka-clME-vd_JAXFOCE_jaxoptLbfgsb_nodep_dermal",
             ode_t0_cols=[ ODEInitVals('DV'), ODEInitVals('AMT'),],
             conc_at_time_col = 'DV',
             subject_id_col = 'ID', 
@@ -227,12 +252,19 @@ me_mod_fo =  CompartmentalModel(
                                                                             ),
                                     #ode_solver_method='BDF'
                                     batch_id='theoph_test1',
-                                    minimize_method = 'COBYQA'
+                                    #minimize_method = 'COBYQA'
+                                    #use_full_omega=False, 
+                                    significant_digits=5,
+                                    me_loss_function=FO_approx_ll_loss,
+                                    jax_loss=FOCE_approx_neg2ll_loss_jax,
+                                    use_full_omega=True, 
+                                    use_surrogate_neg2ll=True, 
+                                    fit_jax_objective=True,
                                     )
 #%%
 fit_model = True
 if fit_model:
-    me_mod_fo = me_mod_fo.fit2(df, ci_level = None)
+    me_mod_fo = me_mod_fo.fit2(df, ci_level = 0.95, debug_fit=False)
 else:
     me_mod_fo = jb.load(r"/workspaces/PK-Analysis/debug/logs/fitted_model_cb_debug.jb.jb")
 
@@ -312,7 +344,7 @@ me_mod_fo2 =  CompartmentalModel(
                                                                             ),
                                     #ode_solver_method='BDF'
                                     batch_id='theoph_test1',
-                                    minimize_method = 'COBYQA',
+                                    #minimize_method = 'COBYQA',
                                     use_full_omega=True
                                     )
 

@@ -71,18 +71,26 @@ f <- nlmixr(one.cmt)
 We can now run the model...
 
 ```{r}
-fit <- nlmixr(one.cmt, theo_sd, est="foce",
-              control=list(print=0))
+fit_focei <- nlmixr(one.cmt, theo_sd, est="foce",
+              control=foceiControl(interaction=TRUE, print=0))
 
-print(fit)
+print(fit_focei)
 ```
 
 
 ```{r}
-fit_foce <- nlmixr(one.cmt, theo_sd, est="focei",
+fit_foce <- nlmixr(one.cmt, theo_sd, est="foce",
                    control=foceiControl(interaction=FALSE, print=0))
 
 print(fit_foce) 
+```
+
+```{r}
+fit_fo <- nlmixr(one.cmt, theo_sd, est="fo",
+                   control=foceiControl(interaction=FALSE, print=0))
+
+print(fit_fo) 
+
 ```
 
 ``` {r}
