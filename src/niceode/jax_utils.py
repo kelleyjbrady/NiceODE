@@ -535,7 +535,7 @@ def create_jax_objective(
     
     initialized_loss = jittable_loss() 
     jittable_loss_fn = initialized_loss.loss_fn
-    grad_method = initialized_loss.grad_method()       
+    _grad ,_value_and_grad = initialized_loss.grad_method()       
     
     p_jittable_param_unpack_fit = partial(_jittable_param_unpack, **unpacker_static_kwargs)
     jittable_loss_p_fit = partial(jittable_loss_fn, **loss_static_kwargs)
@@ -580,15 +580,15 @@ def create_jax_objective(
     #
     if jit_returns:
         fit_obj = jax.jit(_jax_objective_function)
-        fit_grad = jax.jit(grad_method(fit_obj)) if grad_method is not None else None
-        fit_obj_and_grad = jax.jit(jax.value_and_grad(fit_obj)) if grad_method is not None else None
+        fit_grad = jax.jit(_grad(fit_obj)) if _grad is not None else None
+        fit_obj_and_grad = jax.jit(_value_and_grad(fit_obj)) if _grad is not None else None
         
         predict_objective = jax.jit(_jax_objective_function_predict)
         predict_unpack = jax.jit(p_jittable_param_unpack_predict)
     else:
         fit_obj = _jax_objective_function
-        fit_grad = grad_method(fit_obj) if grad_method is not None else None
-        fit_obj_and_grad = jax.value_and_grad(fit_obj) if grad_method is not None else None
+        fit_grad = _grad(fit_obj) if _grad is not None else None
+        fit_obj_and_grad = _value_and_grad(fit_obj) if _grad is not None else None
         
         predict_objective = _jax_objective_function_predict
         predict_unpack = p_jittable_param_unpack_predict
@@ -800,6 +800,216 @@ def estimate_b_i_vmapped_fdx(
 
     return all_b_i_estimates, all_hessians, all_final_inner_loss
 
+def estimate_b_i_vmapped_ift_ALT(
+    initial_b_i_batch,
+    padded_y_batch,
+    data_contribution_batch,
+    ode_t0_vals_batch,
+    time_mask_y_batch,
+    pop_coeff,
+    sigma2,
+    omega2,
+    n_random_effects,
+    compiled_ivp_solver,
+    compiled_augdyn_ivp_solver,
+    pop_coeff_w_bi_idx,
+    use_surrogate_neg2ll,
+    **kwargs,  # Absorb unused kwargs
+):
+    """Estimates b_i for all subjects by vmapping the custom VJP function."""
+    print('Compiling `estimate_b_i_vmapped` with custom VJP')
+
+    # Vmap the single-subject optimization function with the custom VJP.
+    # `in_axes` specifies which arguments to map over (0) vs. broadcast (None).
+    
+    def update_step(i, state_tuple):
+        # Unpack everything from the state
+        params_b_i, opt_state, padded_y_i, pop_coeff, data_contrib_i, \
+        sigma2, omega2, ode_t0_i, time_mask_y_i, pop_coeff_w_bi_idx = state_tuple
+
+        omega_is_near_zero = jnp.diag(jnp.sqrt(omega2)) < 1e-5
+        
+        # Reconstruct the loss function call for this step
+        loss, grads = jax.value_and_grad(FOCE_inner_loss_fn)(
+            params_b_i, padded_y_i=padded_y_i, pop_coeff_i=pop_coeff,
+            data_contribution_i=data_contrib_i, sigma2=sigma2, omega2=omega2,
+            ode_t0_val_i=ode_t0_i, time_mask_y_i=time_mask_y_i,
+            n_random_effects=n_random_effects,
+            compiled_ivp_solver=compiled_ivp_solver,
+            pop_coeff_w_bi_idx=pop_coeff_w_bi_idx,
+            use_surrogate_neg2ll=use_surrogate_neg2ll
+        )
+        safe_grads = jnp.where(omega_is_near_zero, 0.0, grads)
+        # The optimizer logic is the same
+        updates, opt_state = optimizer.update(safe_grads, opt_state, params_b_i)
+        new_params_b_i = optax.apply_updates(params_b_i, updates)
+        
+        # Repack the state for the next iteration
+        return (new_params_b_i, opt_state, padded_y_i, pop_coeff, data_contrib_i,
+                sigma2, omega2, ode_t0_i, time_mask_y_i, pop_coeff_w_bi_idx)
+    
+    optimizer = optax.adam(learning_rate=0.1)
+    
+    #@jax.jit
+    def estimate_single_b_i_impl(
+        initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
+        pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx
+    ):
+        opt_state = optimizer.init(initial_b_i)
+
+        # The state tuple now includes ALL data needed by the update_step
+        initial_state = (initial_b_i, opt_state, padded_y_i, pop_coeff,
+                         data_contrib_i, sigma2, omega2, ode_t0_i,
+                         time_mask_y_i, pop_coeff_w_bi_idx)
+        #jax.debug.print("Starting Inner Optimization")
+        # Run the loop with the static update function
+        final_state = jax.lax.fori_loop(0, 100, update_step, initial_state)
+        #jax.debug.print("Completed Inner Optimization")
+        estimated_b_i = final_state[0] # Unpack the final b_i
+        
+        final_inner_loss_value = FOCE_inner_loss_fn(
+            b_i=estimated_b_i, padded_y_i=padded_y_i, data_contribution_i=data_contrib_i, 
+            ode_t0_val_i=ode_t0_i, time_mask_y_i=time_mask_y_i, pop_coeff_i=pop_coeff,
+            sigma2=sigma2, omega2=omega2, pop_coeff_w_bi_idx=pop_coeff_w_bi_idx, 
+            n_random_effects=n_random_effects, compiled_ivp_solver=compiled_ivp_solver, 
+            use_surrogate_neg2ll=use_surrogate_neg2ll
+        )
+        #jax.debug.print("Completed Estimation of Final Inner Optimization Loss")
+        # --- Hessian Approximation ---
+        def predict_fn(b_i_for_pred):
+                # This logic is copied from your FOCE_inner_loss_fn
+                b_i_work = jnp.zeros_like(pop_coeff)
+                b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(b_i_for_pred)
+                combined_coeffs = pop_coeff + b_i_work
+                model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
+                
+                # We don't need the "safe_coeffs" logic here, as we're already at the optimum
+                _, _, _, J_conc_full = compiled_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
+                
+                # We need the elements in J corresponding to the mask, implemented below
+                return  J_conc_full
+
+        J = predict_fn(estimated_b_i)
+        mask_expanded = time_mask_y_i[:, None]
+        J_masked = J * mask_expanded
+        #mask J here, but what shape is it, how should `time_mask_y_i` be reshaped/tiled?
+        _sigma2 = sigma2[0]
+        H_approx = (J_masked.T @ J_masked) / _sigma2
+        
+                
+        L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
+
+        # 2. Create an identity matrix of the same size
+        identity = jnp.eye(omega2.shape[0], dtype=omega2.dtype)
+
+        # 3. Efficiently solve for the inverse using the Cholesky factor
+        inv_omega2 = jax.scipy.linalg.cho_solve((L, True), identity)
+
+        # 4. Compute the full Hessian needed for the FOCEi term
+        H_foce = H_approx + 2 * inv_omega2
+
+        return estimated_b_i, H_foce, final_inner_loss_value
+    
+    def _estimate_single_b_i_fwd(*args):
+        # args now only contains the 9 JAX array arguments
+        outputs = estimate_single_b_i_impl(*args)
+        estimated_b_i, H_foce, _ = outputs
+
+        residuals = (estimated_b_i, H_foce) + args
+        return outputs, residuals
+    
+    def _estimate_single_b_i_bwd(residuals, g):
+        (estimated_b_i, H_foce, initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
+         pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx) = residuals
+        g_b_i, g_H, g_loss = g
+        #jax.debug.print("Starting Reverse Pass")
+        def grad_inner_loss_fn(b_i, dc, pc, s2, o2):
+            return jax.grad(FOCE_inner_loss_fn, argnums=0)(
+                b_i, padded_y_i=padded_y_i, pop_coeff_i=pc,
+                data_contribution_i=dc, sigma2=s2, omega2=o2,
+                ode_t0_val_i=ode_t0_i, time_mask_y_i=time_mask_y_i,
+                n_random_effects=n_random_effects,
+                compiled_ivp_solver=compiled_ivp_solver,
+                pop_coeff_w_bi_idx=pop_coeff_w_bi_idx,
+                use_surrogate_neg2ll=use_surrogate_neg2ll
+            )
+
+        # 3. Solve the core linear system of the IFT: H^T @ v = g
+        #    Since H is symmetric, this is just H @ v = g.
+        #    We only use g_b_i, the cotangent for the optimized parameters.
+        #H_foce_analytical = jax.jacobian(grad_inner_loss_fn, argnums=0)(
+        #    estimated_b_i, data_contrib_i, pop_coeff, sigma2, omega2
+        #)
+        v = jax.scipy.linalg.solve(H_foce, g_b_i,)# sym_pos=True)
+        
+        # 4. Compute the cross-term Jacobians and final gradients.
+        #    This tells us how the inner gradient changes w.r.t. outer parameters.
+        
+        # Gradient w.r.t. data_contrib_i
+        J_cross_dc = jax.jacfwd(grad_inner_loss_fn, argnums=1)(
+            estimated_b_i, data_contrib_i, pop_coeff, sigma2, omega2
+        )
+        grad_data_contrib = -v @ J_cross_dc
+        
+        # Gradient w.r.t. pop_coeff
+        J_cross_pc = jax.jacobian(grad_inner_loss_fn, argnums=2)(
+            estimated_b_i, data_contrib_i, pop_coeff, sigma2, omega2
+        )
+        grad_pop_coeff = -v @ J_cross_pc
+
+        # Gradient w.r.t. sigma2
+        J_cross_s2 = jax.jacobian(grad_inner_loss_fn, argnums=3)(
+            estimated_b_i, data_contrib_i, pop_coeff, sigma2, omega2
+        )
+        grad_sigma2 = -v @ J_cross_s2
+
+        # Gradient w.r.t. omega2
+        J_cross_o2 = jax.jacobian(grad_inner_loss_fn, argnums=4)(
+            estimated_b_i, data_contrib_i, pop_coeff, sigma2, omega2
+        )
+        grad_omega2 = -v @ J_cross_o2
+
+        # Note: A complete implementation would also add the gradient contributions
+        # from g_H and g_loss. This version includes the main IFT path, which is
+        # the most significant and complex part.
+        
+        # Return tuple matches the new, shorter signature of `estimate_single_b_i`
+        return (None, None, grad_data_contrib, None, None,
+                grad_pop_coeff, grad_sigma2, grad_omega2, None)
+    
+    @jax.custom_vjp
+    def estimate_single_b_i(
+        initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
+        pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx
+    ):
+        return estimate_single_b_i_impl(
+            initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
+            pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx
+        )
+        
+    estimate_single_b_i.defvjp(_estimate_single_b_i_fwd, _estimate_single_b_i_bwd)
+    
+    vmapped_optimizer = jax.vmap(
+        estimate_single_b_i,
+        in_axes=(0, 0, 0, 0, 0, None, None, None, None),
+        out_axes=0
+    )
+
+    # Execute the vmapped function
+    all_b_i_estimates, all_hessians, all_final_inner_loss = vmapped_optimizer(
+        initial_b_i_batch,
+        padded_y_batch,
+        data_contribution_batch,
+        ode_t0_vals_batch,
+        time_mask_y_batch,
+        pop_coeff,
+        sigma2,
+        omega2,
+        pop_coeff_w_bi_idx
+    )
+
+    return all_b_i_estimates, all_hessians, all_final_inner_loss
+
 def estimate_b_i_vmapped_ift(
     initial_b_i_batch,
     padded_y_batch,
@@ -943,7 +1153,7 @@ def estimate_b_i_vmapped_ift(
         #    This tells us how the inner gradient changes w.r.t. outer parameters.
         
         # Gradient w.r.t. data_contrib_i
-        J_cross_dc = jax.jacfwd(grad_inner_loss_fn, argnums=1)(
+        J_cross_dc = jax.jacobian(grad_inner_loss_fn, argnums=1)(
             estimated_b_i, data_contrib_i, pop_coeff, sigma2, omega2
         )
         grad_data_contrib = -v @ J_cross_dc
@@ -1463,9 +1673,64 @@ class FOCEi_approx_neg2ll_loss_jax():
         return loss
     @staticmethod
     def grad_method():
-        return None
+        return None, None
 
-class FOCE_approx_neg2ll_loss_jax_ift():
+class FOCE_approx_neg2ll_loss_jax_iftINNER_ALT():
+    
+    def __init__(self):
+        pass
+    
+    @staticmethod
+    def loss_fn(
+    pop_coeff, 
+    sigma2, 
+    omega2, 
+    theta, 
+    theta_data,
+    padded_y,
+    unpadded_y_len,
+    time_mask_y,
+    time_mask_J,
+    compiled_augdyn_ivp_solver_arr,
+    compiled_augdyn_ivp_solver_novmap_arr,
+    compiled_ivp_solver_arr,
+    compiled_ivp_solver_novmap_arr,
+    ode_t0_vals,
+    pop_coeff_for_J_idx,
+    use_surrogate_neg2ll,
+    **kwargs,
+    ):
+        print("Compiling `FOCE_approx_neg2ll_loss_jax`")
+        loss = approx_neg2ll_loss_jax(
+            pop_coeff = pop_coeff, 
+            sigma2 = sigma2, 
+            omega2 = omega2, 
+            theta = theta, 
+            theta_data = theta_data,
+            padded_y = padded_y,
+            unpadded_y_len = unpadded_y_len,
+            time_mask_y = time_mask_y,
+            time_mask_J = time_mask_J,
+            compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
+            compiled_augdyn_ivp_solver_novmap_arr = compiled_augdyn_ivp_solver_novmap_arr,
+            compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+            compiled_ivp_solver_novmap_arr = compiled_ivp_solver_novmap_arr,
+            ode_t0_vals = ode_t0_vals,
+            pop_coeff_for_J_idx = pop_coeff_for_J_idx,
+            compiled_estimate_b_i_foce = estimate_b_i_vmapped_ift_ALT,
+            compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
+            jittable_estimate_foc_i=foc_interaction_term_passthrough, 
+            jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
+            use_surrogate_neg2ll = use_surrogate_neg2ll,
+            
+        )
+        
+        return loss
+    @staticmethod
+    def grad_method():
+        return jax.grad, jax.value_and_grad
+
+class FOCE_approx_neg2ll_loss_jax_iftINNER():
     
     def __init__(self):
         pass
@@ -1518,9 +1783,9 @@ class FOCE_approx_neg2ll_loss_jax_ift():
         return loss
     @staticmethod
     def grad_method():
-        return jax.grad
+        return jax.grad, jax.value_and_grad
 
-class FOCE_approx_neg2ll_loss_jax_fdx():
+class FOCE_approx_neg2ll_loss_jax_fdxINNER():
     
     def __init__(self):
         pass
@@ -1573,8 +1838,63 @@ class FOCE_approx_neg2ll_loss_jax_fdx():
         return loss
     @staticmethod
     def grad_method():
-        return jax.grad
+        return jax.grad, jax.value_and_grad
 
+
+class FOCE_approx_neg2ll_loss_jax_fdxOUTER():
+    
+    def __init__(self):
+        pass
+    
+    @staticmethod
+    def loss_fn(
+    pop_coeff, 
+    sigma2, 
+    omega2, 
+    theta, 
+    theta_data,
+    padded_y,
+    unpadded_y_len,
+    time_mask_y,
+    time_mask_J,
+    compiled_augdyn_ivp_solver_arr,
+    compiled_augdyn_ivp_solver_novmap_arr,
+    compiled_ivp_solver_arr,
+    compiled_ivp_solver_novmap_arr,
+    ode_t0_vals,
+    pop_coeff_for_J_idx,
+    use_surrogate_neg2ll,
+    **kwargs,
+    ):
+        print("Compiling `FOCE_approx_neg2ll_loss_jax`")
+        loss = approx_neg2ll_loss_jax(
+            pop_coeff = pop_coeff, 
+            sigma2 = sigma2, 
+            omega2 = omega2, 
+            theta = theta, 
+            theta_data = theta_data,
+            padded_y = padded_y,
+            unpadded_y_len = unpadded_y_len,
+            time_mask_y = time_mask_y,
+            time_mask_J = time_mask_J,
+            compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
+            compiled_augdyn_ivp_solver_novmap_arr = compiled_augdyn_ivp_solver_novmap_arr,
+            compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+            compiled_ivp_solver_novmap_arr = compiled_ivp_solver_novmap_arr,
+            ode_t0_vals = ode_t0_vals,
+            pop_coeff_for_J_idx = pop_coeff_for_J_idx,
+            compiled_estimate_b_i_foce = estimate_b_i_vmapped,
+            compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
+            jittable_estimate_foc_i=foc_interaction_term_passthrough, 
+            jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
+            use_surrogate_neg2ll = use_surrogate_neg2ll,
+            
+        )
+        
+        return loss
+    @staticmethod
+    def grad_method():
+        return fdx.fgrad, fdx.value_and_fgrad
 
 class FOCE_approx_neg2ll_loss_jax():
     
@@ -1629,7 +1949,7 @@ class FOCE_approx_neg2ll_loss_jax():
         return loss
     @staticmethod
     def grad_method():
-        return None
+        return None, None
     
 class FO_approx_neg2ll_loss_jax():
     
@@ -1684,7 +2004,7 @@ class FO_approx_neg2ll_loss_jax():
     
     @staticmethod
     def grad_method():
-        return jax.grad
+        return jax.grad, jax.value_and_grad
 
 def approx_neg2ll_loss_jax(
     pop_coeff, 
