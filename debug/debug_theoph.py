@@ -21,6 +21,8 @@ from niceode.diffeqs import OneCompartmentAbsorption
 import numpy as np
 import joblib as jb
 
+from niceode.jax_utils import FOCE_approx_neg2ll_loss_jax
+
 #%%
 
 df = pd.read_csv(r"/workspaces/PK-Analysis/data/theo_nlmixr2.csv", ) 
@@ -177,7 +179,7 @@ if fit_model:
 #%%
 #%%
 me_mod_fo =  CompartmentalModel(
-        model_name = "debug_theoph_abs_ka-clME-vd_sse_nodep_dermal",
+        model_name = "debug_theoph_SCIPYLBFGSB_surrogateneg2ll_FOCEJAX_DEBUGNOFOCEPROGRESS_OLDWORKINGCOMMIT",
             ode_t0_cols=[ ODEInitVals('DV'), ODEInitVals('AMT'),],
             conc_at_time_col = 'DV',
             subject_id_col = 'ID', 
@@ -227,7 +229,11 @@ me_mod_fo =  CompartmentalModel(
                                                                             ),
                                     #ode_solver_method='BDF'
                                     batch_id='theoph_test1',
-                                    minimize_method = 'COBYQA'
+                                    minimize_method = 'COBYQA', 
+                                    fit_jax_objective=True, 
+                                    jax_loss=FOCE_approx_neg2ll_loss_jax, 
+                                    use_surrogate_neg2ll=True, 
+                                    use_full_omega=True
                                     )
 #%%
 fit_model = True
@@ -262,7 +268,7 @@ if fit_pymc:
 
 # %%
 me_mod_fo2 =  CompartmentalModel(
-        model_name = "debug_theoph_abs_ka-clME-vd_FOCE_nodep_dermal",
+        model_name = "debug_theoph_SCIPYLBFGSB_FOCEJAX_DEBUGNOFOCEPROGRESS_OLDWORKINGCOMMIT",
             ode_t0_cols=[ ODEInitVals('DV'), ODEInitVals('AMT'),],
             conc_at_time_col = 'DV',
             subject_id_col = 'ID', 
@@ -312,8 +318,10 @@ me_mod_fo2 =  CompartmentalModel(
                                                                             ),
                                     #ode_solver_method='BDF'
                                     batch_id='theoph_test1',
-                                    minimize_method = 'COBYQA',
-                                    use_full_omega=True
+                                    #minimize_method = 'COBYQA',
+                                    use_full_omega=True, 
+                                    fit_jax_objective=True, 
+                                    jax_loss=FOCE_approx_neg2ll_loss_jax
                                     )
 
 fit_model = True
