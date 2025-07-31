@@ -6,6 +6,8 @@ import mlflow
 from scipy.optimize import OptimizeResult
 import numpy as np
 import pandas as pd
+import jax.numpy as jnp
+import jax
 
 class _DocstringRemover(ast.NodeTransformer):
     """
@@ -336,3 +338,246 @@ class MLflowCallback:
             mlflow.log_metric(name, val, step=self.iteration)
 
 
+class JaxMLflowCallbackFactory:
+    _registered_class = None
+
+    @classmethod
+    def get_class(cls):
+        """
+        Defines, registers, and returns the JaxMLflowCallback class.
+        Ensures registration only happens once by caching the class type.
+        """
+        # Return the cached class if it's already been created
+        if cls._registered_class:
+            return cls._registered_class
+
+        # --- Define the class dynamically inside the factory method ---
+        class _JaxMLflowCallback:
+            def __init__(self, objective_fn, **kwargs):
+                """
+                Initializes the callback with the objective function and any
+                static data it needs to run. All other keyword arguments
+                from your original class are accepted via kwargs.
+                """
+                self.objective_fn = objective_fn
+                self.iteration = 0
+                # Store all other necessary parameters
+                self.__dict__.update(kwargs)
+
+            def __call__(self, params):
+                """
+                Callback for jaxopt. `params` is the JAX array of current optimized parameters.
+                """
+                self.iteration += 1
+
+                # CHANGED: Reconstruct the full parameter vector using JAX operations
+                combined_params = jnp.zeros(self.total_n_params)
+                combined_params = combined_params.at[self.opt_params_combined_params_idx].set(params)
+                combined_params = combined_params.at[self.fixed_params_combined_params_idx].set(self.fixed_params)
+                
+                # CHANGED: Recalculate the objective value (loss)
+                current_fun_val = self.objective_fn(params,)# self.static_data)
+                
+                # mlflow.log_metric can handle JAX arrays, but converting to float is safest
+                mlflow.log_metric(self.objective_name, float(current_fun_val), step=self.iteration)
+                
+                # Use JAX functions for transformations
+                uncentered_intermd_result = combined_params + self.init_params_for_scaling
+                
+                # The logging logic can largely stay the same, but using jnp for math
+                # We can convert to NumPy for iteration as it's cleaner
+                for idx, val in enumerate(np.asarray(uncentered_intermd_result)):
+                    mlflow.log_metric(f'param_{self.parameter_names[idx]}_value', val, step=self.iteration)
+
+                pop_idx = self.params_idx['pop']
+                for idx in range(pop_idx[0], pop_idx[-1]):
+                    # Use jnp.exp
+                    exp_val = jnp.exp(uncentered_intermd_result[idx])
+                    mlflow.log_metric(f'exp_param_{self.parameter_names[idx]}_value', float(exp_val), step=self.iteration)
+
+                if self.use_full_omega:
+                    # This reconstruction function must now use jnp
+                    omg, cor = self.reconstruct_omega_jax(uncentered_intermd_result)
+                    self.log_vals_names(omg[0].flatten(), omg[1])
+                    self.log_vals_names(cor[0].flatten(), cor[1])
+                else:
+                    if self.optimize_omega_on_log_scale:
+                        omega_idx = self.params_idx['omega']
+                        for idx in range(omega_idx[0], omega_idx[-1]):
+                            mlflow.log_metric(f'exp_param_{self.parameter_names[idx]}_value',
+                                            np.exp(uncentered_intermd_result[idx]),
+                                            step = self.iteration)
+                    
+                if self.optimize_sigma_on_log_scale:
+                    sigma_idx = self.params_idx['sigma']
+                    for idx in range(sigma_idx[0], sigma_idx[-1]):
+                        mlflow.log_metric(f'exp_param_{self.parameter_names[idx]}_value',
+                                        np.exp(uncentered_intermd_result[idx]),
+                                        step = self.iteration)
+            
+            def reconstruct_omega_jax(self, uncentered_intermd_result):
+                #update_idx = self.omega_unpack_idx # Assuming this is pre-computed
+                rows, cols = self.omega_unpack_idx
+                omegas_idx = self.params_idx['omega']
+                omegas = uncentered_intermd_result[omegas_idx[0]:omegas_idx[-1]]
+                
+                omegas_lchol = jnp.zeros((self.omega_diag_size, self.omega_diag_size))
+                # Assuming update_idx is a tuple of (row_indices, col_indices)
+                omegas_lchol = omegas_lchol.at[rows, cols ].set(omegas)
+                
+                if self.optimize_omega_on_log_scale:
+                    omegas_diag = jnp.exp(jnp.diag(omegas_lchol))
+                    omegas_lchol = omegas_lchol.at[jnp.diag_indices_from(omegas_lchol)].set(omegas_diag)
+                    
+                omegas2 = omegas_lchol @ omegas_lchol.T
+                omegas1_diag = jnp.sqrt(jnp.diag(omegas2))
+                sd_matrix = jnp.outer(omegas1_diag, omegas1_diag)
+                corr_matrix = omegas2 / (sd_matrix + 1e-9)
+                corr_log_idx = jnp.tril_indices_from(corr_matrix, k=-1)
+                
+                log_omegas = omegas1_diag
+                log_corr = corr_matrix[corr_log_idx]
+                
+                return (log_omegas, self.omega_diag_names), (log_corr, self.omega_ltri_nodiag_names)
+    
+            def log_vals_names(self, vals, names):
+                # Convert JAX array to NumPy for easy iteration
+                for val, name in zip(np.asarray(vals), names):
+                    mlflow.log_metric(name, val, step=self.iteration)
+
+            # --- Pytree registration methods ---
+            def _tree_flatten(self):
+                # All attributes are considered static metadata.
+                return (), self.__dict__
+
+            @classmethod
+            def _tree_unflatten(cls_local, aux_data, children):
+                # Recreate the instance from the static metadata.
+                instance = cls_local.__new__(cls_local)
+                instance.__dict__.update(aux_data)
+                return instance
+
+        # --- Register the newly defined class with JAX ---
+        jax.tree_util.register_pytree_node(
+            _JaxMLflowCallback,
+            _JaxMLflowCallback._tree_flatten,
+            _JaxMLflowCallback._tree_unflatten,
+        )
+
+        # Cache the registered class and return it
+        cls._registered_class = _JaxMLflowCallback
+        return _JaxMLflowCallback
+
+class JaxMLflowCallback:
+    # CHANGED: Added objective_fn and any required static_data to the constructor
+    def __init__(self, objective_fn,#, static_data,
+                 objective_name:str,
+                parameter_names,
+                params_idx,
+                omega_unpack_idx, 
+                omega_diag_size,
+                omega_diag_names,
+                omega_ltri_nodiag_names,
+                optimize_sigma_on_log_scale,
+                optimize_omega_on_log_scale,
+                init_params_for_scaling,
+                total_n_params,
+                opt_params_combined_params_idx,
+                fixed_params_combined_params_idx,
+                fixed_params,
+                 use_full_omega:bool,
+                ):
+        
+        self.objective_fn = objective_fn
+        #self.static_data = static_data
+        self.iteration = 0
+        
+        # It's good practice to ensure non-JAX arrays are standard NumPy arrays
+        # and that parameters used in JAX functions are JAX arrays.
+        self.fixed_params = jnp.asarray(fixed_params)
+        
+        self.objective_name = objective_name
+        self.parameter_names = parameter_names
+        self.params_idx = params_idx
+        self.omega_unpack_idx = omega_unpack_idx
+        self.omega_diag_size = omega_diag_size
+        self.optimize_sigma_on_log_scale = optimize_sigma_on_log_scale
+        self.optimize_omega_on_log_scale = optimize_omega_on_log_scale
+        self.use_full_omega = use_full_omega
+        self._cache_df = pd.DataFrame()
+        self.omega_diag_names = omega_diag_names
+        self.omega_ltri_nodiag_names = omega_ltri_nodiag_names
+        self.init_params_for_scaling = init_params_for_scaling
+        self.total_n_params = total_n_params
+        self.opt_params_combined_params_idx = opt_params_combined_params_idx
+        self.fixed_params_combined_params_idx = fixed_params_combined_params_idx
+
+
+    # CHANGED: The signature now takes `params` directly
+    def __call__(self, params):
+        """
+        Callback for jaxopt. `params` is the JAX array of current optimized parameters.
+        """
+        self.iteration += 1
+
+        # CHANGED: Reconstruct the full parameter vector using JAX operations
+        combined_params = jnp.zeros(self.total_n_params)
+        combined_params = combined_params.at[self.opt_params_combined_params_idx].set(params)
+        combined_params = combined_params.at[self.fixed_params_combined_params_idx].set(self.fixed_params)
+        
+        # CHANGED: Recalculate the objective value (loss)
+        current_fun_val = self.objective_fn(params,)# self.static_data)
+        
+        # mlflow.log_metric can handle JAX arrays, but converting to float is safest
+        mlflow.log_metric("objective_value", float(current_fun_val), step=self.iteration)
+        
+        # Use JAX functions for transformations
+        uncentered_intermd_result = combined_params + self.init_params_for_scaling
+        
+        # The logging logic can largely stay the same, but using jnp for math
+        # We can convert to NumPy for iteration as it's cleaner
+        for idx, val in enumerate(np.asarray(uncentered_intermd_result)):
+            mlflow.log_metric(f'param_{self.parameter_names[idx]}_value', val, step=self.iteration)
+
+        pop_idx = self.params_idx['pop']
+        for idx in range(pop_idx[0], pop_idx[-1]):
+            # Use jnp.exp
+            exp_val = jnp.exp(uncentered_intermd_result[idx])
+            mlflow.log_metric(f'exp_param_{self.parameter_names[idx]}_value', float(exp_val), step=self.iteration)
+
+        if self.use_full_omega:
+            # This reconstruction function must now use jnp
+            omg, cor = self.reconstruct_omega_jax(uncentered_intermd_result)
+            self.log_vals_names(omg[0].flatten(), omg[1])
+            self.log_vals_names(cor[0].flatten(), cor[1])
+        # ... (rest of your logic for sigma/omega follows the same pattern) ...
+
+    # CHANGED: This entire function is rewritten to use jnp
+    def reconstruct_omega_jax(self, uncentered_intermd_result):
+        update_idx = self.omega_unpack_idx # Assuming this is pre-computed
+        omegas_idx = self.params_idx['omega']
+        omegas = uncentered_intermd_result[omegas_idx[0]:omegas_idx[-1]]
+        
+        omegas_lchol = jnp.zeros((self.omega_diag_size, self.omega_diag_size))
+        # Assuming update_idx is a tuple of (row_indices, col_indices)
+        omegas_lchol = omegas_lchol.at[update_idx].set(omegas)
+        
+        if self.optimize_omega_on_log_scale:
+            omegas_diag = jnp.exp(jnp.diag(omegas_lchol))
+            omegas_lchol = omegas_lchol.at[jnp.diag_indices_from(omegas_lchol)].set(omegas_diag)
+            
+        omegas2 = omegas_lchol @ omegas_lchol.T
+        omegas1_diag = jnp.sqrt(jnp.diag(omegas2))
+        sd_matrix = jnp.outer(omegas1_diag, omegas1_diag)
+        corr_matrix = omegas2 / (sd_matrix + 1e-9)
+        corr_log_idx = jnp.tril_indices_from(corr_matrix, k=-1)
+        
+        log_omegas = omegas1_diag
+        log_corr = corr_matrix[corr_log_idx]
+        
+        return (log_omegas, self.omega_diag_names), (log_corr, self.omega_ltri_nodiag_names)
+    
+    def log_vals_names(self, vals, names):
+        # Convert JAX array to NumPy for easy iteration
+        for val, name in zip(np.asarray(vals), names):
+            mlflow.log_metric(name, val, step=self.iteration)

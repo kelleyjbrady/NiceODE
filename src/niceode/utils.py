@@ -3973,7 +3973,28 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             mlf_callback = MLflowCallback(objective_name=self.fit_objective_name_, 
                                           parameter_names=fit_result_summary['log_name'].values,
                                           params_idx = params_idx,  
-                                          omega_unpack_idx = self.omega_lower_chol_idx, 
+                                          omega_unpack_idx = self.omega_lower_chol_idx , 
+                                          omega_diag_size = self.n_subject_level_intercept_sds,
+                                          omega_diag_names=self.cb_omega_diag_names,
+                                            omega_ltri_nodiag_names= self.cb_omega_ltri_nodiag_names,
+                                          optimize_sigma_on_log_scale = self.optimize_sigma_on_log_scale,
+                                          optimize_omega_on_log_scale = self.optimize_omega_on_log_scale,
+                                          use_full_omega=self.use_full_omega,
+                                          init_params_for_scaling = init_params_for_scaling,
+                                          fixed_params = _fixed_params, 
+                                            fixed_params_combined_params_idx = fixed_params_combined_params_idx, 
+                                            opt_params_combined_params_idx = opt_params_combined_params_idx, 
+                                            total_n_params = _total_n_params
+                                          )
+            
+            JaxCallback = JaxMLflowCallbackFactory.get_class()
+            
+            jax_mlf_callback = JaxCallback(
+                                            objective_fn=_jax_objective_function,
+                                            objective_name=self.fit_objective_name_, 
+                                          parameter_names=fit_result_summary['log_name'].values,
+                                          params_idx = params_idx,  
+                                          omega_unpack_idx = list(zip(*self.omega_lower_chol_idx)), 
                                           omega_diag_size = self.n_subject_level_intercept_sds,
                                           omega_diag_names=self.cb_omega_diag_names,
                                             omega_ltri_nodiag_names= self.cb_omega_ltri_nodiag_names,
@@ -3992,8 +4013,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 use_logger = True
                 if use_logger:
                     callback = mlf_callback
+                    jax_callback = jax_mlf_callback
                 else:
                     callback = None
+                    jax_callback = None
                 if self.fit_jax_objective:
                     if optimize_with_scipy:
                         def scipy_value_wrapper(numpy_params):
