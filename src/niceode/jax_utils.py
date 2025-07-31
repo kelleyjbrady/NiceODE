@@ -1337,7 +1337,7 @@ def estimate_b_i_vmapped(
         J_masked = J * mask_expanded
         #mask J here, but what shape is it, how should `time_mask_y_i` be reshaped/tiled?
         _sigma2 = sigma2[0]
-        H_approx = (J_masked.T @ J_masked) / _sigma2
+        H_approx = 2*((J_masked.T @ J_masked) / _sigma2)
         
         L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
 
@@ -1348,7 +1348,7 @@ def estimate_b_i_vmapped(
         inv_omega2 = jax.scipy.linalg.cho_solve((L, True), identity)
 
         # 4. Compute the full Hessian needed for the FOCEi term
-        H_foce = H_approx + 2 * inv_omega2
+        H_foce = H_approx + (2 * inv_omega2)
         
         
         #hessian_matrix = jnp.ones_like(estimated_b_i)
