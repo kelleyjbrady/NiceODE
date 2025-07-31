@@ -1473,6 +1473,56 @@ def optimize_with_checkpoint_joblib(
 
     return result
 
+@dataclass
+class FitResult:
+    """
+    A data class to store the results of a fitting procedure.
+    """
+    fit_method: Literal['scipy', 'jaxopt', 'optax']
+    """The optimization library used for the fit."""
+
+    x: jnp.ndarray | np.ndarray
+    """The optimized parameters, as either a JAX or NumPy array."""
+
+    state: Tuple | OptimizeResult
+    """
+    The final state of the optimizer. This can be a tuple for stateful
+    optimizers like optax or a Scipy `OptimizeResult` object.
+    """
+    fun: np.float64|jnp.float64
+    
+    nfev:np.int32|jnp.int32
+    
+    nit:np.int32|jnp.int32
+    
+    success:bool
+    
+    b_i:jnp.ndarray | np.ndarray = field(init=False)
+    
+    pred_y:jnp.ndarray | np.ndarray = field(init=False)
+    
+    _loss_bundle:Tuple = field(init=False)
+    
+    neg2ll:np.float64|jnp.float64 = field(init=False)
+    
+    pred_df:pd.DataFrame = field(init=False)
+    
+    param_summary:pd.DataFrame = field(init=False)
+    
+    subject_ode_params_PRED: pd.DataFrame = field(init=False)
+    
+    subject_ode_params_IPRED: pd.DataFrame = field(init=False)
+    
+    subject_pk_params_PRED: pd.DataFrame = field(init=False)
+    
+    subject_pk_params_IPRED: pd.DataFrame = field(init=False)
+    
+    aic:np.float64|jnp.float64 = field(init=False)
+    
+    bic:np.float64|jnp.float64 = field(init=False)
+    
+    metrics:pd.DataFrame = field(init=False)
+
 @flax.struct.dataclass
 class ParamsIdx:
     pop: tuple
@@ -4045,9 +4095,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                             minimize_jac = None
                             minimize_f = scipy_value_wrapper
                         #fit the model                        
-                        scipy_opt = True
+                        scipy_opt = False
                         if scipy_opt:
-                            self.fit_result_ = minimize(
+                            fit_result_ = minimize(
                                     minimize_f,
                                     _opt_params,
                                     jac = minimize_jac,
@@ -4057,6 +4107,16 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                             },
                                     callback = callback,
                                 )
+                            self.fit_result_ = FitResult(
+                                fit_method = 'scipy', 
+                                x = fit_result_.x, 
+                                state = fit_result_, 
+                                fun = fit_result_.fun,
+                                nfev = fit_result_.nfev,
+                                nit = fit_result_.nit,
+                                success = fit_result_.success
+                            )
+
                         optax_opt = False
                         if optax_opt:
                             def run_optimization(initial_params):
@@ -4087,8 +4147,16 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                             
                             jitted_optimization = jax.jit(run_optimization)
 
-                            params, state, loss_val = jitted_optimization(jnp.array(_opt_params))
-                            return params, state, loss_val
+                            fitted_params, fitted_state, loss_val = jitted_optimization(jnp.array(_opt_params))
+                            self.fit_result_ = FitResult(
+                                fit_method = 'optax', 
+                                x = fitted_params, 
+                                state = fitted_state,
+                                fun = fitted_state.fun_val,
+                                nfev = fitted_state.num_fun_eval,
+                                nit = fitted_state.iter_num,
+                                success = fitted_state.success
+                            )
                         jaxopt_opt = False
                         if jaxopt_opt:
                             def run_optimization(opt_params):
@@ -4101,12 +4169,61 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                     max_stepsize=0.1, 
                                                     jit = not debug_fit
                                                     )
-                                res = solver.run(init_params = opt_params, bounds = bounds)
+                                res = solver.run(init_params = opt_params,
+                                                 bounds = bounds, 
+                                                 #callback = jax_callback
+                                                 )
                                 return res
                             #run_opt = jax.jit(run_optimization)
                             run_opt = run_optimization
                             res = run_opt(jnp.array(_opt_params))
-                            return res
+                            fitted_params, fitted_state = res
+                            self.fit_result_ = FitResult(
+                                fit_method = 'optax', 
+                                x = fitted_params, 
+                                state = fitted_state, 
+                                fun = fitted_state.fun_val,
+                                nfev = fitted_state.num_fun_eval,
+                                nit = fitted_state.iter_num,
+                                success = fitted_state.success
+                            )
+                        jaxopt_scipy_opt = True
+                        if jaxopt_scipy_opt:
+                            def run_optimization(opt_params):
+                                bounds = (jnp.full_like(opt_params, -8.0), 
+                                        jnp.full_like(opt_params, 8.0))
+                                solver = jaxopt.ScipyBoundedMinimize(
+                                                        method = 'L-BFGS-B',
+                                                        dtype = np.float64,
+                                                        fun = _jax_obj_and_grad, 
+                                                       maxiter=2000,
+                                                       tol=self.optimizer_tol,
+                                                    value_and_grad=True, 
+                                                    #max_stepsize=0.1, 
+                                                    jit = not debug_fit,
+                                                    callback = jax_callback
+                                                    )
+                                res = solver.run(init_params = opt_params,
+                                                 bounds = bounds, 
+                                                 )
+                                return res
+                            #run_opt = jax.jit(run_optimization)
+                            log_init_param_metrics = True
+                            if log_init_param_metrics:
+                                jax_callback.iteration = -1
+                                jax_callback(jnp.array(_opt_params))
+                            run_opt = run_optimization
+                            res = run_opt(jnp.array(_opt_params, dtype = jnp.float64))
+                            fitted_params, fitted_state = res
+                            self.fit_result_ = FitResult(
+                                fit_method = 'optax', 
+                                x = fitted_params, 
+                                state = fitted_state,
+                                fun = fitted_state.fun_val,
+                                nfev = fitted_state.num_fun_eval,
+                                nit = fitted_state.iter_num,
+                                success = fitted_state.success
+                            )
                         #use fitted params to fit the objective one more time, this time always computing neg2ll
                         #and returning useful things such as the b_i, per subject loss etc
                         #loss_bundle[0] is always the loss, be it neg2ll or surrogate neg2ll
