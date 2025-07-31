@@ -1335,8 +1335,14 @@ def estimate_b_i_vmapped(
         )
 
         # 2. Set up an optax optimizer
-        learning_rate = 0.1  # Tune as needed
-        optimizer = optax.adam(learning_rate)
+        learning_rate = 0.08  # Tune as needed
+        num_inner_steps = 200 # Tune as needed
+        lr_schedule = optax.exponential_decay(
+        init_value=learning_rate,
+        transition_steps=num_inner_steps,
+        decay_rate=0.1 
+    )
+        optimizer = optax.adam(learning_rate=lr_schedule)
         opt_state = optimizer.init(initial_b_i)
         
         
@@ -1347,19 +1353,49 @@ def estimate_b_i_vmapped(
         omega_is_near_zero = jnp.diag(jnp.sqrt(omega2)) < 1e-5 
         
         def update_step(i, state_tuple):
-            params, opt_state = state_tuple
-            grads = grad_fn(params)
-            #sanitize the grads for the whole inner optmization for the current iteration 
-            #based on the heuristic calculated above (`omega_is_near_zero`)
-            safe_grads = jnp.where(omega_is_near_zero, 0.0, grads)
-            updates, opt_state = optimizer.update(safe_grads, opt_state, params)
-            new_params = optax.apply_updates(params, updates)
-            return new_params, opt_state
+            params, opt_state, has_converged, loss_history, norm_history = state_tuple
+            
+            def do_update(operand):
+                params, opt_state, lh, nh = operand
+                grads = grad_fn(params)
+                
+                #sanitize the grads for the whole inner optmization for the current iteration 
+                #based on the heuristic calculated above (`omega_is_near_zero`)
+                safe_grads = jnp.where(omega_is_near_zero, 0.0, grads)
+                grad_norm = jnp.linalg.norm(safe_grads)
+                converged = grad_norm < 1e-2
+                updates, opt_state = optimizer.update(safe_grads, opt_state, params)
+                new_params = optax.apply_updates(params, updates)
+                
+                current_loss = obj_fn(new_params)
+                new_lh = lh.at[i].set(current_loss)
+                new_nh = nh.at[i].set(grad_norm)
+                return new_params, opt_state, converged, new_lh, new_nh
+            def do_nothing(operand):
+                params, opt_state, lh, nh = operand
+                #current_loss = obj_fn(params)
+                new_lh = lh.at[i].set(0.0)
+                new_nh = nh.at[i].set(0.0)
+                #jax.debug.print("Inner Optmizer Converged")
+                return params, opt_state, True, new_lh, new_nh
+            
+            return jax.lax.cond(has_converged,
+                do_nothing,
+                do_update,
+                (params, opt_state, loss_history, norm_history))
+            
         
-        num_inner_steps = 100 # Tune as needed
-        estimated_b_i, opt_state = jax.lax.fori_loop(
-            0, num_inner_steps, update_step, (initial_b_i, opt_state)
+        loss_history_init = jnp.zeros(num_inner_steps)
+        gradnorm_history_init = jnp.zeros(num_inner_steps)
+        initial_state = (initial_b_i, opt_state, False, loss_history_init, gradnorm_history_init)
+        estimated_b_i, opt_state, has_converged, loss_history, norm_history = jax.lax.fori_loop(
+            0, num_inner_steps, update_step, initial_state
         )
+        #jax.debug.print("""Inner Optimization finished with convergence status: {s}
+        #                loss history: {h}
+        #                norm history: {n}
+        #                """, s = has_converged, h = loss_history, n = norm_history)
+        
         def predict_fn(b_i_for_pred):
             # This logic is copied from your FOCE_inner_loss_fn
             b_i_work = jnp.zeros_like(pop_coeff)
@@ -1691,6 +1727,8 @@ class FOCEi_approx_neg2ll_loss_jax():
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
+    inner_optimizer_tol = None, 
+    inner_optimizer_maxiter = None,
     **kwargs,
     ):
         print("Compiling `FOCEi_approx_neg2ll_loss_jax`")
@@ -1715,6 +1753,8 @@ class FOCEi_approx_neg2ll_loss_jax():
             jittable_estimate_foc_i=foc_interaction_term_chol, 
             jittable_sum_neg2ll_terms=focei_sum_neg2ll_terms,
             use_surrogate_neg2ll = use_surrogate_neg2ll,
+            inner_optimizer_tol = inner_optimizer_tol, 
+            inner_optimizer_maxiter = inner_optimizer_maxiter,
             
         )
         
@@ -1747,6 +1787,8 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER_ALT():
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
+    inner_optimizer_tol = None, 
+    inner_optimizer_maxiter = None,
     **kwargs,
     ):
         print("Compiling `FOCE_approx_neg2ll_loss_jax`")
@@ -1771,6 +1813,8 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER_ALT():
             jittable_estimate_foc_i=foc_interaction_term_passthrough, 
             jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
             use_surrogate_neg2ll = use_surrogate_neg2ll,
+            inner_optimizer_tol = inner_optimizer_tol, 
+            inner_optimizer_maxiter = inner_optimizer_maxiter,
             
         )
         
@@ -1803,6 +1847,8 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER():
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
+    inner_optimizer_tol = None, 
+    inner_optimizer_maxiter = None,
     **kwargs,
     ):
         print("Compiling `FOCE_approx_neg2ll_loss_jax`")
@@ -1827,6 +1873,8 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER():
             jittable_estimate_foc_i=foc_interaction_term_passthrough, 
             jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
             use_surrogate_neg2ll = use_surrogate_neg2ll,
+            inner_optimizer_tol = inner_optimizer_tol, 
+            inner_optimizer_maxiter = inner_optimizer_maxiter,
             
         )
         
@@ -1859,6 +1907,8 @@ class FOCE_approx_neg2ll_loss_jax_fdxINNER():
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
+    inner_optimizer_tol = None, 
+    inner_optimizer_maxiter = None,
     **kwargs,
     ):
         print("Compiling `FOCE_approx_neg2ll_loss_jax`")
@@ -1883,6 +1933,8 @@ class FOCE_approx_neg2ll_loss_jax_fdxINNER():
             jittable_estimate_foc_i=foc_interaction_term_passthrough, 
             jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
             use_surrogate_neg2ll = use_surrogate_neg2ll,
+            inner_optimizer_tol = inner_optimizer_tol, 
+            inner_optimizer_maxiter = inner_optimizer_maxiter,
             
         )
         
@@ -1915,6 +1967,8 @@ class FOCEi_approx_neg2ll_loss_jax_fdxOUTER():
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
+    inner_optimizer_tol = None, 
+    inner_optimizer_maxiter = None,
     **kwargs,
     ):
         print("Compiling `FOCEi_approx_neg2ll_loss_jax`")
@@ -1939,6 +1993,8 @@ class FOCEi_approx_neg2ll_loss_jax_fdxOUTER():
             jittable_estimate_foc_i=foc_interaction_term_chol, 
             jittable_sum_neg2ll_terms=focei_sum_neg2ll_terms,
             use_surrogate_neg2ll = use_surrogate_neg2ll,
+            inner_optimizer_tol = inner_optimizer_tol, 
+            inner_optimizer_maxiter = inner_optimizer_maxiter,
             
         )
         
@@ -1973,6 +2029,8 @@ class FOCE_approx_neg2ll_loss_jax_fdxOUTER():
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
+    inner_optimizer_tol = None, 
+    inner_optimizer_maxiter = None,
     **kwargs,
     ):
         print("Compiling `FOCE_approx_neg2ll_loss_jax`")
@@ -1997,6 +2055,8 @@ class FOCE_approx_neg2ll_loss_jax_fdxOUTER():
             jittable_estimate_foc_i=foc_interaction_term_passthrough, 
             jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
             use_surrogate_neg2ll = use_surrogate_neg2ll,
+            inner_optimizer_tol = inner_optimizer_tol, 
+            inner_optimizer_maxiter = inner_optimizer_maxiter,
             
         )
         
@@ -2029,6 +2089,8 @@ class FOCE_approx_neg2ll_loss_jax():
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
+    inner_optimizer_tol = None, 
+    inner_optimizer_maxiter = None,
     **kwargs,
     ):
         print("Compiling `FOCE_approx_neg2ll_loss_jax`")
@@ -2053,6 +2115,8 @@ class FOCE_approx_neg2ll_loss_jax():
             jittable_estimate_foc_i=foc_interaction_term_passthrough, 
             jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
             use_surrogate_neg2ll = use_surrogate_neg2ll,
+            inner_optimizer_tol = inner_optimizer_tol, 
+            inner_optimizer_maxiter = inner_optimizer_maxiter,
             
         )
         
@@ -2085,6 +2149,8 @@ class FO_approx_neg2ll_loss_jax():
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
+    inner_optimizer_tol = None, 
+    inner_optimizer_maxiter = None,
     **kwargs,
     ):
         print("Compiling `FO_approx_neg2ll_loss_jax`")
@@ -2109,6 +2175,8 @@ class FO_approx_neg2ll_loss_jax():
             jittable_estimate_foc_i=foc_interaction_term_passthrough, 
             jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
             use_surrogate_neg2ll = use_surrogate_neg2ll,
+            inner_optimizer_tol = inner_optimizer_tol, 
+            inner_optimizer_maxiter = inner_optimizer_maxiter,
         )
     
         return loss
@@ -2138,6 +2206,8 @@ def approx_neg2ll_loss_jax(
     jittable_estimate_foc_i,
     jittable_sum_neg2ll_terms, 
     use_surrogate_neg2ll,
+    inner_optimizer_tol, 
+    inner_optimizer_maxiter,
 ):
     print("Compiling `approx_neg2ll_loss_jax`")
     #jax.debug.print("theta shape: {s}", s = theta.shape )
@@ -2213,7 +2283,8 @@ def approx_neg2ll_loss_jax(
                                                 compiled_augdyn_ivp_solver = compiled_augdyn_ivp_solver_novmap_arr,
                                                 pop_coeff_w_bi_idx = pop_coeff_for_J_idx,
                                                 use_surrogate_neg2ll = use_surrogate_neg2ll,
-                                               
+                                                inner_optimizer_tol = inner_optimizer_tol,
+                                                inner_optimizer_maxiter = inner_optimizer_maxiter,
                                                
                                                )
     #jax.debug.print("b_i shape: {s}", s = b_i.shape )
