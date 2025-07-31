@@ -23,7 +23,7 @@ import ast
 from scipy.linalg import block_diag, cho_factor, cho_solve
 from scipy.optimize import approx_fprime
 from line_profiler import profile
-from typing import Literal, Tuple
+from typing import Literal, Tuple, Union
 import scipy
 from scipy.optimize._minimize import MINIMIZE_METHODS_NEW_CB
 import joblib as jb
@@ -44,7 +44,7 @@ from mlflow.data.pandas_dataset import from_pandas
 from .mlflow_utils import (get_class_source_without_docstrings,
                                   generate_class_contents_hash, 
                                   get_function_source_without_docstrings_or_comments, 
-                                  MLflowCallback)
+                                  MLflowCallback, JaxMLflowCallbackFactory)
 from typing import Type
 from .pd_templates import InitValsPdCols
 from warnings import warn
@@ -60,6 +60,8 @@ from .model_assesment import construct_profile_ci, get_robust_ci_foce_ndt
 import re
 import optax
 import jaxopt
+from scipy.optimize import OptimizeResult
+
 
 
 
@@ -3998,11 +4000,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                              generate_class_contents_hash(ode_class_str))
             mlflow.log_param('ode_class_name', self._pk_model_class.__name__)
             
-            loss_str = get_function_source_without_docstrings_or_comments(mlflow_loss)
-            mlflow.log_text(loss_str, 'loss_definition.py')
-            mlflow.log_param('loss_definition_hash',
-                             generate_class_contents_hash(loss_str))
-            mlflow.log_param('loss_definition_name', mlflow_loss.__name__)
+            
 
             mlflow.log_param('scipy_version', scipy.__version__)
             mlflow.log_param('scipy_minimize_method', self.minimize_method)
@@ -4020,6 +4018,14 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     self.fit_objective_name_ = f"surrogate_{mlflow_loss.__name__}__OBJF"
                 else:
                     self.fit_objective_name_ = mlflow_loss.__name__
+                
+                loss_str = get_function_source_without_docstrings_or_comments(mlflow_loss)
+                mlflow.log_text(loss_str, 'loss_definition.py')
+                mlflow.log_param('loss_definition_hash',
+                                generate_class_contents_hash(loss_str))
+                mlflow.log_param('loss_definition_name', mlflow_loss.__name__)
+                    
+                
             mlf_callback = MLflowCallback(objective_name=self.fit_objective_name_, 
                                           parameter_names=fit_result_summary['log_name'].values,
                                           params_idx = params_idx,  
@@ -4233,17 +4239,17 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                          self.fit_result_.x, 
                                                          
                                                          )
-                        self.fit_result_b_i_ = deepcopy(loss_bundle[1][0])
-                        self.fit_result_predictions_ = deepcopy(loss_bundle[1][1][0][self.time_mask])
-                        self.fit_result_loss_bundle_ = deepcopy(loss_bundle)
-                        self.fit_result_final_objective_val_ = self.fit_result_.fun
-                        self.fit_result_final_neg2ll_ = deepcopy(loss_bundle[0])
+                        self.fit_result_.b_i = deepcopy(loss_bundle[1][0])
+                        self.fit_result_.pred_y = deepcopy(loss_bundle[1][1][0][self.time_mask])
+                        self.fit_result_._loss_bundle = deepcopy(loss_bundle)
+                        #self.fit_result_final_objective_val_ = self.fit_result_.fun
+                        self.fit_result_.neg2ll = deepcopy(loss_bundle[0])
                         #neg2ll_i = per_subject_neg2ll(self.fit_result_.x, loss_bundle=loss_bundle)
                         #`fit_predict_params` is a dict with keys `pop_coeff` sigma2 omega2 `theta`
                         self.fit_result_predict_input_params_ = predict_unpack(self.fit_result_.x)
                         predict_params = deepcopy(loss_static_kwargs)
                         predict_params.update(self.fit_result_predict_input_params_)
-                        predict_params['b_i'] = self.fit_result_b_i_
+                        predict_params['b_i'] = self.fit_result_.b_i
                         me_alt_preds, me_padded_pred_and_mask, me_fitted_subject_coeff = predict_with_params(**predict_params)
                         predict_params['b_i'] = None
                         no_me_alt_preds, no_me_padded_pred_and_mask, no_me_fitted_subject_coeff = predict_with_params(**predict_params)
@@ -4263,6 +4269,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         fit_preds_df["weighted_indiv_pred_resid__IWRES"] = (fit_preds_df["indiv_pred_resid__IRES"] 
                                                                             / weight)
                         
+                        self.fit_result_.pred_df = fit_preds_df.copy()
                         
                         
                         if ci_level is not None:
@@ -4288,24 +4295,28 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         #the correlations between the b_i drawn from those omega dists
                         report_omega2 = self.fit_result_predict_input_params_['omega2']
                         omega_diag = np.sqrt(np.diag(report_omega2))
-                        sd_matrix = np.outer(omega_diag, omega_diag)
-                        corr_matrix = np.copy(report_omega2 / (sd_matrix + 1e-9))
-                        frs_omega_corr = np.copy(report_omega2)
-                        np.fill_diagonal(frs_omega_corr, omega_diag)
-                        corr_idx = np.tril_indices_from(corr_matrix, k = -1)
-                        frs_omega_corr[corr_idx] = corr_matrix[corr_idx]
-                        omega_corr_idx = np.tril_indices_from(frs_omega_corr)
-                        frs_omega_corr = frs_omega_corr[omega_corr_idx].flatten()
-                        frs_params.extend(frs_omega_corr.tolist())
+                        if self.use_full_omega:
+                            sd_matrix = np.outer(omega_diag, omega_diag)
+                            corr_matrix = np.copy(report_omega2 / (sd_matrix + 1e-9))
+                            frs_omega_corr = np.copy(report_omega2)
+                            np.fill_diagonal(frs_omega_corr, omega_diag)
+                            corr_idx = np.tril_indices_from(corr_matrix, k = -1)
+                            frs_omega_corr[corr_idx] = corr_matrix[corr_idx]
+                            omega_corr_idx = np.tril_indices_from(frs_omega_corr)
+                            frs_omega_corr = frs_omega_corr[omega_corr_idx].flatten()
+                            frs_params.extend(frs_omega_corr.tolist())
+                        else:
+                            frs_params.extend(omega_diag.tolist())
                         
                         #the theta coeffs have already been uncentered, but are still on log scale
                         frs_params.extend(self.fit_result_predict_input_params_['theta'].tolist())
+                        
                         mlflow.log_metric(f"final_{self.fit_objective_name_}", self.fit_result_.fun)
-                        mlflow.log_metric(f"final_{self.loss_summary_name}", self.fit_result_final_neg2ll_)
+                        mlflow.log_metric(f"final_{self.loss_summary_name}", self.fit_result_.neg2ll)
                         mlflow.log_metric('final_nfev', self.fit_result_.nfev)
                         mlflow.log_metric('final_nit', self.fit_result_.nit)
                         mlflow.log_metric('final_success', bool(self.fit_result_.success))
-                        mlflow.log_text(str(self.fit_result_), 'OptimizeResult.txt')
+                        mlflow.log_text(str(self.fit_result_.state), 'OptimizeResult.txt')
                         fit_result_summary_data = {
                             'fitted_param_val':frs_params, 
                             #"fitted_param_val_alt":self.fit_result_ci_['log_params'] if ci_level is not None else None,
@@ -4340,6 +4351,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         #When the loss is not FOCEi the cols in this for omega related rows and sigma should be 
                         #set to None as they are not reliable and not worth thinking about deeply 
                         self.fit_result_summary_ = fit_result_summary.copy()
+                        self.fit_result_.param_summary = fit_result_summary.copy()
                         
                         mlflow.log_table(self.fit_result_summary_, 'fit_result_summary.json')
                         
@@ -4352,28 +4364,34 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         fitted_subject_ode_params["no_me"][self.pk_args_diffeq] = no_me_fitted_subject_coeff
                         fitted_subject_ode_params["with_me"][self.pk_args_diffeq] = me_fitted_subject_coeff
                         self.fit_result_subject_ode_params_ = deepcopy(fitted_subject_ode_params)
+                        self.fit_result_.subject_ode_params_PRED = fitted_subject_ode_params["no_me"].copy()
+                        self.fit_result_.subject_ode_params_IPRED = fitted_subject_ode_params["with_me"].copy()
+                        
                         
                         summary_pk_stats = {
-                            "no_me": (self._fitted_subject_ode_params["no_me"]
+                            "no_me": (self.fit_result_.subject_ode_params_PRED
                                 .apply(self.pk_model_class.summary_calculations,
                                                                         axis = 1, result_type = 'expand')), 
-                            "with_me": (self._fitted_subject_ode_params["with_me"]
+                            "with_me": (self.fit_result_.subject_ode_params_IPRED
                                 .apply(self.pk_model_class.summary_calculations,
                                                                         axis = 1, result_type = 'expand'))
                         }
                         self.fit_result_summary_pk_stats_ = deepcopy(summary_pk_stats)
+                        self.fit_result_.subject_pk_params_PRED = summary_pk_stats["no_me"].copy()
+                        self.fit_result_.subject_pk_params_IPRED = summary_pk_stats["with_me"].copy()
+                        
                         
                         n_p = len(self.fit_result_.x)
-                        self.fit_result_aic_ = self.fit_result_final_neg2ll_ + 2*(n_p)
-                        self.fit_result_bic_ = self.fit_result_final_neg2ll_ + (n_p) * loss_static_kwargs["unpadded_y_len"] 
+                        self.fit_result_.aic = self.fit_result_.neg2ll + 2*(n_p)
+                        self.fit_result_.bic = self.fit_result_.neg2ll + (n_p) * loss_static_kwargs["unpadded_y_len"] 
                         
                         run_summary = pd.Series(dtype = pd.Float64Dtype())
                         run_summary['OBJF'] = self.fit_result_.fun
-                        run_summary['Negative 2 Log-Likelihood'] =  self.fit_result_final_neg2ll_
-                        run_summary['Log-Likelihood'] = self.fit_result_final_neg2ll_ / -2.0
-                        run_summary['AIC'] = self.fit_result_aic_
-                        run_summary['AIC'] = self.fit_result_bic_
-                        self.fit_result_summary_metrics_ = run_summary.copy()
+                        run_summary['Negative 2 Log-Likelihood'] =  self.fit_result_.neg2ll
+                        run_summary['Log-Likelihood'] = self.fit_result_.neg2ll / -2.0
+                        run_summary['AIC'] = self.fit_result_.aic
+                        run_summary['BIC'] = self.fit_result_.bic
+                        self.fit_result_.metrics = run_summary.copy()
                 else:
                     objective_function = partial(
                         self._objective_function2,
