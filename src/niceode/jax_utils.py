@@ -1840,6 +1840,63 @@ class FOCE_approx_neg2ll_loss_jax_fdxINNER():
     def grad_method():
         return jax.grad, jax.value_and_grad
 
+class FOCEi_approx_neg2ll_loss_jax_fdxOUTER():
+    
+    def __init__(self):
+        self.loss_val_idx = 0
+        self.grad_val_idx = 0
+    
+    @staticmethod
+    def loss_fn(
+    pop_coeff, 
+    sigma2, 
+    omega2, 
+    theta, 
+    theta_data,
+    padded_y,
+    unpadded_y_len,
+    time_mask_y,
+    time_mask_J,
+    compiled_augdyn_ivp_solver_arr,
+    compiled_augdyn_ivp_solver_novmap_arr,
+    compiled_ivp_solver_arr,
+    compiled_ivp_solver_novmap_arr,
+    ode_t0_vals,
+    pop_coeff_for_J_idx,
+    use_surrogate_neg2ll,
+    **kwargs,
+    ):
+        print("Compiling `FOCEi_approx_neg2ll_loss_jax`")
+        loss = approx_neg2ll_loss_jax(
+            pop_coeff = pop_coeff, 
+            sigma2 = sigma2, 
+            omega2 = omega2, 
+            theta = theta, 
+            theta_data = theta_data,
+            padded_y = padded_y,
+            unpadded_y_len = unpadded_y_len,
+            time_mask_y = time_mask_y,
+            time_mask_J = time_mask_J,
+            compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
+            compiled_augdyn_ivp_solver_novmap_arr = compiled_augdyn_ivp_solver_novmap_arr,
+            compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+            compiled_ivp_solver_novmap_arr = compiled_ivp_solver_novmap_arr,
+            ode_t0_vals = ode_t0_vals,
+            pop_coeff_for_J_idx = pop_coeff_for_J_idx,
+            compiled_estimate_b_i_foce = estimate_b_i_vmapped,
+            compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
+            jittable_estimate_foc_i=foc_interaction_term_chol, 
+            jittable_sum_neg2ll_terms=focei_sum_neg2ll_terms,
+            use_surrogate_neg2ll = use_surrogate_neg2ll,
+            
+        )
+        
+        return loss
+    @staticmethod
+    def grad_method():
+        return partial(fdx.fgrad, offsets = fdx.Offset(accuracy=3)), partial(fdx.value_and_fgrad, offsets = fdx.Offset(accuracy=3))
+
+
 
 class FOCE_approx_neg2ll_loss_jax_fdxOUTER():
     
