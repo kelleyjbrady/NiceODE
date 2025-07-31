@@ -759,7 +759,7 @@ def estimate_b_i_vmapped_fdx(
                     jnp.sum(g_H * y_H) +
                     jnp.sum(g_loss * y_loss))
 
-        grad_fn = fdx.fgrad(scalar_loss, argnums=(0, 1, 2, 3))
+        grad_fn = fdx.fgrad(scalar_loss, argnums=(0, 1, 2, 3), offsets=fdx.Offset(accuracy=2))
         grads_tuple = grad_fn(data_contrib_i, pop_coeff, sigma2, omega2)
         grad_data_contrib, grad_pop_coeff, grad_sigma2, grad_omega2 = grads_tuple
 
@@ -1615,15 +1615,20 @@ def estimate_b_i_fo_passthrough(b_i, **kwargs):
     return b_i
 
 def sum_neg2ll_terms_passthrough(neg2ll, **kwargs):
-    return neg2ll
+    grad_objective = neg2ll
+    loss_objective = neg2ll
+    return grad_objective, loss_objective
 
 def focei_sum_neg2ll_terms(neg2ll, interaction_term, **kwargs):
-    return neg2ll + interaction_term
+    grad_objective = neg2ll + interaction_term
+    loss_objective = neg2ll
+    return grad_objective, loss_objective
 
 class FOCEi_approx_neg2ll_loss_jax():
     
     def __init__(self):
-        pass
+        self.loss_val_idx = 0
+        self.grad_val_idx = 0
     
     @staticmethod
     def loss_fn(
@@ -1678,7 +1683,8 @@ class FOCEi_approx_neg2ll_loss_jax():
 class FOCE_approx_neg2ll_loss_jax_iftINNER_ALT():
     
     def __init__(self):
-        pass
+        self.loss_val_idx = 0
+        self.grad_val_idx = 0
     
     @staticmethod
     def loss_fn(
@@ -1733,7 +1739,8 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER_ALT():
 class FOCE_approx_neg2ll_loss_jax_iftINNER():
     
     def __init__(self):
-        pass
+        self.loss_val_idx = 0
+        self.grad_val_idx = 0
     
     @staticmethod
     def loss_fn(
@@ -1788,7 +1795,8 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER():
 class FOCE_approx_neg2ll_loss_jax_fdxINNER():
     
     def __init__(self):
-        pass
+        self.loss_val_idx = 0
+        self.grad_val_idx = 0
     
     @staticmethod
     def loss_fn(
@@ -1901,7 +1909,8 @@ class FOCEi_approx_neg2ll_loss_jax_fdxOUTER():
 class FOCE_approx_neg2ll_loss_jax_fdxOUTER():
     
     def __init__(self):
-        pass
+        self.loss_val_idx = 0
+        self.grad_val_idx = 0
     
     @staticmethod
     def loss_fn(
@@ -1951,12 +1960,13 @@ class FOCE_approx_neg2ll_loss_jax_fdxOUTER():
         return loss
     @staticmethod
     def grad_method():
-        return fdx.fgrad, fdx.value_and_fgrad
+        return partial(fdx.fgrad, offsets = fdx.Offset(accuracy=3)), partial(fdx.value_and_fgrad, offsets = fdx.Offset(accuracy=3))
 
 class FOCE_approx_neg2ll_loss_jax():
     
     def __init__(self):
-        pass
+        self.loss_val_idx = 0
+        self.grad_val_idx = 0
     
     @staticmethod
     def loss_fn(
@@ -2011,7 +2021,8 @@ class FOCE_approx_neg2ll_loss_jax():
 class FO_approx_neg2ll_loss_jax():
     
     def __init__(self):
-        pass
+        self.loss_val_idx = 0
+        self.grad_val_idx = 0
     
     @staticmethod
     def loss_fn(
@@ -2207,7 +2218,7 @@ def approx_neg2ll_loss_jax(
         unpadded_y_len,
         use_surrogate_neg2ll=use_surrogate_neg2ll,
     )
-    outer_loss_combined = jittable_sum_neg2ll_terms(neg2ll = outer_loss, interaction_term = interaction_term)
+    outer_objective_grad, outer_objective_loss = jittable_sum_neg2ll_terms(neg2ll = outer_loss, interaction_term = interaction_term)
     #jax.debug.print("neg2_ll: {neg2_ll}", neg2_ll=neg2_ll)
     #jax.debug.print("is_bad_state: {is_bad_state}", is_bad_state=is_bad_state)
     b_i_approx = compiled_estimate_b_i_fo(padded_J=J, padded_residuals=masked_residuals, 
@@ -2215,8 +2226,17 @@ def approx_neg2ll_loss_jax(
                                    omegas2=omega2, sigma2=sigma2, b_i = b_i
                                    )
     large_penalty = 1e12
-    outer_loss_out = jnp.where(is_bad_state, large_penalty, outer_loss_combined)
+    outer_objective_grad_out = jnp.where(is_bad_state, large_penalty, outer_objective_grad)
+    outer_objective_loss_out = jnp.where(is_bad_state, large_penalty, outer_objective_loss)
     per_subject_loss = (per_subject_outer_loss, interaction_term_i, unpadded_y_len_batch)
     #jax.debug.print("Outer Loss Out val: {s}", s = neg2_ll_out)
-    return outer_loss_out, (b_i_approx, (padded_pred_y, padded_full_preds), model_coeffs_i, per_subject_loss)
+    value_out = {
+        'outer_objective_grad':outer_objective_grad_out,
+        'b_i':b_i_approx, 
+        'padded_pred_y':padded_pred_y,
+        'padded_pred_full':padded_full_preds,
+        'model_coeffs_i':model_coeffs_i, 
+        'per_subject_loss':per_subject_loss
+    }
+    return outer_objective_loss_out, value_out
 
