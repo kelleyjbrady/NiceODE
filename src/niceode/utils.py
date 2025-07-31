@@ -4239,8 +4239,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                          self.fit_result_.x, 
                                                          
                                                          )
-                        self.fit_result_.b_i = deepcopy(loss_bundle[1][0])
-                        self.fit_result_.pred_y = deepcopy(loss_bundle[1][1][0][self.time_mask])
+                        self.fit_result_.b_i = deepcopy(loss_bundle[1]['b_i'])
+                        self.fit_result_.pred_y = deepcopy(loss_bundle[1]['padded_pred_y'][self.time_mask])
                         self.fit_result_._loss_bundle = deepcopy(loss_bundle)
                         #self.fit_result_final_objective_val_ = self.fit_result_.fun
                         self.fit_result_.neg2ll = deepcopy(loss_bundle[0])
