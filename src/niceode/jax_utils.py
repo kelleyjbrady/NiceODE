@@ -535,6 +535,7 @@ def create_jax_objective(
     
     initialized_loss = jittable_loss() 
     loss_idx, grad_idx = initialized_loss.loss_val_idx, initialized_loss.grad_val_idx
+    grad_is_fdx = initialized_loss.grad_is_fdx
     jittable_loss_fn = initialized_loss.loss_fn
     _grad ,_value_and_grad = initialized_loss.grad_method()       
     
@@ -569,20 +570,72 @@ def create_jax_objective(
         
         return loss_bundle
     
-    def _jax_loss_and_grad_focei(opt_params, ):
+    def _jax_objective_function_focei(opt_params, ):
         
-        dynamic_loss_kwargs = p_jittable_param_unpack_predict(opt_params=opt_params,
-                                                                         )
-        
-        f = _value_and_grad(jittable_loss_p_fit, has_aux = True)
-        
-        loss_bundle, grad = f(
+        def f(opt_params):
+            dynamic_loss_kwargs = p_jittable_param_unpack_predict(opt_params=opt_params,
+                                                                            )
+            
+
+            
+            loss_bundle = jittable_loss_p_fit(
                 **dynamic_loss_kwargs
             )
+            return loss_bundle
+        if jit_returns:
+            f_work = jax.jit(f)
+        else:
+            f_work = f
+        loss_bundle = f_work(opt_params)
+        #jax.debug.print("Iteration ")
+        loss = loss_bundle[1]['outer_objective_loss']
         
+        return loss
+    
+    def _jax_loss_and_grad_focei(opt_params, ):
+        
+        def f(opt_params):
+            dynamic_loss_kwargs = p_jittable_param_unpack_predict(opt_params=opt_params,
+                                                                            )
+            
+
+            
+            loss_bundle = jittable_loss_p_fit(
+                **dynamic_loss_kwargs
+            )
+            return loss_bundle
+        if jit_returns:
+            f_work = jax.jit(f)
+        else:
+            f_work = f
+        fvg = _value_and_grad(f_work, has_aux = True)
+        loss_bundle, grad = fvg(opt_params)
+        #jax.debug.print("Iteration ")
         loss = loss_bundle[1]['outer_objective_loss']
         
         return loss, grad
+    
+    def _jax_grad_focei(opt_params, ):
+        
+        def f(opt_params):
+            dynamic_loss_kwargs = p_jittable_param_unpack_predict(opt_params=opt_params,
+                                                                            )
+            
+
+            
+            loss_bundle = jittable_loss_p_fit(
+                **dynamic_loss_kwargs
+            )
+            return loss_bundle
+        if jit_returns:
+            f_work = jax.jit(f)
+        else:
+            f_work = f
+        grad_f = _grad(f_work, has_aux = False)
+        grad = grad_f(opt_params)
+
+        
+        return grad
     
     def _jax_objective_function_predict_focei(opt_params, ):
         
@@ -613,23 +666,39 @@ def create_jax_objective(
     #**dynamic_opt_kwargs                 
     #
     if jit_returns:
-        fit_obj = jax.jit(_jax_objective_function)
-        fit_grad = jax.jit(_grad(fit_obj)) if _grad is not None else None
+        
         if loss_idx == grad_idx:
-            fit_obj_and_grad = jax.jit(_value_and_grad(fit_obj)) if _grad is not None else None
+            fit_obj = jax.jit(_jax_objective_function)
             predict_objective = jax.jit(_jax_objective_function_predict)
+            if grad_is_fdx:
+                fit_grad = _grad(fit_obj) if _grad is not None else None
+                fit_obj_and_grad = _value_and_grad(fit_obj) if _grad is not None else None
+            else:
+                fit_grad = jax.jit(_grad(fit_obj)) if _grad is not None else None
+                fit_obj_and_grad = jax.jit(_value_and_grad(fit_obj)) if _grad is not None else None
+            
         else:
-            fit_obj_and_grad = jax.jit(_jax_loss_and_grad_focei) if _grad is not None else None
+            fit_obj = jax.jit(_jax_objective_function_focei)
             predict_objective = jax.jit(_jax_objective_function_predict_focei)
+            if grad_is_fdx:
+                fit_grad = _jax_grad_focei if _grad is not None else None
+                fit_obj_and_grad = _jax_loss_and_grad_focei if _grad is not None else None
+            else:
+                fit_grad = jax.jit(_jax_grad_focei) if _grad is not None else None
+                fit_obj_and_grad = jax.jit(_jax_loss_and_grad_focei) if _grad is not None else None
+                
             
         predict_unpack = jax.jit(p_jittable_param_unpack_predict)
     else:
-        fit_obj = _jax_objective_function
-        fit_grad = _grad(fit_obj) if _grad is not None else None
+        
         if loss_idx == grad_idx:
+            fit_obj = _jax_objective_function
+            fit_grad = _grad(fit_obj) if _grad is not None else None
             fit_obj_and_grad = _value_and_grad(fit_obj) if _grad is not None else None
             predict_objective = _jax_objective_function_predict
         else:
+            fit_obj = _jax_objective_function_focei
+            fit_grad = _jax_grad_focei if _grad is not None else None
             fit_obj_and_grad = _jax_loss_and_grad_focei if _grad is not None else None
             predict_objective = _jax_objective_function_predict_focei
         
@@ -1708,6 +1777,7 @@ class FOCEi_approx_neg2ll_loss_jax():
     def __init__(self):
         self.loss_val_idx = 0
         self.grad_val_idx = 1
+        self.grad_is_fdx = True
     
     @staticmethod
     def loss_fn(
@@ -1768,6 +1838,7 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER_ALT():
     def __init__(self):
         self.loss_val_idx = 0
         self.grad_val_idx = 0
+        self.grad_is_fdx = False
     
     @staticmethod
     def loss_fn(
@@ -1828,6 +1899,7 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER():
     def __init__(self):
         self.loss_val_idx = 0
         self.grad_val_idx = 0
+        self.grad_is_fdx = False
     
     @staticmethod
     def loss_fn(
@@ -1888,6 +1960,7 @@ class FOCE_approx_neg2ll_loss_jax_fdxINNER():
     def __init__(self):
         self.loss_val_idx = 0
         self.grad_val_idx = 0
+        self.grad_is_fdx = False
     
     @staticmethod
     def loss_fn(
@@ -1948,6 +2021,7 @@ class FOCEi_approx_neg2ll_loss_jax_fdxOUTER():
     def __init__(self):
         self.loss_val_idx = 1
         self.grad_val_idx = 0
+        self.grad_is_fdx = True
     
     @staticmethod
     def loss_fn(
@@ -2004,12 +2078,12 @@ class FOCEi_approx_neg2ll_loss_jax_fdxOUTER():
         return partial(fdx.fgrad, offsets = fdx.Offset(accuracy=3)), partial(fdx.value_and_fgrad, offsets = fdx.Offset(accuracy=3))
 
 
-
 class FOCE_approx_neg2ll_loss_jax_fdxOUTER():
     
     def __init__(self):
         self.loss_val_idx = 0
         self.grad_val_idx = 0
+        self.grad_is_fdx = True
     
     @staticmethod
     def loss_fn(
@@ -2070,6 +2144,7 @@ class FOCE_approx_neg2ll_loss_jax():
     def __init__(self):
         self.loss_val_idx = 0
         self.grad_val_idx = 0
+        self.grad_is_fdx = True
     
     @staticmethod
     def loss_fn(
@@ -2130,6 +2205,7 @@ class FO_approx_neg2ll_loss_jax():
     def __init__(self):
         self.loss_val_idx = 0
         self.grad_val_idx = 0
+        self.grad_is_fdx = False
     
     @staticmethod
     def loss_fn(
@@ -2332,7 +2408,7 @@ def approx_neg2ll_loss_jax(
         unpadded_y_len,
         use_surrogate_neg2ll=use_surrogate_neg2ll,
     )
-    outer_objective_grad, outer_objective_loss = jittable_sum_neg2ll_terms(neg2ll = outer_loss, interaction_term = interaction_term)
+    outer_objective_for_grad, outer_objective_for_loss = jittable_sum_neg2ll_terms(neg2ll = outer_loss, interaction_term = interaction_term)
     #jax.debug.print("neg2_ll: {neg2_ll}", neg2_ll=neg2_ll)
     #jax.debug.print("is_bad_state: {is_bad_state}", is_bad_state=is_bad_state)
     b_i_approx = compiled_estimate_b_i_fo(padded_J=J, padded_residuals=masked_residuals, 
@@ -2340,17 +2416,17 @@ def approx_neg2ll_loss_jax(
                                    omegas2=omega2, sigma2=sigma2, b_i = b_i
                                    )
     large_penalty = 1e12
-    outer_objective_grad_out = jnp.where(is_bad_state, large_penalty, outer_objective_grad)
-    outer_objective_loss_out = jnp.where(is_bad_state, large_penalty, outer_objective_loss)
+    outer_objective_for_grad_out = jnp.where(is_bad_state, large_penalty, outer_objective_for_grad)
+    outer_objective_for_loss_out = jnp.where(is_bad_state, large_penalty, outer_objective_for_loss)
     per_subject_loss = (per_subject_outer_loss, interaction_term_i, unpadded_y_len_batch)
     #jax.debug.print("Outer Loss Out val: {s}", s = neg2_ll_out)
     value_out = {
-        'outer_objective_loss':outer_objective_loss_out,
+        'outer_objective_loss':outer_objective_for_loss_out,
         'b_i':b_i_approx, 
         'padded_pred_y':padded_pred_y,
         'padded_pred_full':padded_full_preds,
         'model_coeffs_i':model_coeffs_i, 
         'per_subject_loss':per_subject_loss
     }
-    return outer_objective_grad_out, value_out
+    return outer_objective_for_grad_out, value_out
 

@@ -2886,7 +2886,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             
             diffrax_solver = Kvaerno5()
             #diffrax_solver = Tsit5()
-            diffrax_step_ctrl = PIDController(rtol=1e-6, atol=1e-6)
+            diffrax_step_ctrl = PIDController(rtol=self.ode_solver_tol, atol=self.ode_solver_tol)
             dt0 = 0.1
             
             partial_solve_ivp = partial(
@@ -2915,7 +2915,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             diffrax_solver = Kvaerno5()
             #diffrax_solver = Tsit5()
             
-            diffrax_step_ctrl = PIDController(rtol=1e-6, atol=1e-6)
+            diffrax_step_ctrl = PIDController(rtol=self.ode_solver_tol, atol=self.ode_solver_tol)
             dt0 = 0.1
             
             partial_solve_ivp = partial(
@@ -4061,7 +4061,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                           fixed_params = _fixed_params, 
                                             fixed_params_combined_params_idx = fixed_params_combined_params_idx, 
                                             opt_params_combined_params_idx = opt_params_combined_params_idx, 
-                                            total_n_params = _total_n_params
+                                            total_n_params = _total_n_params, 
                                           )
             if perform_fit:
                 #self.fit_jax_objective = True
@@ -4282,6 +4282,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                                                                 init_params_for_scaling=unpacker_static_kwargs['init_params_for_scaling']
                                                                 )
                             alpha, alpha_label = alpha_info
+                        else:
+                            alpha_label = '95'
                         #the pop coeffs have already been uncentered, but are still on log scale
                         frs_params = self.fit_result_predict_input_params_['pop_coeff'].tolist()
                         

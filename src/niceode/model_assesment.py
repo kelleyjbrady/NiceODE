@@ -144,10 +144,10 @@ def find_profile_bound(objective_func, param_index,
 def estimate_per_subject_loss(params_jax, use_surrogate_neg2ll = True, _jax_objective_function_predict_ = None, loss_bundle = None):
     if loss_bundle is None:
         loss_bundle = _jax_objective_function_predict_(params_jax)
-    per_subject_loss_components = loss_bundle[1][-1]
+    per_subject_loss_components = loss_bundle[1]['per_subject_loss']
     log_det_i = per_subject_loss_components[0][0]
     quadratic_i = per_subject_loss_components[0][1]
-    inner_loss_i = per_subject_loss_components[1]
+    inner_loss_i = per_subject_loss_components[1] #this is the interaction term, not the inner loss
     n_t_i = per_subject_loss_components[2]
     if use_surrogate_neg2ll:
         n_t_scaler_i = 0.0
@@ -177,7 +177,7 @@ def get_robust_ci_foce_ndt(
     final_params_np = scipy_result.x
     
     # 1. Extract the Hessian ("Bread") from the optimizer result
-    H_inv_scipy = scipy_result.hess_inv.todense()
+    #H_inv_scipy = scipy_result.hess_inv.todense()
     #H = np.linalg.inv(H_inv) # Keep as numpy for now
 
     # --- Calculate the "Filling" (G) using numdifftools ---
@@ -253,7 +253,8 @@ def get_robust_ci_foce_ndt(
     
     std_errors_true_scale = params_true_scale * std_errors
     
-    #For now lets focus on the ndt ci's for pop coeffs and thetas
+    #This is very slow and should be rewritted.
+    # Also probably better to just use MCMC if you want these
     boot_additional_ci = False
     if boot_additional_ci:
         param_samples = np.random.multivariate_normal(
