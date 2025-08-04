@@ -5,6 +5,7 @@ from functools import partial
 import numdifftools as nd
 import optax
 import finitediffx as fdx
+import warnings
 
 
 def _predict_jax_jacobian(
@@ -612,6 +613,7 @@ def create_jax_objective(
         loss_bundle, grad = fvg(opt_params)
         #jax.debug.print("Iteration ")
         loss = loss_bundle[1]['outer_objective_loss']
+        #loss = loss_bundle[0]
         
         return loss, grad
     
@@ -1773,8 +1775,17 @@ def focei_sum_neg2ll_terms(neg2ll, interaction_term, **kwargs):
     return grad_objective, loss_objective
 
 class FOCEi_approx_neg2ll_loss_jax():
+    """FOCEi loss for use as the `jax_loss` init argument for `CompartmentalModel`. 
+    This version DOES NOT support `jax.grad` or finite differences via `finitediffx.fgrad`
     
+    """
     def __init__(self):
+        warnings.warn(f"""The `jax_loss` {self.__name__} only supports gradient estimation with Scipy's finite difference.
+                      `FOCEi_approx_neg2ll_loss_jax_fdxOUTER` supports gradient estimation with finitediffx. There is 
+                      currently no implementation of FOCEi supporting jax.grad and thus this objective is quite slow. 
+                      You may be better off simply fitting a fully bayesian pymc model. The time to fit with pymc
+                      will be about the same as this objective, and the richness of the pymc result is much greater.
+                      """)
         self.loss_val_idx = 0
         self.grad_val_idx = 1
         self.grad_is_fdx = True
@@ -1834,11 +1845,17 @@ class FOCEi_approx_neg2ll_loss_jax():
         return None, None
 
 class FOCE_approx_neg2ll_loss_jax_iftINNER_ALT():
+    """FOCE loss for debugging ONLY. You should not use this loss. 
     
-    def __init__(self):
-        self.loss_val_idx = 0
-        self.grad_val_idx = 0
-        self.grad_is_fdx = False
+    """
+    def __init__(self, bypass_notimplemented = False):
+
+        if bypass_notimplemented:
+            self.loss_val_idx = 0
+            self.grad_val_idx = 0
+            self.grad_is_fdx = False
+        else:
+            raise NotImplementedError(f"{self.__name__} is for debugging only. Use `FOCE_approx_neg2ll_loss_jax_fdxOUTER` or `FOCE_approx_neg2ll_loss_jax`")
     
     @staticmethod
     def loss_fn(
@@ -1895,12 +1912,16 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER_ALT():
         return jax.grad, jax.value_and_grad
 
 class FOCE_approx_neg2ll_loss_jax_iftINNER():
+    """FOCE loss for debugging ONLY. You should not use this loss. 
     
-    def __init__(self):
-        self.loss_val_idx = 0
-        self.grad_val_idx = 0
-        self.grad_is_fdx = False
-    
+    """
+    def __init__(self, bypass_notimplemented = False):
+        if bypass_notimplemented:
+            self.loss_val_idx = 0
+            self.grad_val_idx = 0
+            self.grad_is_fdx = False
+        else:
+            raise NotImplementedError(f"{self.__name__} is for debugging only. Use `FOCE_approx_neg2ll_loss_jax_fdxOUTER` or `FOCE_approx_neg2ll_loss_jax`")
     @staticmethod
     def loss_fn(
     pop_coeff, 
@@ -1956,11 +1977,19 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER():
         return jax.grad, jax.value_and_grad
 
 class FOCE_approx_neg2ll_loss_jax_fdxINNER():
+    """FOCE loss where finite differences is used to estimate the gradient of the inner optimizer.
+    This allows `jax.grad` to be used to estimate the gradient of the outer loss, but this version is 
+    still much slower than `FOCE_approx_neg2ll_loss_jax_fdxOUTER` and `FOCE_approx_neg2ll_loss_jax`.
     
-    def __init__(self):
-        self.loss_val_idx = 0
-        self.grad_val_idx = 0
-        self.grad_is_fdx = False
+    """
+    def __init__(self, bypass_notimplemented = False):
+        
+        if bypass_notimplemented:
+            self.loss_val_idx = 0
+            self.grad_val_idx = 0
+            self.grad_is_fdx = False
+        else:
+            raise NotImplementedError(f"`{self.__name__}` is for debugging or research. Use `FOCE_approx_neg2ll_loss_jax_fdxOUTER` or `FOCE_approx_neg2ll_loss_jax`" )
     
     @staticmethod
     def loss_fn(
@@ -2017,7 +2046,13 @@ class FOCE_approx_neg2ll_loss_jax_fdxINNER():
         return jax.grad, jax.value_and_grad
 
 class FOCEi_approx_neg2ll_loss_jax_fdxOUTER():
+    """FOCEi loss where finite differences (`finitediffx`) is used to estimate the gradient of the outer optimizer.
+    FOCE loss is used to determine if an optmize step provides an improvement. FOCEi loss is used to estimate the gradient
+    of the outer optimizer. Using FOCEi loss for both tends to result in the a loss vs iteration trajectory which 
+    decreases rapidly for the first several iterations but later the loss bounces up and down each iteration leading to the 
+    optmizer never finishing.  
     
+    """
     def __init__(self):
         self.loss_val_idx = 1
         self.grad_val_idx = 0
@@ -2079,7 +2114,10 @@ class FOCEi_approx_neg2ll_loss_jax_fdxOUTER():
 
 
 class FOCE_approx_neg2ll_loss_jax_fdxOUTER():
+    """FOCE loss where finite differences (`finitediffx`) is used to estimate the gradient of the outer optimizer.
     
+    
+    """
     def __init__(self):
         self.loss_val_idx = 0
         self.grad_val_idx = 0
@@ -2140,7 +2178,10 @@ class FOCE_approx_neg2ll_loss_jax_fdxOUTER():
         return partial(fdx.fgrad, offsets = fdx.Offset(accuracy=3)), partial(fdx.value_and_fgrad, offsets = fdx.Offset(accuracy=3))
 
 class FOCE_approx_neg2ll_loss_jax():
+    """FOCE loss where Scipy's finite difference algorithm is used to estimate the gradient of the outer optimizer.
     
+    
+    """
     def __init__(self):
         self.loss_val_idx = 0
         self.grad_val_idx = 0
@@ -2201,7 +2242,9 @@ class FOCE_approx_neg2ll_loss_jax():
         return None, None
     
 class FO_approx_neg2ll_loss_jax():
+    """FO loss where the gradient of the outer optmizer is estimated with `jax.grad`. 
     
+    """
     def __init__(self):
         self.loss_val_idx = 0
         self.grad_val_idx = 0
@@ -2262,12 +2305,12 @@ class FO_approx_neg2ll_loss_jax():
         return jax.grad, jax.value_and_grad
 
 def approx_neg2ll_loss_jax(
-    pop_coeff, 
-    sigma2, 
-    omega2, 
-    theta, 
-    theta_data,
-    padded_y,
+    pop_coeff:jnp.ndarray, 
+    sigma2:jnp.ndarray, 
+    omega2:jnp.ndarray, 
+    theta:jnp.ndarray, 
+    theta_data:jnp.ndarray,
+    padded_y:jnp.ndarray,
     unpadded_y_len,
     time_mask_y,
     time_mask_J,
@@ -2285,6 +2328,63 @@ def approx_neg2ll_loss_jax(
     inner_optimizer_tol, 
     inner_optimizer_maxiter,
 ):
+    """Constructor function for FO, FOCE and FOCEi. Implements FOCEi with various parameterizations 
+    defined by the Jax loss classes turn the FOCEi into FO or FOCE by substituting functions utilized 
+    in  `approx_neg2ll_loss_jax` with passthroughs. For example, for FO, `compiled_estimate_b_i_foce`
+    is a passthrough which returns zeros in the shape of the `b_i`, that way the taylor expansion is done 
+    about zero and thus FO is implemented. For FOCE and FOCEi the same function (`compiled_estimate_b_i_foce`)
+    estimates the b_i using an inner optmizer and then the taylor exapansion is done about the current 
+    best b_i rather than zero, thus implementing FOCE or FOCEi. 
+
+    Args:
+        pop_coeff (jnp.ndarray): A vector of population coeffcients corresponding to the arguements to the 
+        in use ODE class. 
+        sigma2 (jnp.ndarray): A vector with one entry representing the additive (constant) model error
+        omega2 (jnp.ndarray): A variance covariance matrix representing the variance of the subject-level 
+        effects (diag) and their covariance (off-diag)  
+        theta (jnp.ndarray): A vector representing the 'fixed' effects of per ODE coeff independant variables.
+        theta_data (jnp.ndarray): The data which the `theta` are multiplied by to produce per ODE coeff fixed linear effects  
+        padded_y (:jnp.ndarray): An array of shape (n_subjects, n_global_timepoints). A processed version of the 
+        dependant variable where each subject (row) as has same number of timepoints (cols). Per-subject 'missing'
+        timepoints are padded with zero.
+        unpadded_y_len (_type_): The total length of y without padding
+        time_mask_y (_type_): A boolean mask with shape (n_subjects, n_global_timepoints) used to mask the predictions 
+        from the ivp solver such that per subject 'missing' timepoints are zero and thus match the `padded_y`. 
+        time_mask_J (_type_): A boolean mask with shape (n_subjects, n_global_timepoints, n_subjectlevel_effects) used to mask the jacobian 
+        representing d(pred)/d(b_i)
+        compiled_augdyn_ivp_solver_arr (_type_): A pre-baked `diffrax.diffeqsolve` for vmapping over a matrix of 
+        ODE coeffs (n_subjects, n_ode_coeffs) and ODE t0 values (n_subjects, n_ode_outputs). Used in the OUTER loss
+        function to make per iteration predictions given the current best parameters. Simulataneously estimates d(pred)/d(b_i)
+        for use in the taylor expansion for approxmating neg2ll.  
+        compiled_augdyn_ivp_solver_novmap_arr (_type_):  pre-baked `diffrax.diffeqsolve` for solving ONE ivp with for one subject's 
+        ODE coeffs (n_ode_coeffs,) and ODE t0 values (n_ode_outputs). Used in the INNER loss
+        function to make ONE prediction following sucessful inner optimiztion. Simulataneously estimates d(pred)/d(b_i)
+        used to approxiate d2(loss)/d2(b_i) for use in the FOCEi interaction term.
+        compiled_ivp_solver_arr (_type_): A pre-baked `diffrax.diffeqsolve` for vmapping over a matrix of 
+        ODE coeffs (n_subjects, n_ode_coeffs) and ODE t0 values (n_subjects, n_ode_outputs). DOES NOT estimate d(pred)/d(b_i)
+        for use in the taylor expansion for approxmating neg2ll. Currently NOT USED.   
+        compiled_ivp_solver_novmap_arr (_type_): pre-baked `diffrax.diffeqsolve` for solving ONE ivp with for one subject's 
+        ODE coeffs (n_ode_coeffs,) and ODE t0 values (n_ode_outputs). Used in the INNER loss
+        function each inner loss iteration to make predictions given the current best estimate of a subject's b_i.
+        DOES NOT estimate d(pred)/d(b_i) used to approxiate d2(loss)/d2(b_i) for use in the FOCEi interaction term.
+        ode_t0_vals (_type_): A matrix (n_subjects, n_ode_outputs) containing the t0 estimates for each ODE output. 
+        pop_coeff_for_J_idx (_type_): A vector (n_subject_level_effects) denoting which of the population coeff have been
+        parameterized with subject-level effects. For example, say there are three ODE coeffs and the ones with index 0 and 2 have 
+        subject level effects, this vector would be [0,2].  
+        compiled_estimate_b_i_foce (_type_): A jax jittable function for estimating the subject level effects  (b_i, aka eta) for 
+        FOCE and FOCEi. When FO is used, thus function always returns a matrix of zeros with shape (n_subjects, n_subjectlevel_effects). 
+        compiled_estimate_b_i_fo (_type_): A jax jittable function for post-hoc estimation of b_i following an FO fit using the
+        empirical bayes estimate. When FOCE or FOCEi are used, this function returns the b_i estimated by `compiled_estimate_b_i_foce`
+        jittable_estimate_foc_i (_type_): A jax jittable function for estimating the FOCEi interaction term from the hessian of 
+        `compiled_estimate_b_i_foce`. When FOCE or FO is used, this function is a passthrough.
+        jittable_sum_neg2ll_terms (_type_): For FOCE and FO, returns a tuple (outer_loss, outer_loss). For FOCEi, returns a tuple
+        ()
+        use_surrogate_neg2ll (_type_): If surrogate neg2ll should be the optimizaiton objective. The surrogate aligns with the nlmixr2 OBJF
+        inner_optimizer_tol (_type_): `tol` argument for the inner FOCE optimizer. Currently a PLACEHOLDER which does not impact inner 
+        optimizer functioning.   
+        inner_optimizer_maxiter (_type_): `maxiters` for the inner FOCE optimizer. Currently a PLACEHOLDER which does not impact inner 
+        optimizer functioning.   
+    """
     print("Compiling `approx_neg2ll_loss_jax`")
     #jax.debug.print("theta shape: {s}", s = theta.shape )
     n_subjects = time_mask_y.shape[0]
