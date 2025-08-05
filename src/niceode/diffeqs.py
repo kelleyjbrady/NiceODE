@@ -4,6 +4,9 @@ import numba
 import warnings
 import jax.numpy as jnp
 import numpy as np
+import jax
+import sympy
+from .sympy_utils import SymbolicODE
 
 nca_docstring = """
     Relevant NCA Estimated Parameters:
@@ -695,7 +698,46 @@ class OneCompartmentAbsorption(PKBaseODE):
         # "cl": Clearance (volume/time). (See OneCompartmentConc)
         # "vd": Volume of distribution (volume). (See OneCompartmentConc)
         return summary
+    
+    @staticmethod
+    def sympy_ode():
+        #define symbolic variables
+        t = sympy.Symbol('t')
+        ka, cl, vd = sympy.symbols('ka cl vd')
+        params_sym = [ka, cl, vd]
+        n_params = len(params_sym)
+
+        central_mass = sympy.Function('central_mass')(t)
+        gut_mass = sympy.Function('gut_mass')(t)
+        states_sym = [central_mass, gut_mass]
+        n_states = len(states_sym)
         
+        #define ode system
+        ode_expressions = sympy.Matrix([
+            ka * gut_mass - (cl / vd) * central_mass,
+            -ka * gut_mass
+        ])
+        
+        # 1st-order Jacobians
+        J_y = ode_expressions.jacobian(states_sym) # df/dy
+        J_p = ode_expressions.jacobian(params_sym) # df/dp
+
+        # 2nd-order derivatives needed for dH/dt
+        dJ_y_dp_list = [sympy.diff(J_y, p) for p in params_sym]
+        dJ_p_dp_list = [sympy.diff(J_p, p) for p in params_sym]
+        
+        return SymbolicODE(
+            expressions=ode_expressions,
+            states=states_sym,
+            params=params_sym,
+            time=t,
+            n_states=n_states,
+            n_params=n_params,
+            J_y=J_y,
+            J_p=J_p,
+            dJ_y_dp_list=dJ_y_dp_list,
+            dJ_p_dp_list=dJ_p_dp_list
+        )
 
 
 def one_compartment_absorption(t, y, ka, cl, vd):

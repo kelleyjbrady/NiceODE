@@ -61,6 +61,7 @@ import re
 import optax
 import jaxopt
 from scipy.optimize import OptimizeResult
+from .sympy_utils import generate_aug_dynamcis_ode_sympy
 
 
 
@@ -1533,7 +1534,7 @@ class ParamsIdx:
     theta: tuple
 
 class CompartmentalModel(RegressorMixin, BaseEstimator):
-    #@profile
+
     def __init__(
         self,
         model_name: str = None,
@@ -1581,6 +1582,56 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         jit_jax_loss = True, 
         fit_jax_objective = True,
     ):
+        """Workhorse class for parameterizing and fitting the parameters of an ODE to data.
+
+        Args:
+            model_name (str, optional): The name of the model which will be used for logging the model result. Defaults to None.
+            subject_id_col (str, optional): The column in the Pandas Dataframe which will be provided to this class's
+            `fit` method corresponding to the unique subject identifier. Defaults to "SUBJID".
+            conc_at_time_col (str, optional): The column in the Pandas Dataframe which will be provided to this class's
+            `fit` method corresponding to the dependant variable. Defaults to "DV".
+            dose_col (str, optional): The column in the Pandas Dataframe which will be provided to this class's
+            `fit` method corresponding to the dose given at t0. Defaults to 'AMT'.
+            time_col (str, optional): The column in the Pandas Dataframe which will be provided to this class's
+            `fit` method corresponding to the timepoints in the study. Defaults to "TIME".
+            solve_ode_at_time_col (str, optional): The column in the Pandas Dataframe which will be provided to this class's
+            `fit` method deliniating if a given timepoint should be used to cacluate the loss of predictions. When the dosing
+            method is not PO, the initial timepoint (t0) `DV` is probably not known, so the row containing the t0 DV
+            should have this column set to False. Defaults to None.
+            pk_model_class (Type[PKBaseODE], optional): The ODE for which the coeffcients will be determined. Defaults to None.
+            ode_t0_cols (List[ODEInitVals], optional): The column(s) in the Pandas Dataframe which will be provided to this class's
+            `fit` method corresponding to the t0 values of the ODE. These columns MUST be in the same order as the ODE output. Defaults to None.
+            ode_t0_time_val (int | float, optional): The time corresponding to t0 for all subjects. Defaults to 0.
+            population_coeff (List[PopulationCoeffcient], optional): A list of `PopulationCoeffcient`, each describing the parameterization
+            of the ODE coeffcients. Defaults to [ PopulationCoeffcient("k", 0.6), PopulationCoeffcient("vd", 2.0), ].
+            dep_vars (Dict[str, List[ObjectiveFunctionColumn]], optional): A dictionary with keys corresponding to the `population_coeff` and values
+            which are lists of `ObjectiveFunctionColumn` describing the fixed effects for each ODE coeff. Defaults to None.
+            dep_vars2 (List[ObjectiveFunctionColumn], optional): Currently does not do anything. Defaults to None.
+            no_me_loss_function (_type_, optional): Deprecated. Defaults to neg2_log_likelihood_loss.
+            no_me_loss_params (dict, optional): Deprecated. Defaults to {}.
+            no_me_loss_needs_sigma (bool, optional): Deprecated. Defaults to True.
+            me_loss_function (_type_, optional): Deprecated. Defaults to FO_approx_ll_loss.
+            loss_summary_name (str, optional): The name of the objective calculated by the `jax_loss` if `use_surrogate_neg2ll` is False.
+            Ensures that following fit there will be a variable with a common name between FO, FOCE, and FOCEi fits. Defaults to "neg2_loglikelihood".
+            model_error_sigma (PopulationCoeffcient, optional): Parameterization of additive (constant) model error. Defaults to PopulationCoeffcient( "sigma", optimization_init_val=0.2, optimization_lower_bound=1e-6, optimization_upper_bound=20, ).
+            model_error2 (ModelError, optional): Deprecated. Defaults to None.
+            significant_digits (int, optional): The number of significant digits which should be used to estimate the parameters of the ODE. Used by this 
+            classes `_initialize_tols` to determine the tol of the outer optmizer and ivp solvers. Defaults to 3.
+            verbose (bool, optional): Deprecated. Defaults to False.
+            minimize_method (Literal[, optional): Deprecated l-bfgs-b is always used. Defaults to "l-bfgs-b".
+            batch_id (uuid.UUID, optional): _description_. Defaults to None.
+            model_id (uuid.UUID, optional): _description_. Defaults to None.
+            use_full_omega (bool, optional): _description_. Defaults to True.
+            optimize_omega_on_log_scale (bool, optional): _description_. Defaults to True.
+            optimize_sigma_on_log_scale (bool, optional): _description_. Defaults to True.
+            stiff_ode (bool, optional): _description_. Defaults to True.
+            center_log_scale_params (bool, optional): _description_. Defaults to True.
+            use_surrogate_neg2ll (bool, optional): _description_. Defaults to False.
+            jax_loss (_type_, optional): _description_. Defaults to None.
+            jit_jax_ivp_solver (bool, optional): _description_. Defaults to True.
+            jit_jax_loss (bool, optional): _description_. Defaults to True.
+            fit_jax_objective (bool, optional): _description_. Defaults to True.
+        """
         #defaults related to ODE solving
         self.fit_jax_objective = fit_jax_objective
         self.jax_loss = jax_loss
@@ -2505,7 +2556,6 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         max_steps=diffrax_max_steps,
         saveat=SaveAt(ts=teval),
         stepsize_controller=diffrax_step_ctrl,
-        # NOTE: The adjoint argument is no longer needed here
         )
         
         y_trajectory, J_trajectory = solution.ys
@@ -2516,6 +2566,50 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             args
         )
         return y_trajectory, concentrations, J_trajectory, J_conc_trajectory
+    
+    @staticmethod
+    def _solve_2ndorder_augdyn_ivp_jax_worker(y0, args,
+                       tspan=None,
+                       teval=None,
+                       dt0 = None,
+                       aug_ode_func = None,
+                       mass_to_depvar = None,
+                       diffrax_solver=None, 
+                       diffrax_step_ctrl = None,    
+                       diffrax_max_steps = None, 
+                       n_states = None,
+                       n_params = None
+                       ):
+        print("Compiling `_solve_2ndorder_augdyn_ivp_jax_worker`")
+        
+        S0 = jnp.zeros((n_states, n_params))
+        H0 = jnp.zeros((n_params, n_states, n_params)) # The 3D tensor for H
+        
+        augmented_y0 = (y0, S0, H0) 
+        ode_term = ODETerm(aug_ode_func)
+        
+        solution = diffeqsolve(
+        terms=ode_term,
+        solver=diffrax_solver,
+        t0=tspan[0],
+        t1=tspan[1],
+        dt0=dt0,
+        y0=augmented_y0, # Use the augmented initial state
+        args=args,
+        max_steps=diffrax_max_steps,
+        saveat=SaveAt(ts=teval),
+        stepsize_controller=diffrax_step_ctrl,
+        )
+        
+        y_trajectory, S_trajectory, H_trajectory = solution.ys
+        S_conc = S_trajectory[:, 0, :]   
+        H_conc = H_trajectory[:, :, 0, :]
+        central_mass_trajectory = y_trajectory[:, 0]
+        concentrations = mass_to_depvar(
+            central_mass_trajectory, 
+            args
+        )
+        return y_trajectory, concentrations, S_trajectory, S_conc, H_trajectory, H_conc
     
     @staticmethod
     def _solve_ivp_jax_worker(y0, args,
@@ -2909,6 +3003,37 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             self.jax_augdyn_ivp_stiff_compiled_solver_ = jit_vmapped_solve
             self.jax_augdyn_ivp_stiff_solver_is_compiled = True
             print('Sucessfully complied augmented dynamics stiff ODE solver')
+            
+        #second order augmented dynamics ode
+        aug_dyn_2nd_order_ode = self.pk_model_class.sympy_ode()
+        aug_ode_func = generate_aug_dynamcis_ode_sympy(aug_dyn_2nd_order_ode)
+            
+        diffrax_solver = Kvaerno5()
+        #diffrax_solver = Tsit5()
+        diffrax_step_ctrl = PIDController(rtol=self.ode_solver_tol, atol=self.ode_solver_tol)
+        dt0 = 0.1
+        
+        partial_solve_ivp = partial(
+            self._solve_2ndorder_augdyn_ivp_jax_worker,
+            aug_ode_func = aug_ode_func,
+            mass_to_depvar = self.pk_model_class.diffrax_mass_to_depvar,
+            tspan=tspan_jax,
+            teval=teval_jax,
+            diffrax_solver=diffrax_solver,
+            diffrax_step_ctrl = diffrax_step_ctrl,
+            dt0 = dt0, 
+            diffrax_max_steps = maxsteps, 
+            n_states = aug_dyn_2nd_order_ode.n_states,
+            n_params = aug_dyn_2nd_order_ode.n_params
+            
+        )
+        vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
+        jit_vmapped_solve = jax.jit(vmapped_solve)
+        self.jax_2ndorder_augdyn_ivp_stiff_jittable_novmap_ = partial_solve_ivp
+        self.jax_2ndorder_augdyn_ivp_stiff_jittable_ = vmapped_solve
+        self.jax_2ndorder_augdyn_ivp_stiff_compiled_solver_ = jit_vmapped_solve
+        self.jax_2ndorder_augdyn_ivp_stiff_solver_is_compiled = True
+        print('Sucessfully complied augmented dynamics stiff ODE solver')
         
         
         if not (self.jax_ivp_stiff_solver_is_compiled):
@@ -3897,6 +4022,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             "ode_t0_vals": np.array(self.ode_t0_vals.to_numpy(dtype=np.float64)),
             "compiled_augdyn_ivp_solver_arr":self.jax_augdyn_ivp_stiff_jittable_,
             "compiled_augdyn_ivp_solver_novmap_arr":self.jax_augdyn_ivp_stiff_jittable_novmap_,
+            "compiled_2ndorder_augdyn_ivp_solver_arr":  self.jax_2ndorder_augdyn_ivp_stiff_jittable_,
+            "compiled_2ndorder_augdyn_ivp_solver_novmap_arr":  self.jax_2ndorder_augdyn_ivp_stiff_jittable_novmap_,
             "compiled_ivp_solver_arr":self.jax_ivp_stiff_jittable_,
             "compiled_ivp_solver_novmap_arr": self.jax_ivp_stiff_jittable_novmap_, 
             "use_surrogate_neg2ll": self.use_surrogate_neg2ll,

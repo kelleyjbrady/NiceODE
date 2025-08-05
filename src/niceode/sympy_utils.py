@@ -31,25 +31,26 @@ def generate_aug_dynamcis_ode_sympy(symbolic_ode:SymbolicODE):
     # Dynamics for S
     dSdt = symbolic_ode.J_y * S + symbolic_ode.J_p
     
-    # Dynamics for H
-    # d(H_k)/dt = J_y*H_k + (sum_j d(J_y)/dy_j*S_j)*S_k + d(J_p)/dp_k
-    # This requires a tensor contraction. For this simple model, we can
-    # implement it directly.
+
+    #Dynamics for H
     dHdt_list = []
     for k in range(symbolic_ode.n_params):
         H_k = H_list[k]
         dJp_dpk = symbolic_ode.dJ_p_dp_list[k]
         
-        # This term represents the tensor contraction: (d(J_y)/dp_k) . S
-        # It sums the effect of each state's sensitivity on the Jacobian.
-        contraction_term = sympy.zeros(symbolic_ode.n_states, symbolic_ode.n_params)
+        # This loop correctly calculates d(J_y)/dp_k via the chain rule.
+        # Let's rename the result to be more descriptive.
+        dJy_dpk = sympy.zeros(symbolic_ode.n_states, symbolic_ode.n_states) # It's a 2x2
         for j in range(symbolic_ode.n_states):
-            # Derivative of J_y w.r.t state j
             dJ_y_dyj = sympy.diff(symbolic_ode.J_y, symbolic_ode.states[j])
-            # Add the contribution of the j-th state's sensitivity
-            contraction_term += dJ_y_dyj * S[j, k] # This is a simplification for this model
+            dJy_dpk += dJ_y_dyj * S[j, k]
         
-        dHk_dt = symbolic_ode.J_y * H_k + contraction_term + dJp_dpk
+        # THE FIX: The full term in the equation is (d(J_y)/dp_k) * S
+        # This is a (2, 2) @ (2, 3) matrix multiplication, which yields a (2, 3) matrix.
+        full_contraction_term = dJy_dpk * S
+
+        # Now all terms in the sum have the correct (2, 3) shape.
+        dHk_dt = symbolic_ode.J_y * H_k + full_contraction_term + dJp_dpk
         dHdt_list.append(dHk_dt)
     
     # Flatten all symbolic components for the function signature
