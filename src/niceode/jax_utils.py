@@ -1124,6 +1124,52 @@ def estimate_b_i_vmapped_ift_ALT(
 
     return all_b_i_estimates, all_hessians, all_final_inner_loss
 
+def prior_penalty_chol(b_i, omega2):
+    """Calculates the prior penalty using stable Cholesky decomposition."""
+    # 1. Decompose: O = L @ L.T
+    L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
+    
+    # 2. Quadratic form: b.T @ inv(O) @ b = ||inv(L) @ b||^2
+    #    Solve L @ x = b for x, then compute x.T @ x
+    x = jax.scipy.linalg.solve_triangular(L, b_i, lower=True)
+    quadratic_term = x.T @ x
+
+    # 3. Log-determinant: log(det(O)) = 2 * sum(log(diag(L)))
+    log_det_term = 2 * jnp.sum(jnp.log(jnp.diag(L)))
+
+    return quadratic_term + log_det_term
+
+def explicit_fo_foce_objective(omega2, J, residuals, sigma2):
+    """Calculates the FO or FOCE -2LL objective from its components."""
+    # This is a simplified version of your `_calculate_per_subject_likelihood_terms`
+    V_i = J @ omega2 @ J.T + sigma2 * jnp.eye(J.shape[0])
+    
+    # Using properties of MVN likelihood
+    log_det_V = jnp.linalg.slogdet(V_i)[1]
+    quad_term = residuals.T @ jnp.linalg.solve(V_i, residuals)
+    
+    # The part of the -2LL that depends on omega2
+    return log_det_V + quad_term
+
+def interaction_term_objective_chol(H_foce):
+    """
+    Calculates the interaction term log(det(H)) from the final H_foce matrix
+    using a stable Cholesky decomposition.
+    """
+    # 1. Decompose: H = L @ L.T
+    # We add a small jitter for numerical stability, ensuring the matrix is
+    # strictly positive-definite before decomposition.
+    jitter = 1e-6
+    L = jnp.linalg.cholesky(H_foce + jnp.eye(H_foce.shape[0]) * jitter)
+
+    # 2. Calculate using the identity: log(det(H)) = 2 * sum(log(diag(L)))
+    log_det_H = 2 * jnp.sum(jnp.log(jnp.diag(L)))
+    
+    return log_det_H
+
+def interaction_term_objective_passthrough(H_foce):
+    return 0.0
+
 def estimate_b_i_vmapped_ift(
     initial_b_i_batch,
     padded_y_batch,
@@ -1135,9 +1181,10 @@ def estimate_b_i_vmapped_ift(
     omega2,
     n_random_effects,
     compiled_ivp_solver,
-    compiled_augdyn_ivp_solver,
+    compiled_2ndorder_augdyn_ivp_solver,
     pop_coeff_w_bi_idx,
     use_surrogate_neg2ll,
+    interaction_term_objective,
     **kwargs,  # Absorb unused kwargs
 ):
     """Estimates b_i for all subjects by vmapping the custom VJP function."""
@@ -1198,105 +1245,105 @@ def estimate_b_i_vmapped_ift(
 
         # --- Hessian Approximation ---
         def predict_fn(b_i_for_pred):
-                # This logic is copied from your FOCE_inner_loss_fn
-                b_i_work = jnp.zeros_like(pop_coeff)
-                b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(b_i_for_pred)
-                combined_coeffs = pop_coeff + b_i_work
-                model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
-                
-                # We don't need the "safe_coeffs" logic here, as we're already at the optimum
-                _, _, _, J_conc_full = compiled_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
-                
-                # We need the elements in J corresponding to the mask, implemented below
-                return  J_conc_full
 
-        J = predict_fn(estimated_b_i)
-        mask_expanded = time_mask_y_i[:, None]
-        J_masked = J * mask_expanded
-        #mask J here, but what shape is it, how should `time_mask_y_i` be reshaped/tiled?
-        _sigma2 = sigma2[0]
-        H_approx = (J_masked.T @ J_masked) / _sigma2
+            b_i_work = jnp.zeros_like(pop_coeff)
+            b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(b_i_for_pred)
+            combined_coeffs = pop_coeff + b_i_work
+            model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
+            
+
+            _, pred_conc, _, S_conc_full, _, H_conc_full = compiled_2ndorder_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
+            
+            # We need the elements in J corresponding to the mask, implemented below
+            return  pred_conc, S_conc_full, H_conc_full, model_coeffs_i
+
+        pred_conc, S, H, model_coeffs_at_opt = predict_fn(estimated_b_i)
         
-                
+        residuals_masked = jnp.where(time_mask_y_i, padded_y_i - pred_conc, 0.0)
+        
+        mask_expanded_H = time_mask_y_i[:, None, None, None]
+        H_masked = H * mask_expanded_H
+        
+        S_masked = S * time_mask_y_i[:, None, None]
+        
+        
+        #estimate the H_foce needed for calculating the interaction term in FOCEi
+        scaling_factors_b = model_coeffs_at_opt[pop_coeff_w_bi_idx]
+        Z_i = S[:, :, pop_coeff_w_bi_idx] * scaling_factors_b[None, None, :]
+        Z_i_masked = Z_i * time_mask_y_i[:, None, None]
+        
+        _sigma2 = sigma2[0]
+        H_approx = 2 * jnp.sum(jnp.einsum('ti,tj->tij', Z_i_masked, Z_i_masked), axis=0) / _sigma2       
         L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
-
         # 2. Create an identity matrix of the same size
         identity = jnp.eye(omega2.shape[0], dtype=omega2.dtype)
-
         # 3. Efficiently solve for the inverse using the Cholesky factor
         inv_omega2 = jax.scipy.linalg.cho_solve((L, True), identity)
-
         # 4. Compute the full Hessian needed for the FOCEi term
-        H_foce = H_approx + 2 * inv_omega2
+        H_foce = H_approx + (2 * inv_omega2)
 
-        return estimated_b_i, H_foce, final_inner_loss_value
+        return estimated_b_i, H_foce, final_inner_loss_value, S_masked, H_masked, residuals_masked, scaling_factors_b
     
     def _estimate_single_b_i_fwd(*args):
         # args now only contains the 9 JAX array arguments
         outputs = estimate_single_b_i_impl(*args)
-        estimated_b_i, H_foce, _ = outputs
-
-        residuals = (estimated_b_i, H_foce) + args
-        return outputs, residuals
+        estimated_b_i, H_foce, final_inner_loss, S_masked, H_masked, residuals_masked, scaling_factors_b = outputs
+        fwd_output = estimated_b_i, H_foce, final_inner_loss
+        residuals = (estimated_b_i, H_foce, S_masked, H_masked, residuals_masked, scaling_factors_b) + args
+        return fwd_output, residuals
     
     def _estimate_single_b_i_bwd(residuals, g):
-        (estimated_b_i, H_foce, initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
+        (estimated_b_i, H_foce, S_masked, H_masked, residuals_masked, scaling_factors_b,
+         initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
          pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx) = residuals
-        g_b_i, g_H, g_loss = g
+        g_b_i, g_H_foce, g_loss = g
 
-        def grad_inner_loss_fn(b_i, dc, pc, s2, o2):
-            return jax.grad(FOCE_inner_loss_fn, argnums=0)(
-                b_i, padded_y_i=padded_y_i, pop_coeff_i=pc,
-                data_contribution_i=dc, sigma2=s2, omega2=o2,
-                ode_t0_val_i=ode_t0_i, time_mask_y_i=time_mask_y_i,
-                n_random_effects=n_random_effects,
-                compiled_ivp_solver=compiled_ivp_solver,
-                pop_coeff_w_bi_idx=pop_coeff_w_bi_idx,
-                use_surrogate_neg2ll=use_surrogate_neg2ll
-            )
-
-        # 3. Solve the core linear system of the IFT: H^T @ v = g
-        #    Since H is symmetric, this is just H @ v = g.
-        #    We only use g_b_i, the cotangent for the optimized parameters.
-        #H_foce_analytical = jax.jacobian(grad_inner_loss_fn, argnums=0)(
-        #    estimated_b_i, data_contrib_i, pop_coeff, sigma2, omega2
-        #)
-        v = jax.scipy.linalg.solve(H_foce, g_b_i,)# sym_pos=True)
+        v = jax.scipy.linalg.solve(H_foce, g_b_i, sym_pos=True)
         
-        # 4. Compute the cross-term Jacobians and final gradients.
-        #    This tells us how the inner gradient changes w.r.t. outer parameters.
+        #sliced and scale S
+        S_wrt_b = S_masked[:, :, pop_coeff_w_bi_idx] * scaling_factors_b[None, None, :]
+        #slice and scale H
+        H_wrt_b_pc = (H_masked[:, :, :, pop_coeff_w_bi_idx] * scaling_factors_b[None, None, None, :])
         
-        # Gradient w.r.t. data_contrib_i
-        J_cross_dc = jax.jacobian(grad_inner_loss_fn, argnums=1)(
-            estimated_b_i, data_contrib_i, pop_coeff, sigma2, omega2
+        # This is d(inner_grad)/d(pop_coeff)
+        # ARE sliced and scaled S and H are used?
+        J_cross_pc = (-2 / sigma2[0]) * (
+            jnp.sum(jnp.einsum('tijk,ti->tjk', H_wrt_b_pc, residuals_masked), axis=0) -
+            jnp.sum(jnp.einsum('tji,tki->tjk', S_wrt_b, S_wrt_b), axis=0)
         )
-        grad_data_contrib = -v @ J_cross_dc
-        
-        # Gradient w.r.t. pop_coeff
-        J_cross_pc = jax.jacobian(grad_inner_loss_fn, argnums=2)(
-            estimated_b_i, data_contrib_i, pop_coeff, sigma2, omega2
-        )
+        #is this followign the same as the einsum above?
+        #J_cross_pc = (-2 / sigma2[0]) * (H_wrt_b_pc.T @ residuals_masked - Z_i.T @ Z_i)
         grad_pop_coeff = -v @ J_cross_pc
-
-        # Gradient w.r.t. sigma2
-        J_cross_s2 = jax.jacobian(grad_inner_loss_fn, argnums=3)(
-            estimated_b_i, data_contrib_i, pop_coeff, sigma2, omega2
-        )
-        grad_sigma2 = -v @ J_cross_s2
-
-        # Gradient w.r.t. omega2
-        J_cross_o2 = jax.jacobian(grad_inner_loss_fn, argnums=4)(
-            estimated_b_i, data_contrib_i, pop_coeff, sigma2, omega2
-        )
-        grad_omega2 = -v @ J_cross_o2
-
-        # Note: A complete implementation would also add the gradient contributions
-        # from g_H and g_loss. This version includes the main IFT path, which is
-        # the most significant and complex part.
+        grad_data_contrib = grad_pop_coeff
         
-        # Return tuple matches the new, shorter signature of `estimate_single_b_i`
+        #----estimate grad for s2----
+        
+        def data_likelihood(s2):
+             return jnp.sum(time_mask_y_i) * jnp.log(s2) + jnp.sum(residuals_masked**2) / s2
+        
+        J_cross_s2 = (S_wrt_b.T @ residuals_masked) / (sigma2[0]**2)
+        implicit_grad_s2 = -v @ J_cross_s2
+        explicit_grad_s2 = jax.grad(data_likelihood)(sigma2)
+        total_grad_s2 = explicit_grad_s2 + implicit_grad_s2
+        
+        
+        #---estimate grad for o2----
+ 
+        def prior_grad_fn(b_in, o2):
+            # Gradient of the prior penalty w.r.t b_i
+            return jax.grad(prior_penalty_chol, argnums=0)(b_in, o2)
+        
+        J_cross_o2 = jax.jacobian(prior_grad_fn, argnums=1)(estimated_b_i, omega2)
+        implicit_grad_o2 = -v @ J_cross_o2
+        
+        explicit_grad_o2_foce = jax.grad(explicit_fo_foce_objective, argnums=0)(
+        omega2, S_wrt_b, residuals, sigma2
+        )
+        explicit_grad_of_interaction_o2 = interaction_term_objective(H_foce)
+        total_grad_o2 = explicit_grad_o2_foce + implicit_grad_o2 + explicit_grad_of_interaction_o2
+        
         return (None, None, grad_data_contrib, None, None,
-                grad_pop_coeff, grad_sigma2, grad_omega2, None)
+                grad_pop_coeff, total_grad_s2, total_grad_o2, None)
     
     @jax.custom_vjp
     def estimate_single_b_i(
