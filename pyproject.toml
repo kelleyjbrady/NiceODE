@@ -46,6 +46,7 @@ flax = "^0.10.7"
 optax = "^0.2.5"
 jaxopt = "^0.8.5"
 finitediffx = "^0.1.0"
+sympy = "^1.14.0"
 
 
 
