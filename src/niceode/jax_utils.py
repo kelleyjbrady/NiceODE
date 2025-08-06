@@ -1641,6 +1641,7 @@ def FOCE_inner_loss_fn(
     #_ode_t0_val_i = jnp.reshape(ode_t0_val_i, (1, -1))
     #jax.debug.print("model_coeffs_i shape: {s}", s = model_coeffs_i.shape)
     #jax.debug.print("ode_t0_val_i shape: {s}", s = ode_t0_val_i.shape)
+    jax.debug.print("Solving Inner Optmizer IVP . . .")
     padded_full_preds_i, padded_pred_y_i = compiled_ivp_solver( ode_t0_val_i, solver_coeffs,)
     #jax.debug.print("padded_preds_i shape: {s}", s = padded_pred_y_i.shape)
     #jax.debug.print("time_mask_y_i shape: {s}", s = time_mask_y_i.shape)
@@ -2019,6 +2020,7 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER():
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
+    raw_incoming_optimizer_vals,
     inner_optimizer_tol = None, 
     inner_optimizer_maxiter = None,
     **kwargs,
@@ -2052,6 +2054,7 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER():
             use_surrogate_neg2ll = use_surrogate_neg2ll,
             inner_optimizer_tol = inner_optimizer_tol, 
             inner_optimizer_maxiter = inner_optimizer_maxiter,
+            raw_incoming_optimizer_vals = raw_incoming_optimizer_vals
             
         )
         
@@ -2496,6 +2499,7 @@ def approx_neg2ll_loss_jax(
         optimizer functioning.   
     """
     print("Compiling `approx_neg2ll_loss_jax`")
+    jax.debug.print("Raw Optmizer Values: {v}", v = raw_incoming_optimizer_vals)
     #jax.debug.print("theta shape: {s}", s = theta.shape )
     n_subjects = time_mask_y.shape[0]
     n_coeffs = pop_coeff.shape[0]
@@ -2553,27 +2557,26 @@ def approx_neg2ll_loss_jax(
 #     pc_idx_type=type(pop_coeff_for_J_idx),
 #     use_surrogate_type=type(use_surrogate_neg2ll)
 # )
-    
+
     b_i, hessian_i, inner_loss_i = compiled_estimate_b_i_foce(
-                                               initial_b_i_batch = b_i,
-                                                padded_y_batch = padded_y,
-                                                data_contribution_batch = data_contribution,
-                                                ode_t0_vals_batch = ode_t0_vals,
-                                                time_mask_y_batch = time_mask_y,
-                                                #unpadded_y_len_batch = unpadded_y_len_batch,
-                                                pop_coeff = pop_coeff,
-                                                sigma2 = sigma2,
-                                                omega2 = omega2,
-                                                n_random_effects = n_subject_level_eff,
-                                                compiled_ivp_solver = compiled_ivp_solver_novmap_arr,
-                                                compiled_augdyn_ivp_solver = compiled_augdyn_ivp_solver_novmap_arr,
-                                                compiled_2ndorder_augdyn_ivp_solver = compiled_2ndorder_augdyn_ivp_solver_novmap_arr,
-                                                pop_coeff_w_bi_idx = pop_coeff_for_J_idx,
-                                                use_surrogate_neg2ll = use_surrogate_neg2ll,
-                                                inner_optimizer_tol = inner_optimizer_tol,
-                                                inner_optimizer_maxiter = inner_optimizer_maxiter,
-                                               
-                                               )
+        initial_b_i_batch=b_i,
+        padded_y_batch=padded_y,
+        data_contribution_batch=data_contribution,
+        ode_t0_vals_batch=ode_t0_vals,
+        time_mask_y_batch=time_mask_y,
+        # unpadded_y_len_batch = unpadded_y_len_batch,
+        pop_coeff=pop_coeff,
+        sigma2=sigma2,
+        omega2=omega2,
+        n_random_effects=n_subject_level_eff,
+        compiled_ivp_solver=compiled_ivp_solver_novmap_arr,
+        compiled_augdyn_ivp_solver=compiled_augdyn_ivp_solver_novmap_arr,
+        compiled_2ndorder_augdyn_ivp_solver=compiled_2ndorder_augdyn_ivp_solver_novmap_arr,
+        pop_coeff_w_bi_idx=pop_coeff_for_J_idx,
+        use_surrogate_neg2ll=use_surrogate_neg2ll,
+        inner_optimizer_tol=inner_optimizer_tol,
+        inner_optimizer_maxiter=inner_optimizer_maxiter,
+    )
     #jax.debug.print("b_i shape: {s}", s = b_i.shape )
     b_i_work = jnp.zeros((n_subjects, n_coeffs))
     #jax.debug.print("b_i_work shape: {s}", s = b_i_work.shape )

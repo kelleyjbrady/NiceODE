@@ -13,6 +13,10 @@ if USE_GPU:
     os.environ['CUDA_VISIBLE_DEVICES'] = '0' 
 else:
     os.environ['JAX_PLATFORMS'] = 'cpu'
+    import numpyro
+    numpyro.set_host_device_count(4)
+    
+
 
 import jax
 print(f"JAX is running on: {jax.default_backend()}")
@@ -44,7 +48,8 @@ from niceode.jax_utils import (FOCE_approx_neg2ll_loss_jax,
                                FOCE_approx_neg2ll_loss_jax_fdxINNER,
                                FOCE_approx_neg2ll_loss_jax_iftINNER_ALT,
                                FOCE_approx_neg2ll_loss_jax_iftINNER, 
-                               FOCE_approx_neg2ll_loss_jax_fdxOUTER
+                               FOCE_approx_neg2ll_loss_jax_fdxOUTER, 
+                               FOCEi_approx_neg2ll_loss_jax_fdxOUTER
                                )
 #%%
 
@@ -202,7 +207,7 @@ if fit_model:
 #%%
 #%%
 me_mod_fo =  CompartmentalModel(
-        model_name = "debug_theoph_abs_ka-clME-vd_JAXFOCE_jaxoptLbfgsb_nodep_dermal",
+        model_name = "debug_theoph_abs_ka-clME-vd_JAXFOCE_jaxoptspwrapLbfgsb_iftinner_nodep_omegadiag_dermal",
             ode_t0_cols=[ ODEInitVals('DV'), ODEInitVals('AMT'),],
             conc_at_time_col = 'DV',
             subject_id_col = 'ID', 
@@ -256,24 +261,27 @@ me_mod_fo =  CompartmentalModel(
                                     #use_full_omega=False, 
                                     significant_digits=5,
                                     me_loss_function=FO_approx_ll_loss,
-                                    jax_loss=FOCE_approx_neg2ll_loss_jax,
+                                    jax_loss=FOCE_approx_neg2ll_loss_jax_iftINNER,
                                     use_full_omega=True, 
                                     use_surrogate_neg2ll=True, 
                                     fit_jax_objective=True,
                                     )
 #%%
 fit_model = True
+load_jb = False
 if fit_model:
-    me_mod_fo = me_mod_fo.fit2(df, ci_level = 0.95, debug_fit=False)
-else:
+    me_mod_fo = me_mod_fo.fit2(df, ci_level = None, debug_fit=False, )
+if load_jb:
     me_mod_fo = jb.load(r"/workspaces/PK-Analysis/debug/logs/fitted_model_cb_debug.jb.jb")
 
+#jax.value_and_grad(me_mod_fo[0])(me_mod_fo[1])
 
 #%%
 fit_pymc = True
 if fit_pymc:
 
     model = make_pymc_model(me_mod_fo,
+                            fit_df = df,
                             link_function = 'exp',
                             use_existing_fit = False,
                             )

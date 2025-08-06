@@ -3959,7 +3959,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         
         #----------JAX Setup-------------
-        debugging_jax = False
+        debugging_jax = True
         params_idx_jax = deepcopy(params_idx)
         required_keys = ['pop', 'sigma', 'omega', 'theta']
         existing_keys = [i for i in params_idx_jax]

@@ -30,6 +30,7 @@ def debug_print(print_obj, *args ):
 #TO DO: Verify no changes are required/it is not beneficial to implement log scale opt of bayes equivlanets of 
 # sigma and omega
 def make_pymc_model(model_obj,
+                    fit_df,
                     pm_subj_df = None,
                     pm_df = None,
                     model_params = None,
@@ -64,6 +65,7 @@ def make_pymc_model(model_obj,
             init_val_src = 'best_fit_param_val'
         else:
             init_val_src = 'init_val'
+            model_obj.fit2(fit_df, ci_level = None, perform_fit = False)
         model_params['init_val'] = model_params[init_val_src].copy()
         model_params['init_val_log_scale'] = model_params['init_val'].copy()
         model_params['init_val_true_scale'] = np.exp(model_params['init_val'])
