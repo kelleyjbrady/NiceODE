@@ -479,6 +479,7 @@ def _jittable_param_unpack(opt_params, #parameters being optmized by something l
         'sigma2':sigma2, 
         'omega2':omega2, 
         'theta':thetas_work, 
+        "raw_incoming_optimizer_vals":opt_params
         
     } 
 
@@ -1250,7 +1251,8 @@ def estimate_b_i_vmapped_ift(
             b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(b_i_for_pred)
             combined_coeffs = pop_coeff + b_i_work
             model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
-            #is_bad_state = jnp.any(~jnp.isfinite(model_coeffs_i)) | jnp.any(model_coeffs_i < 1e-9)
+            is_bad_state = jnp.any(~jnp.isfinite(model_coeffs_i)) | jnp.any(model_coeffs_i < 1e-9)
+            jax.debug.print("Post Fit Inner Bad State Status: {s}", s = is_bad_state)
             #safe_coeffs = jnp.ones_like(model_coeffs_i)
             #solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
             _, pred_conc, _, S_conc_full, _, H_conc_full = compiled_2ndorder_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
@@ -1627,7 +1629,7 @@ def FOCE_inner_loss_fn(
     #jax.debug.print("model_coeffs_i val: {s}", s = model_coeffs_i)
     #jax.debug.print("combined_coeffs calc: {s} + {x} = {y}", s = pop_coeff_i, x = b_i_work, y = combined_coeffs)
     is_bad_state = jnp.any(~jnp.isfinite(model_coeffs_i)) | jnp.any(model_coeffs_i < 1e-9)
-    #jax.debug.print("is_bad_state val: {s}", s = is_bad_state)
+    jax.debug.print("Inner Bad State Status: {s}", s = is_bad_state)
     safe_coeffs = jnp.ones_like(model_coeffs_i)
     solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
     # --- Data Likelihood Part ---
@@ -1782,7 +1784,7 @@ def foc_interaction_term(all_hessians: jnp.ndarray, jitter: float = 1e-6) -> jnp
     
     return interaction_term
 
-def foc_interaction_term_chol(all_hessians: jnp.ndarray, jitter: float = 1e-6) -> jnp.ndarray:
+def foc_interaction_term_chol(all_hessians: jnp.ndarray, jitter: float = 1e-6, **kwargs) -> jnp.ndarray:
     """
     Calculates the FOCEi interaction term using a stable Cholesky decomposition.
 
@@ -1818,9 +1820,9 @@ def foc_interaction_term_chol(all_hessians: jnp.ndarray, jitter: float = 1e-6) -
 
     return interaction_term, interaction_term_i
 
-def foc_interaction_term_passthrough(all_hessians, **kwargs):
+def foc_interaction_term_passthrough(all_hessians, n_subjects, **kwargs):
     interaction_term_placeholder = 0.0
-    interaction_term_i_placeholder = 0.0
+    interaction_term_i_placeholder = jnp.zeros(n_subjects)
     return interaction_term_placeholder, interaction_term_i_placeholder
 
 def estimate_b_i_foce_passthrough(initial_b_i_batch, **kwargs):
@@ -2368,8 +2370,10 @@ class FO_approx_neg2ll_loss_jax():
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
+    raw_incoming_optimizer_vals,
     inner_optimizer_tol = None, 
     inner_optimizer_maxiter = None,
+    
     **kwargs,
     ):
         print("Compiling `FO_approx_neg2ll_loss_jax`")
@@ -2398,6 +2402,7 @@ class FO_approx_neg2ll_loss_jax():
             use_surrogate_neg2ll = use_surrogate_neg2ll,
             inner_optimizer_tol = inner_optimizer_tol, 
             inner_optimizer_maxiter = inner_optimizer_maxiter,
+            raw_incoming_optimizer_vals = raw_incoming_optimizer_vals,
         )
     
         return loss
@@ -2431,6 +2436,7 @@ def approx_neg2ll_loss_jax(
     use_surrogate_neg2ll,
     inner_optimizer_tol, 
     inner_optimizer_maxiter,
+    raw_incoming_optimizer_vals,
        ):
     """Constructor function for FO, FOCE and FOCEi. Implements FOCEi with various parameterizations 
     defined by the Jax loss classes turn the FOCEi into FO or FOCE by substituting functions utilized 
@@ -2577,72 +2583,146 @@ def approx_neg2ll_loss_jax(
     subject_coeff = b_i_work + pop_coeff
     #jax.debug.print("subject_coeff shape: {s}", s = subject_coeff.shape )
     #jax.debug.print("subject_coeff val: {s}", s = subject_coeff )
-    model_coeffs_i = jnp.exp(data_contribution + subject_coeff)# + 1e-6
-    is_apprx_zero = (model_coeffs_i < 1e-9)
-    not_finite = ~jnp.isfinite(model_coeffs_i)
-    is_bad_state = jnp.any(not_finite | is_apprx_zero)
-    safe_coeffs = jnp.ones_like(model_coeffs_i)
-    solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
-    #jax.debug.print("model_coeffs_i shape: {j}", j=model_coeffs_i.shape)
-    # jax.debug.print("""
-    #                 solver_coeffs: {x}
-                    
-    #                 """, x = solver_coeffs)
-    padded_full_preds, padded_pred_y, J_full, J_conc_full = compiled_augdyn_ivp_solver_arr(
-        ode_t0_vals,
-        solver_coeffs
-    )
-    #jax.debug.print("Old J conc: {j}", j = J_conc_full)
+    #model_coeffs_i = jnp.exp(data_contribution + subject_coeff)# + 1e-6
+    log_coeffs = data_contribution + subject_coeff
+    is_bad_state = jnp.any(log_coeffs > 700) | jnp.any(log_coeffs < -20)
+    jax.debug.print("Outer Bad State Status: {s}", s = is_bad_state)
     
-    #padded_full_preds, padded_pred_y, J_full, J_conc_full, H_full, H_conc_full  = compiled_2ndorder_augdyn_ivp_solver_arr(
-    #    ode_t0_vals,
-    #    solver_coeffs
-    #)
-    #jax.debug.print("New J conc: {j}", j = J_conc_full)
-    
-    #jax.debug.print("padded_pred_y shape: {padded_pred_y}", padded_pred_y=padded_pred_y.shape)
-    #jax.debug.print("J_conc_full shape: {J_conc_full}", J_conc_full=J_conc_full.shape)
-    #jax.debug.print("model_coeffs_i shape: {j}", j=model_coeffs_i.shape)
-    
-    masked_residuals = jnp.where(time_mask_y, padded_y - padded_pred_y, 0.0)
+    def good_path(operands):
+        
+        (
+         log_coeffs,
+         ode_t0_vals, 
+         time_mask_y, 
+         padded_y, 
+         pop_coeff_for_J_idx,
+         time_mask_J,
+         hessian_i,
+         sigma2,
+         omega2, 
+         unpadded_y_len,
+         #use_surrogate_neg2ll,
+         b_i,
+         raw_incoming_optimizer_vals,
+         ) = operands
+        
+        
+        #jax.debug.print("model_coeffs_i shape: {j}", j=model_coeffs_i.shape)
+        # jax.debug.print("""
+        #                 solver_coeffs: {x}
+                        
+        #                 """, x = solver_coeffs)
+        model_coeffs_i = jnp.exp(log_coeffs)
+        solver_coeffs = model_coeffs_i
+        padded_full_preds, padded_pred_y, J_full, J_conc_full = compiled_augdyn_ivp_solver_arr(
+            ode_t0_vals,
+            solver_coeffs
+        )
+        #jax.debug.print("Old J conc: {j}", j = J_conc_full)
+        
+        #padded_full_preds, padded_pred_y, J_full, J_conc_full, H_full, H_conc_full  = compiled_2ndorder_augdyn_ivp_solver_arr(
+        #    ode_t0_vals,
+        #    solver_coeffs
+        #)
+        #jax.debug.print("New J conc: {j}", j = J_conc_full)
+        
+        #jax.debug.print("padded_pred_y shape: {padded_pred_y}", padded_pred_y=padded_pred_y.shape)
+        #jax.debug.print("J_conc_full shape: {J_conc_full}", J_conc_full=J_conc_full.shape)
+        #jax.debug.print("model_coeffs_i shape: {j}", j=model_coeffs_i.shape)
+        
+        masked_residuals = jnp.where(time_mask_y, padded_y - padded_pred_y, 0.0)
 
-    #J_dense = J_conc_full#shape (n_subject, max_obs_per_subject, n_s)
-    scaling_factors = solver_coeffs[:, pop_coeff_for_J_idx]
-    J_dense = J_conc_full * scaling_factors[:, None, :]
-    
-    J = jnp.where(time_mask_J, J_dense, 0.0) # time_mask_J shape  (n_subject, max_obs_per_subject, n_s)
-    
-    interaction_term, interaction_term_i = jittable_estimate_foc_i(all_hessians = hessian_i)
+        #J_dense = J_conc_full#shape (n_subject, max_obs_per_subject, n_s)
+        scaling_factors = solver_coeffs[:, pop_coeff_for_J_idx]
+        J_dense = J_conc_full * scaling_factors[:, None, :]
+        
+        J = jnp.where(time_mask_J, J_dense, 0.0) # time_mask_J shape  (n_subject, max_obs_per_subject, n_s)
+        
+        interaction_term, interaction_term_i = jittable_estimate_foc_i(all_hessians = hessian_i, n_subjects = padded_y.shape[0])
 
-    # Estimate the covariance matrix, then estimate neg log likelihood
-    outer_loss, per_subject_outer_loss = outer_neg2ll_chol_jit(
-        J,           # Shape: (n_subjects, max_obs, n_effects)
-        masked_residuals,  # Shape: (n_subjects, max_obs)
-        time_mask_y,              # Shape: (n_subjects, max_obs)
-        sigma2,            # Shape: scalar
-        omega2,           # Shape: (n_effects, n_effects)
-        unpadded_y_len,
-        use_surrogate_neg2ll=use_surrogate_neg2ll,
+        # Estimate the covariance matrix, then estimate neg log likelihood
+        outer_loss, per_subject_outer_loss = outer_neg2ll_chol_jit(
+            J,           # Shape: (n_subjects, max_obs, n_effects)
+            masked_residuals,  # Shape: (n_subjects, max_obs)
+            time_mask_y,              # Shape: (n_subjects, max_obs)
+            sigma2,            # Shape: scalar
+            omega2,           # Shape: (n_effects, n_effects)
+            unpadded_y_len,
+            use_surrogate_neg2ll=use_surrogate_neg2ll,
+        )
+        outer_objective_for_grad, outer_objective_for_loss = jittable_sum_neg2ll_terms(neg2ll = outer_loss, interaction_term = interaction_term)
+        #jax.debug.print("neg2_ll: {neg2_ll}", neg2_ll=neg2_ll)
+        #jax.debug.print("is_bad_state: {is_bad_state}", is_bad_state=is_bad_state)
+        b_i_approx = compiled_estimate_b_i_fo(padded_J=J, padded_residuals=masked_residuals, 
+                                    time_mask=time_mask_y,
+                                    omegas2=omega2, sigma2=sigma2, b_i = b_i
+                                    )
+        outer_objective_for_grad_out = outer_objective_for_grad
+        outer_objective_for_loss_out = outer_objective_for_loss
+        per_subject_loss = (per_subject_outer_loss, interaction_term_i, unpadded_y_len_batch)
+        #jax.debug.print("Outer Loss Out val: {s}", s = neg2_ll_out)
+        value_out = {
+            'outer_objective_loss':outer_objective_for_loss_out,
+            'b_i':b_i_approx, 
+            'padded_pred_y':padded_pred_y,
+            #'padded_pred_full':padded_full_preds,
+            'model_coeffs_i':log_coeffs, 
+            'per_subject_loss':per_subject_loss
+        }
+        return outer_objective_for_grad_out, value_out
+    
+    def bad_path(operands):
+        (
+         log_coeffs,
+         ode_t0_vals, 
+         time_mask_y, 
+         padded_y, 
+         pop_coeff_for_J_idx,
+         time_mask_J,
+         hessian_i,
+         sigma2,
+         omega2, 
+         unpadded_y_len,
+         #use_surrogate_neg2ll,
+         b_i,
+         raw_incoming_optimizer_vals,
+         ) = operands 
+        penalty_obj = 1e12 + jnp.sum(raw_incoming_optimizer_vals**2) # This needs the raw opt_params
+        
+        # Create a dummy value_out with the correct structure and shapes
+        per_subject_loss = ((jnp.zeros(time_mask_y.shape[0], dtype = jnp.float64),jnp.zeros(time_mask_y.shape[0], dtype = jnp.float64 )),
+                            jnp.zeros(time_mask_y.shape[0], dtype = jnp.float64),
+                            jnp.zeros(time_mask_y.shape[0], dtype = jnp.int64))
+        dummy_value_out = {
+            'outer_objective_loss': penalty_obj,
+            'b_i':b_i, 
+            'padded_pred_y':jnp.ones_like(padded_y),
+            #'padded_pred_full':jnp.ones((padded_y.shape[0], padded_y.shape[1], ode_t0_vals.shape[1])),
+            'model_coeffs_i':log_coeffs, 
+            'per_subject_loss':per_subject_loss } # Fill with zeros
+        
+        return penalty_obj, dummy_value_out
+    
+    operands = (
+         log_coeffs,
+         ode_t0_vals, 
+         time_mask_y, 
+         padded_y, 
+         pop_coeff_for_J_idx,
+         time_mask_J,
+         hessian_i,
+         sigma2,
+         omega2, 
+         unpadded_y_len,
+         #use_surrogate_neg2ll,
+         b_i,
+         raw_incoming_optimizer_vals,
+         )
+    
+    return jax.lax.cond(
+        is_bad_state,
+        bad_path,
+        good_path,
+        operands
     )
-    outer_objective_for_grad, outer_objective_for_loss = jittable_sum_neg2ll_terms(neg2ll = outer_loss, interaction_term = interaction_term)
-    #jax.debug.print("neg2_ll: {neg2_ll}", neg2_ll=neg2_ll)
-    #jax.debug.print("is_bad_state: {is_bad_state}", is_bad_state=is_bad_state)
-    b_i_approx = compiled_estimate_b_i_fo(padded_J=J, padded_residuals=masked_residuals, 
-                                   time_mask=time_mask_y,
-                                   omegas2=omega2, sigma2=sigma2, b_i = b_i
-                                   )
-    large_penalty = 1e12
-    outer_objective_for_grad_out = jnp.where(is_bad_state, large_penalty, outer_objective_for_grad)
-    outer_objective_for_loss_out = jnp.where(is_bad_state, large_penalty, outer_objective_for_loss)
-    per_subject_loss = (per_subject_outer_loss, interaction_term_i, unpadded_y_len_batch)
-    #jax.debug.print("Outer Loss Out val: {s}", s = neg2_ll_out)
-    value_out = {
-        'outer_objective_loss':outer_objective_for_loss_out,
-        'b_i':b_i_approx, 
-        'padded_pred_y':padded_pred_y,
-        'padded_pred_full':padded_full_preds,
-        'model_coeffs_i':model_coeffs_i, 
-        'per_subject_loss':per_subject_loss
-    }
-    return outer_objective_for_grad_out, value_out
 
