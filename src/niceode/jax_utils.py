@@ -1193,7 +1193,7 @@ def estimate_b_i_vmapped_ift(
     # Vmap the single-subject optimization function with the custom VJP.
     # `in_axes` specifies which arguments to map over (0) vs. broadcast (None).
     
-    @jax.jit
+    #@jax.jit
     def estimate_single_b_i_impl(
     initial_b_i,
     padded_y_i,
@@ -1250,8 +1250,9 @@ def estimate_b_i_vmapped_ift(
             b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(b_i_for_pred)
             combined_coeffs = pop_coeff + b_i_work
             model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
-            
-
+            #is_bad_state = jnp.any(~jnp.isfinite(model_coeffs_i)) | jnp.any(model_coeffs_i < 1e-9)
+            #safe_coeffs = jnp.ones_like(model_coeffs_i)
+            #solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
             _, pred_conc, _, S_conc_full, _, H_conc_full = compiled_2ndorder_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
             
             # We need the elements in J corresponding to the mask, implemented below
@@ -1261,19 +1262,27 @@ def estimate_b_i_vmapped_ift(
         
         residuals_masked = jnp.where(time_mask_y_i, padded_y_i - pred_conc, 0.0)
         
-        mask_expanded_H = time_mask_y_i[:, None, None, None]
-        H_masked = H * mask_expanded_H
+        H_masked = H * time_mask_y_i[:, None, None]
         
-        S_masked = S * time_mask_y_i[:, None, None]
+        S_masked = S * time_mask_y_i[:, None]
         
         
         #estimate the H_foce needed for calculating the interaction term in FOCEi
         scaling_factors_b = model_coeffs_at_opt[pop_coeff_w_bi_idx]
-        Z_i = S[:, :, pop_coeff_w_bi_idx] * scaling_factors_b[None, None, :]
-        Z_i_masked = Z_i * time_mask_y_i[:, None, None]
+        #jax.debug.print("""
+        #                -----------------
+        #                S shape: {ss}
+        #                
+        #                pop_coeff_w_bi_idx shape: {ps}
+        #                
+        #                scaling_factors_b shape: {bs}
+        #                -----------------
+        #                """, ss = S.shape, ps = pop_coeff_w_bi_idx.shape, bs = scaling_factors_b.shape)
+        Z_i = S[:, pop_coeff_w_bi_idx] * scaling_factors_b[None, :]
+        Z_i_masked = Z_i * time_mask_y_i[:, None]
         
         _sigma2 = sigma2[0]
-        H_approx = 2 * jnp.sum(jnp.einsum('ti,tj->tij', Z_i_masked, Z_i_masked), axis=0) / _sigma2       
+        H_approx = 2 * (Z_i_masked.T @ Z_i_masked) / _sigma2       
         L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
         # 2. Create an identity matrix of the same size
         identity = jnp.eye(omega2.shape[0], dtype=omega2.dtype)
@@ -1298,19 +1307,19 @@ def estimate_b_i_vmapped_ift(
          pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx) = residuals
         g_b_i, g_H_foce, g_loss = g
 
-        v = jax.scipy.linalg.solve(H_foce, g_b_i, sym_pos=True)
+        v = jax.scipy.linalg.solve(H_foce, g_b_i, assume_a='pos')
         
-        #sliced and scale S
-        S_wrt_b = S_masked[:, :, pop_coeff_w_bi_idx] * scaling_factors_b[None, None, :]
+        #sliced and scale S, this is the same as Z_i from the forward pass
+        S_wrt_b = S_masked[:, pop_coeff_w_bi_idx] * scaling_factors_b[None, :]
+        S_wrt_pc = S_wrt_b
         #slice and scale H
-        H_wrt_b_pc = (H_masked[:, :, :, pop_coeff_w_bi_idx] * scaling_factors_b[None, None, None, :])
+        H_sliced  = H_masked[:, pop_coeff_w_bi_idx][:, :, pop_coeff_w_bi_idx]
+        H_wrt_b_pc = (H_sliced * scaling_factors_b[None, None, :] * scaling_factors_b[None, :, None])
         
         # This is d(inner_grad)/d(pop_coeff)
-        # ARE sliced and scaled S and H are used?
-        J_cross_pc = (-2 / sigma2[0]) * (
-            jnp.sum(jnp.einsum('tijk,ti->tjk', H_wrt_b_pc, residuals_masked), axis=0) -
-            jnp.sum(jnp.einsum('tji,tki->tjk', S_wrt_b, S_wrt_b), axis=0)
-        )
+        term1 = jnp.einsum('tij,t->ij', H_wrt_b_pc, residuals_masked)
+        term2 = S_wrt_b.T @ S_wrt_pc
+        J_cross_pc = (-2 / sigma2[0]) * (term1 - term2) # d(residuals)/d(pc) = -d(preds)/d(pc)
         #is this followign the same as the einsum above?
         #J_cross_pc = (-2 / sigma2[0]) * (H_wrt_b_pc.T @ residuals_masked - Z_i.T @ Z_i)
         grad_pop_coeff = -v @ J_cross_pc
@@ -1319,13 +1328,16 @@ def estimate_b_i_vmapped_ift(
         #----estimate grad for s2----
         
         def data_likelihood(s2):
-             return jnp.sum(time_mask_y_i) * jnp.log(s2) + jnp.sum(residuals_masked**2) / s2
+            #jax.debug.print("""
+            #                
+            #                """)
+            return jnp.sum(time_mask_y_i) * jnp.log(s2) + jnp.sum(residuals_masked**2) / s2
         
         J_cross_s2 = (S_wrt_b.T @ residuals_masked) / (sigma2[0]**2)
         implicit_grad_s2 = -v @ J_cross_s2
-        explicit_grad_s2 = jax.grad(data_likelihood)(sigma2)
-        total_grad_s2 = explicit_grad_s2 + implicit_grad_s2
-        
+        explicit_grad_s2 = jax.grad(data_likelihood)(sigma2[0])
+        total_grad_s2_scalar = explicit_grad_s2 + implicit_grad_s2
+        total_grad_s2 = jnp.array([total_grad_s2_scalar])
         
         #---estimate grad for o2----
  
@@ -1337,7 +1349,7 @@ def estimate_b_i_vmapped_ift(
         implicit_grad_o2 = -v @ J_cross_o2
         
         explicit_grad_o2_foce = jax.grad(explicit_fo_foce_objective, argnums=0)(
-        omega2, S_wrt_b, residuals, sigma2
+        omega2, S_wrt_b, residuals_masked, sigma2[0]
         )
         explicit_grad_of_interaction_o2 = interaction_term_objective(H_foce)
         total_grad_o2 = explicit_grad_o2_foce + implicit_grad_o2 + explicit_grad_of_interaction_o2
@@ -1350,10 +1362,18 @@ def estimate_b_i_vmapped_ift(
         initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
         pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx
     ):
-        return estimate_single_b_i_impl(
+        (estimated_b_i,
+         H_foce,
+         final_inner_loss_value,
+         S_masked,
+         H_masked,
+         residuals_masked,
+         scaling_factors_b) = estimate_single_b_i_impl(
             initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
             pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx
         )
+        
+        return estimated_b_i, H_foce, final_inner_loss_value,
         
     estimate_single_b_i.defvjp(_estimate_single_b_i_fwd, _estimate_single_b_i_bwd)
     
@@ -1586,7 +1606,7 @@ def FOCE_inner_loss_fn(
     compiled_ivp_solver,
     pop_coeff_w_bi_idx,
     use_surrogate_neg2ll,
-):
+    ):
     """
     Calculates the conditional negative 2 log-likelihood for a single subject.
     This function is pure and written entirely in JAX.
@@ -1971,12 +1991,12 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER():
     
     """
     def __init__(self, bypass_notimplemented = False):
-        if bypass_notimplemented:
-            self.loss_val_idx = 0
-            self.grad_val_idx = 0
-            self.grad_is_fdx = False
-        else:
-            raise NotImplementedError(f"{self.__name__} is for debugging only. Use `FOCE_approx_neg2ll_loss_jax_fdxOUTER` or `FOCE_approx_neg2ll_loss_jax`")
+        #if bypass_notimplemented:
+        self.loss_val_idx = 0
+        self.grad_val_idx = 0
+        self.grad_is_fdx = False
+        #else:
+        #    raise NotImplementedError(f"{self.__name__} is for debugging only. Use `FOCE_approx_neg2ll_loss_jax_fdxOUTER` or `FOCE_approx_neg2ll_loss_jax`")
     @staticmethod
     def loss_fn(
     pop_coeff, 
@@ -2001,7 +2021,10 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER():
     inner_optimizer_maxiter = None,
     **kwargs,
     ):
+        
         print("Compiling `FOCE_approx_neg2ll_loss_jax`")
+        
+        estimate_b_i_vmapped_ift_FOCE = partial(estimate_b_i_vmapped_ift, interaction_term_objective = interaction_term_objective_passthrough)
         loss = approx_neg2ll_loss_jax(
             pop_coeff = pop_coeff, 
             sigma2 = sigma2, 
@@ -2020,7 +2043,7 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER():
             compiled_ivp_solver_novmap_arr = compiled_ivp_solver_novmap_arr,
             ode_t0_vals = ode_t0_vals,
             pop_coeff_for_J_idx = pop_coeff_for_J_idx,
-            compiled_estimate_b_i_foce = estimate_b_i_vmapped_ift,
+            compiled_estimate_b_i_foce = estimate_b_i_vmapped_ift_FOCE,
             compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
             jittable_estimate_foc_i=foc_interaction_term_passthrough, 
             jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
@@ -2043,12 +2066,12 @@ class FOCE_approx_neg2ll_loss_jax_fdxINNER():
     """
     def __init__(self, bypass_notimplemented = False):
         
-        if bypass_notimplemented:
-            self.loss_val_idx = 0
-            self.grad_val_idx = 0
-            self.grad_is_fdx = False
-        else:
-            raise NotImplementedError(f"`{self.__name__}` is for debugging or research. Use `FOCE_approx_neg2ll_loss_jax_fdxOUTER` or `FOCE_approx_neg2ll_loss_jax`" )
+        #if bypass_notimplemented:
+        self.loss_val_idx = 0
+        self.grad_val_idx = 0
+        self.grad_is_fdx = False
+        #else:
+        #    raise NotImplementedError(f"`{self.__name__}` is for debugging or research. Use `FOCE_approx_neg2ll_loss_jax_fdxOUTER` or `FOCE_approx_neg2ll_loss_jax`" )
     
     @staticmethod
     def loss_fn(
@@ -2408,7 +2431,7 @@ def approx_neg2ll_loss_jax(
     use_surrogate_neg2ll,
     inner_optimizer_tol, 
     inner_optimizer_maxiter,
-):
+       ):
     """Constructor function for FO, FOCE and FOCEi. Implements FOCEi with various parameterizations 
     defined by the Jax loss classes turn the FOCEi into FO or FOCE by substituting functions utilized 
     in  `approx_neg2ll_loss_jax` with passthroughs. For example, for FO, `compiled_estimate_b_i_foce`
@@ -2538,6 +2561,7 @@ def approx_neg2ll_loss_jax(
                                                 n_random_effects = n_subject_level_eff,
                                                 compiled_ivp_solver = compiled_ivp_solver_novmap_arr,
                                                 compiled_augdyn_ivp_solver = compiled_augdyn_ivp_solver_novmap_arr,
+                                                compiled_2ndorder_augdyn_ivp_solver = compiled_2ndorder_augdyn_ivp_solver_novmap_arr,
                                                 pop_coeff_w_bi_idx = pop_coeff_for_J_idx,
                                                 use_surrogate_neg2ll = use_surrogate_neg2ll,
                                                 inner_optimizer_tol = inner_optimizer_tol,
@@ -2582,7 +2606,10 @@ def approx_neg2ll_loss_jax(
     
     masked_residuals = jnp.where(time_mask_y, padded_y - padded_pred_y, 0.0)
 
-    J_dense = J_conc_full#shape (n_subject, max_obs_per_subject, n_s)
+    #J_dense = J_conc_full#shape (n_subject, max_obs_per_subject, n_s)
+    scaling_factors = solver_coeffs[:, pop_coeff_for_J_idx]
+    J_dense = J_conc_full * scaling_factors[:, None, :]
+    
     J = jnp.where(time_mask_J, J_dense, 0.0) # time_mask_J shape  (n_subject, max_obs_per_subject, n_s)
     
     interaction_term, interaction_term_i = jittable_estimate_foc_i(all_hessians = hessian_i)
