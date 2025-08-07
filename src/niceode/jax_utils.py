@@ -1252,7 +1252,7 @@ def estimate_b_i_vmapped_ift(
             combined_coeffs = pop_coeff + b_i_work
             model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
             is_bad_state = jnp.any(~jnp.isfinite(model_coeffs_i)) | jnp.any(model_coeffs_i < 1e-9)
-            jax.debug.print("Post Fit Inner Bad State Status: {s}", s = is_bad_state)
+            #jax.debug.print("Post Fit Inner Bad State Status: {s}", s = is_bad_state)
             #safe_coeffs = jnp.ones_like(model_coeffs_i)
             #solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
             _, pred_conc, _, S_conc_full, _, H_conc_full = compiled_2ndorder_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
@@ -1629,7 +1629,7 @@ def FOCE_inner_loss_fn(
     #jax.debug.print("model_coeffs_i val: {s}", s = model_coeffs_i)
     #jax.debug.print("combined_coeffs calc: {s} + {x} = {y}", s = pop_coeff_i, x = b_i_work, y = combined_coeffs)
     is_bad_state = jnp.any(~jnp.isfinite(model_coeffs_i)) | jnp.any(model_coeffs_i < 1e-9)
-    jax.debug.print("Inner Bad State Status: {s}", s = is_bad_state)
+    #jax.debug.print("Inner Bad State Status: {s}", s = is_bad_state)
     safe_coeffs = jnp.ones_like(model_coeffs_i)
     solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
     # --- Data Likelihood Part ---
@@ -1641,7 +1641,7 @@ def FOCE_inner_loss_fn(
     #_ode_t0_val_i = jnp.reshape(ode_t0_val_i, (1, -1))
     #jax.debug.print("model_coeffs_i shape: {s}", s = model_coeffs_i.shape)
     #jax.debug.print("ode_t0_val_i shape: {s}", s = ode_t0_val_i.shape)
-    jax.debug.print("Solving Inner Optmizer IVP . . .")
+    #jax.debug.print("Solving Inner Optmizer IVP . . .")
     padded_full_preds_i, padded_pred_y_i = compiled_ivp_solver( ode_t0_val_i, solver_coeffs,)
     #jax.debug.print("padded_preds_i shape: {s}", s = padded_pred_y_i.shape)
     #jax.debug.print("time_mask_y_i shape: {s}", s = time_mask_y_i.shape)
@@ -2061,7 +2061,7 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER():
         return loss
     @staticmethod
     def grad_method():
-        return jax.grad, jax.value_and_grad
+        return partial(fdx.fgrad, offsets = fdx.Offset(accuracy=3)), partial(fdx.value_and_fgrad, offsets = fdx.Offset(accuracy=3))
 
 class FOCE_approx_neg2ll_loss_jax_fdxINNER():
     """FOCE loss where finite differences is used to estimate the gradient of the inner optimizer.
@@ -2169,6 +2169,7 @@ class FOCEi_approx_neg2ll_loss_jax_fdxOUTER():
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
+    raw_incoming_optimizer_vals,
     inner_optimizer_tol = None, 
     inner_optimizer_maxiter = None,
     **kwargs,
@@ -2199,6 +2200,7 @@ class FOCEi_approx_neg2ll_loss_jax_fdxOUTER():
             use_surrogate_neg2ll = use_surrogate_neg2ll,
             inner_optimizer_tol = inner_optimizer_tol, 
             inner_optimizer_maxiter = inner_optimizer_maxiter,
+            raw_incoming_optimizer_vals = raw_incoming_optimizer_vals,
             
         )
         
@@ -2238,6 +2240,7 @@ class FOCE_approx_neg2ll_loss_jax_fdxOUTER():
     ode_t0_vals,
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
+    raw_incoming_optimizer_vals,
     inner_optimizer_tol = None, 
     inner_optimizer_maxiter = None,
     **kwargs,
@@ -2268,6 +2271,7 @@ class FOCE_approx_neg2ll_loss_jax_fdxOUTER():
             use_surrogate_neg2ll = use_surrogate_neg2ll,
             inner_optimizer_tol = inner_optimizer_tol, 
             inner_optimizer_maxiter = inner_optimizer_maxiter,
+            raw_incoming_optimizer_vals = raw_incoming_optimizer_vals,
             
         )
         
@@ -2499,7 +2503,7 @@ def approx_neg2ll_loss_jax(
         optimizer functioning.   
     """
     print("Compiling `approx_neg2ll_loss_jax`")
-    jax.debug.print("Raw Optmizer Values: {v}", v = raw_incoming_optimizer_vals)
+    #jax.debug.print("Raw Optmizer Values: {v}", v = raw_incoming_optimizer_vals)
     #jax.debug.print("theta shape: {s}", s = theta.shape )
     n_subjects = time_mask_y.shape[0]
     n_coeffs = pop_coeff.shape[0]
@@ -2528,7 +2532,7 @@ def approx_neg2ll_loss_jax(
     #jax.debug.print("n_subject_level_eff shape: {s}", s = n_subject_level_eff.shape )
     #jax.debug.print("pop_coeff_for_J_idx shape: {s}", s = pop_coeff_for_J_idx.shape )
     
-#     jax.debug.print(
+#     #jax.debug.print(
 #     """
 #     --- Calling estimate_b_i_vmapped_fdx ---
 #     initial_b_i_batch type: {b_i_type}
@@ -2589,7 +2593,7 @@ def approx_neg2ll_loss_jax(
     #model_coeffs_i = jnp.exp(data_contribution + subject_coeff)# + 1e-6
     log_coeffs = data_contribution + subject_coeff
     is_bad_state = jnp.any(log_coeffs > 700) | jnp.any(log_coeffs < -20)
-    jax.debug.print("Outer Bad State Status: {s}", s = is_bad_state)
+    #jax.debug.print("Outer Bad State Status: {s}", s = is_bad_state)
     
     def good_path(operands):
         
@@ -2611,7 +2615,7 @@ def approx_neg2ll_loss_jax(
         
         
         #jax.debug.print("model_coeffs_i shape: {j}", j=model_coeffs_i.shape)
-        # jax.debug.print("""
+        # #jax.debug.print("""
         #                 solver_coeffs: {x}
                         
         #                 """, x = solver_coeffs)
