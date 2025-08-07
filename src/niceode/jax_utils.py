@@ -1228,21 +1228,62 @@ def estimate_b_i_vmapped_ift(
             use_surrogate_neg2ll=use_surrogate_neg2ll,
         )
 
-        optimizer = optax.adam(learning_rate=0.1)
+                # 2. Set up an optax optimizer
+        learning_rate = 0.08  # Tune as needed
+        num_inner_steps = 200 # Tune as needed
+        lr_schedule = optax.exponential_decay(
+        init_value=learning_rate,
+        transition_steps=num_inner_steps,
+        decay_rate=0.1 
+    )
+        optimizer = optax.adam(learning_rate=lr_schedule)
         opt_state = optimizer.init(initial_b_i)
+        
         grad_fn = jax.grad(obj_fn)
-        omega_is_near_zero = jnp.diag(jnp.sqrt(omega2)) < 1e-5
-
+        #if omega is near zero, then optimzing b_i will probably lead to 
+        #very large pop coeffs w/ very small b_i, effectively canceling 
+        #eachother out in a mathematically valid, but practicaly invalid way
+        omega_is_near_zero = jnp.diag(jnp.sqrt(omega2)) < 1e-5 
+        
         def update_step(i, state_tuple):
-            params, opt_state = state_tuple
-            grads = grad_fn(params)
-            safe_grads = jnp.where(omega_is_near_zero, 0.0, grads)
-            updates, opt_state = optimizer.update(safe_grads, opt_state, params)
-            new_params = optax.apply_updates(params, updates)
-            return new_params, opt_state
-
-        estimated_b_i, _ = jax.lax.fori_loop(0, 100, update_step, (initial_b_i, opt_state))
-        final_inner_loss_value = obj_fn(estimated_b_i)
+            params, opt_state, has_converged, loss_history, norm_history = state_tuple
+            
+            def do_update(operand):
+                params, opt_state, lh, nh = operand
+                grads = grad_fn(params)
+                
+                #sanitize the grads for the whole inner optmization for the current iteration 
+                #based on the heuristic calculated above (`omega_is_near_zero`)
+                safe_grads = jnp.where(omega_is_near_zero, 0.0, grads)
+                grad_norm = jnp.linalg.norm(safe_grads)
+                converged = grad_norm < 1e-2
+                updates, opt_state = optimizer.update(safe_grads, opt_state, params)
+                new_params = optax.apply_updates(params, updates)
+                
+                current_loss = obj_fn(new_params)
+                new_lh = lh.at[i].set(current_loss)
+                new_nh = nh.at[i].set(grad_norm)
+                return new_params, opt_state, converged, new_lh, new_nh
+            def do_nothing(operand):
+                params, opt_state, lh, nh = operand
+                #current_loss = obj_fn(params)
+                new_lh = lh.at[i].set(0.0)
+                new_nh = nh.at[i].set(0.0)
+                #jax.debug.print("Inner Optmizer Converged")
+                return params, opt_state, True, new_lh, new_nh
+            
+            return jax.lax.cond(has_converged,
+                do_nothing,
+                do_update,
+                (params, opt_state, loss_history, norm_history))
+            
+        
+        loss_history_init = jnp.zeros(num_inner_steps)
+        gradnorm_history_init = jnp.zeros(num_inner_steps)
+        initial_state = (initial_b_i, opt_state, False, loss_history_init, gradnorm_history_init)
+        estimated_b_i, opt_state, has_converged, loss_history, norm_history = jax.lax.fori_loop(
+            0, num_inner_steps, update_step, initial_state
+        )
 
         # --- Hessian Approximation ---
         def predict_fn(b_i_for_pred):
