@@ -1250,9 +1250,10 @@ def estimate_b_i_vmapped_ift(
             b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(b_i_for_pred)
             combined_coeffs = pop_coeff + b_i_work
             model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
-            #is_bad_state = jnp.any(~jnp.isfinite(model_coeffs_i)) | jnp.any(model_coeffs_i < 1e-9)
+            is_bad_state = jnp.any(~jnp.isfinite(model_coeffs_i)) | jnp.any(model_coeffs_i < 1e-9)
             #safe_coeffs = jnp.ones_like(model_coeffs_i)
             #solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
+            jax.debug.print("Post Fit 2nd Order IVP State is Bad: {s}", s = is_bad_state)
             _, pred_conc, _, S_conc_full, _, H_conc_full = compiled_2ndorder_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
             
             # We need the elements in J corresponding to the mask, implemented below
@@ -1627,7 +1628,7 @@ def FOCE_inner_loss_fn(
     #jax.debug.print("model_coeffs_i val: {s}", s = model_coeffs_i)
     #jax.debug.print("combined_coeffs calc: {s} + {x} = {y}", s = pop_coeff_i, x = b_i_work, y = combined_coeffs)
     is_bad_state = jnp.any(~jnp.isfinite(model_coeffs_i)) | jnp.any(model_coeffs_i < 1e-9)
-    #jax.debug.print("is_bad_state val: {s}", s = is_bad_state)
+    jax.debug.print("Inner Optimizer State is Bad: {s}", s = is_bad_state)
     safe_coeffs = jnp.ones_like(model_coeffs_i)
     solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
     # --- Data Likelihood Part ---
@@ -2581,6 +2582,7 @@ def approx_neg2ll_loss_jax(
     is_apprx_zero = (model_coeffs_i < 1e-9)
     not_finite = ~jnp.isfinite(model_coeffs_i)
     is_bad_state = jnp.any(not_finite | is_apprx_zero)
+    jax.debug.print("Outer Optimizer State is Bad: {s}", s = is_bad_state)
     safe_coeffs = jnp.ones_like(model_coeffs_i)
     solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
     #jax.debug.print("model_coeffs_i shape: {j}", j=model_coeffs_i.shape)

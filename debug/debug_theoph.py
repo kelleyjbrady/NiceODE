@@ -13,6 +13,8 @@ if USE_GPU:
     os.environ['CUDA_VISIBLE_DEVICES'] = '0' 
 else:
     os.environ['JAX_PLATFORMS'] = 'cpu'
+    import numpyro
+    numpyro.set_host_device_count(4)
 
 import jax
 print(f"JAX is running on: {jax.default_backend()}")
@@ -256,7 +258,7 @@ me_mod_fo =  CompartmentalModel(
                                     #use_full_omega=False, 
                                     significant_digits=5,
                                     me_loss_function=FO_approx_ll_loss,
-                                    jax_loss=FOCE_approx_neg2ll_loss_jax,
+                                    jax_loss=FOCE_approx_neg2ll_loss_jax_iftINNER,
                                     use_full_omega=True, 
                                     use_surrogate_neg2ll=True, 
                                     fit_jax_objective=True,
