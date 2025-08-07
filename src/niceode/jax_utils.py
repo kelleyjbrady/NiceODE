@@ -1293,7 +1293,7 @@ def estimate_b_i_vmapped_ift(
             combined_coeffs = pop_coeff + b_i_work
             model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
             is_bad_state = jnp.any(~jnp.isfinite(model_coeffs_i)) | jnp.any(model_coeffs_i < 1e-9)
-            #jax.debug.print("Post Fit Inner Bad State Status: {s}", s = is_bad_state)
+            jax.debug.print("Post Fit Inner Bad State Status: {s}", s = is_bad_state)
             #safe_coeffs = jnp.ones_like(model_coeffs_i)
             #solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
             _, pred_conc, _, S_conc_full, _, H_conc_full = compiled_2ndorder_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
@@ -1301,6 +1301,8 @@ def estimate_b_i_vmapped_ift(
             # We need the elements in J corresponding to the mask, implemented below
             return  pred_conc, S_conc_full, H_conc_full, model_coeffs_i
 
+        final_inner_loss_value = obj_fn(estimated_b_i)
+        
         pred_conc, S, H, model_coeffs_at_opt = predict_fn(estimated_b_i)
         
         residuals_masked = jnp.where(time_mask_y_i, padded_y_i - pred_conc, 0.0)
@@ -1633,6 +1635,181 @@ def estimate_b_i_vmapped(
     )
     
     return all_b_i_estimates, all_hessians, all_final_inner_loss
+
+def FOCE_inner_loss_fn_lax(
+    b_i,  # The parameters we are optimizing (random effects)
+    # --- Static data for this subject (won't change during inner opt) ---
+    padded_y_i,
+    #unpadded_y_i_len,
+    pop_coeff_i,
+    data_contribution_i,
+    sigma2,
+    omega2,
+    ode_t0_val_i,
+    time_mask_y_i,
+    n_random_effects,
+    compiled_ivp_solver,
+    pop_coeff_w_bi_idx,
+    use_surrogate_neg2ll,
+    ):
+    """
+    Calculates the conditional negative 2 log-likelihood for a single subject.
+    This function is pure and written entirely in JAX.
+    """
+    
+    print("Compiling `FOCE_inner_loss_fn`")
+    # Combine population and random effects to get subject-specific coefficients
+    # This assumes b_i are additive adjustments on the log-scale
+    b_i_work = jnp.zeros(pop_coeff_i.shape[0])
+    b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(b_i)
+    #jax.debug.print("pop_coeff_i shape: {s}", s = pop_coeff_i.shape)
+    #jax.debug.print("pop_coeff_i val: {s}", s = pop_coeff_i)
+    #jax.debug.print("b_i_work shape: {s}", s = b_i_work.shape)
+    #jax.debug.print("b_i_work val: {s}", s = b_i_work)
+    combined_coeffs = pop_coeff_i + b_i_work
+    log_coeffs = data_contribution_i + combined_coeffs
+    
+    #jax.debug.print("model_coeffs_i shape: {s}", s = model_coeffs_i.shape)
+    #jax.debug.print("model_coeffs_i val: {s}", s = model_coeffs_i)
+    #jax.debug.print("combined_coeffs calc: {s} + {x} = {y}", s = pop_coeff_i, x = b_i_work, y = combined_coeffs)
+    is_bad_state = jnp.any(log_coeffs > 700) | jnp.any(log_coeffs < -20)
+    #def true_branch():
+    #    jax.debug.print("Inner Bad State Status: {s}", s = is_bad_state)
+    #    return 1.0
+    #def false_branch():
+    #    return 1.0
+    #jax.lax.cond(is_bad_state, true_branch, false_branch )
+    jax.debug.print("Inner Bad State Status: {s}", s = is_bad_state)
+    def good_path(operands):
+        #solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
+        model_coeffs_i = jnp.exp(log_coeffs)
+        solver_coeffs = model_coeffs_i
+        # --- Data Likelihood Part ---
+        # Solve the ODE for this individual with the current b_i guess
+        #jax.debug.print("model_coeffs_i shape: {s}", s = model_coeffs_i.shape)
+        #jax.debug.print("ode_t0_val_i shape: {s}", s = ode_t0_val_i.shape)
+        
+        #_solver_model_coeffs_i = jnp.reshape(solver_coeffs, (1, -1))
+        #_ode_t0_val_i = jnp.reshape(ode_t0_val_i, (1, -1))
+        #jax.debug.print("model_coeffs_i shape: {s}", s = model_coeffs_i.shape)
+        #jax.debug.print("ode_t0_val_i shape: {s}", s = ode_t0_val_i.shape)
+        #jax.debug.print("Solving Inner Optmizer IVP . . .")
+        padded_full_preds_i, padded_pred_y_i = compiled_ivp_solver( ode_t0_val_i, solver_coeffs,)
+        #jax.debug.print("padded_preds_i shape: {s}", s = padded_pred_y_i.shape)
+        #jax.debug.print("time_mask_y_i shape: {s}", s = time_mask_y_i.shape)
+        #jax.debug.print("padded_y_i shape: {s}", s = padded_y_i.shape)
+        masked_residuals_i = jnp.where(time_mask_y_i, padded_y_i - padded_pred_y_i, 0.0).flatten()
+        # Compute residuals only for observed time points
+        #jax.debug.print("masked_residuals_i shape: {s}", s = masked_residuals_i.shape)
+        #n_t = unpadded_y_i_len # Number of actual observations for subject i
+        #jax.debug.print("unpadded_y_i_len shape: {s}", s = unpadded_y_i_len.shape)
+        sum_sq_residuals = jnp.sum(masked_residuals_i**2)
+        #jax.debug.print("sum_sq_residuals shape: {s}", s = sum_sq_residuals.shape)
+        # This assumes an additive error model, as in the original code
+        _sigma2 = sigma2[0]
+        if use_surrogate_neg2ll:
+            log_likelihood_constant = jnp.log(_sigma2)
+        else:
+            log_likelihood_constant = jnp.log(2 * jnp.pi) + jnp.log(_sigma2)
+        #tmp_ll_const = jnp.repeat(log_likelihood_constant, time_mask_y_i.shape[0])
+        n_t_term = jnp.sum(jnp.where(time_mask_y_i, log_likelihood_constant, 0.0))
+        residuals_term = sum_sq_residuals / _sigma2
+        loss_data = n_t_term + residuals_term
+        
+        #below does not work when n_t is different for each subject
+        #apparently this litteraly lays out a loop like 'sum jnp.log( . . . ) n_t times'
+        #which means this line has a different length when n_t is not the same for all subs
+        #neg2_ll_data = (n_t * jnp.log(2 * jnp.pi) 
+        #                + n_t * jnp.log(_sigma2) 
+        #                + sum_sq_residuals / _sigma2)
+
+        # --- Prior Penalty Part ---
+        # Calculate the penalty from the random effects distribution
+        # b_i.T @ inv(omega2) @ b_i + log(det(omega2))
+        L, low = jax.scipy.linalg.cho_factor(omega2, lower=True)
+        log_det_omega2 = 2 * jnp.sum(jnp.log(jnp.diag(L)))
+        
+        # Use Cholesky solve for stability and efficiency
+        prior_penalty = b_i @ jax.scipy.linalg.cho_solve((L, True), b_i)
+        if use_surrogate_neg2ll:
+            loss_prior = log_det_omega2 + prior_penalty
+        else:
+            neg2ll_prior = (n_random_effects * jnp.log(2 * jnp.pi) 
+                            + log_det_omega2 
+                            + prior_penalty)
+            loss_prior = neg2ll_prior
+        #jax.debug.print("neg2ll_prior shape: {s}", s = neg2ll_prior.shape)
+        #jax.debug.print("neg2_ll_data shape: {s}", s = neg2_ll_data.shape)
+        loss =  loss_data + loss_prior
+        return loss
+    
+    def bad_path(operands):
+        (log_coeffs,
+         ode_t0_val_i,
+         time_mask_y_i,
+         padded_y_i,
+         sigma2,
+         omega2,b_i  ) = operands
+        large_penalty = 1e12
+        loss = large_penalty + jnp.sum(b_i.flatten()**2)
+        
+        return loss
+        
+    operands = (log_coeffs, ode_t0_val_i, time_mask_y_i,
+                padded_y_i, sigma2, omega2, b_i   )
+    
+    
+    loss_out = jax.lax.cond(is_bad_state, bad_path, good_path, operands)
+    
+    #jax.debug.print("""
+    #                -----
+    #                b_i: {b_i}
+    #                -----
+    #                b_i_work: {b_i_work}
+    #                -----
+    #                model_coeffs_i: {model_coeffs_i}
+    #                -----
+    #                solver_coeffs: {solver_coeffs}
+    #                -----
+    #                padded_pred_y_i: {padded_pred_y_i}
+    #                -----
+    #                masked_residuals_i: {masked_residuals_i}
+    #                -----
+    #                sum_sq_residuals: {sum_sq_residuals}
+    #                -----
+    #                log_likelihood_constant: {log_likelihood_constant}
+    #                -----
+    #                neg2_ll_data: {neg2_ll_data}
+    #                -----
+    #                loss: {loss}
+    #                -----
+    #                loss_out: {loss_out}
+    #                
+    #                """,
+    #                b_i = b_i.shape,
+    #                b_i_work = b_i_work.shape, 
+    #                model_coeffs_i = model_coeffs_i.shape, 
+    #                solver_coeffs = solver_coeffs.shape, 
+    #                padded_pred_y_i = padded_pred_y_i.shape, 
+    #                masked_residuals_i = masked_residuals_i.shape, 
+    #                sum_sq_residuals = sum_sq_residuals.shape, 
+    #                log_likelihood_constant = log_likelihood_constant.shape, 
+    #                neg2_ll_data = neg2_ll_data.shape, 
+    #                loss = loss,
+    #                loss_out = loss_out
+    #                
+    #                
+    #                )
+    #jax.debug.print("model_coeffs_i coeffs calc AND state: EXP( {s} + {x} ) = {y}, State: {z}, Loss: {l}",
+    #                s = data_contribution_i,
+    #                x = combined_coeffs,
+    #                y = model_coeffs_i,
+    #                z = is_bad_state, 
+    #                l = loss_out
+    #                )
+
+    #jax.debug.print("Inner Loss Out val: {s}", s = loss_out)
+    return loss_out
 
 def FOCE_inner_loss_fn(
     b_i,  # The parameters we are optimizing (random effects)
@@ -2102,7 +2279,7 @@ class FOCE_approx_neg2ll_loss_jax_iftINNER():
         return loss
     @staticmethod
     def grad_method():
-        return partial(fdx.fgrad, offsets = fdx.Offset(accuracy=3)), partial(fdx.value_and_fgrad, offsets = fdx.Offset(accuracy=3))
+        return jax.grad, jax.value_and_grad
 
 class FOCE_approx_neg2ll_loss_jax_fdxINNER():
     """FOCE loss where finite differences is used to estimate the gradient of the inner optimizer.
