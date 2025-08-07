@@ -1251,10 +1251,10 @@ def estimate_b_i_vmapped_ift(
             combined_coeffs = pop_coeff + b_i_work
             model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
             is_bad_state = jnp.any(~jnp.isfinite(model_coeffs_i)) | jnp.any(model_coeffs_i < 1e-9)
-            #safe_coeffs = jnp.ones_like(model_coeffs_i)
-            #solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
+            safe_coeffs = jnp.ones_like(model_coeffs_i)
+            solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
             jax.debug.print("Post Fit 2nd Order IVP State is Bad: {s}", s = is_bad_state)
-            _, pred_conc, _, S_conc_full, _, H_conc_full = compiled_2ndorder_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
+            _, pred_conc, _, S_conc_full, _, H_conc_full = compiled_2ndorder_augdyn_ivp_solver(ode_t0_i, solver_coeffs)
             
             # We need the elements in J corresponding to the mask, implemented below
             return  pred_conc, S_conc_full, H_conc_full, model_coeffs_i
