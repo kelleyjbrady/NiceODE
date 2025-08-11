@@ -1700,16 +1700,12 @@ def FOCE_inner_loss_fn_lax(
     #jax.debug.print("model_coeffs_i val: {s}", s = model_coeffs_i)
     #jax.debug.print("combined_coeffs calc: {s} + {x} = {y}", s = pop_coeff_i, x = b_i_work, y = combined_coeffs)
     is_bad_state = jnp.any(log_coeffs > 700) | jnp.any(log_coeffs < -20)
-    #def true_branch():
-    #    jax.debug.print("Inner Bad State Status: {s}", s = is_bad_state)
-    #    return 1.0
-    #def false_branch():
-    #    return 1.0
     #jax.lax.cond(is_bad_state, true_branch, false_branch )
-    jax.debug.print("Inner Bad State Status: {s}", s = is_bad_state)
+    #jax.debug.print("No EXP Inner Bad State Status: {s}", s = is_bad_state)
     def good_path(operands):
         #solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
         model_coeffs_i = jnp.exp(log_coeffs)
+        #jax.debug.print("POST EXP Inner Bad State Status: {s}", s = is_bad_state)
         solver_coeffs = model_coeffs_i
         # --- Data Likelihood Part ---
         # Solve the ODE for this individual with the current b_i guess
@@ -1777,6 +1773,7 @@ def FOCE_inner_loss_fn_lax(
          padded_y_i,
          sigma2,
          omega2,b_i  ) = operands
+        #jax.debug.print("INNER OPT BAD PATH TRIGGERED: {s}", s = is_bad_state)
         large_penalty = 1e12
         loss = large_penalty + jnp.sum(b_i.flatten()**2)
         
@@ -1859,7 +1856,7 @@ def FOCE_inner_loss_fn(
     This function is pure and written entirely in JAX.
     """
     
-    print("Compiling `FOCE_inner_loss_fn`")
+    print("Compiling `FOCE_inner_loss_fn` WITHOUT LAX")
     # Combine population and random effects to get subject-specific coefficients
     # This assumes b_i are additive adjustments on the log-scale
     b_i_work = jnp.zeros(pop_coeff_i.shape[0])
@@ -1869,6 +1866,10 @@ def FOCE_inner_loss_fn(
     #jax.debug.print("b_i_work shape: {s}", s = b_i_work.shape)
     #jax.debug.print("b_i_work val: {s}", s = b_i_work)
     combined_coeffs = pop_coeff_i + b_i_work
+    log_coeffs = data_contribution_i + combined_coeffs
+    is_bad_state_log = jnp.any(log_coeffs > 700) | jnp.any(log_coeffs < -20)
+    #jax.debug.print("No EXP Inner Bad State Status: {s}", s = is_bad_state_log)
+    #model_coeffs_i = jnp.exp(log_coeffs)
     model_coeffs_i = jnp.exp(data_contribution_i + combined_coeffs)
     #jax.debug.print("model_coeffs_i shape: {s}", s = model_coeffs_i.shape)
     #jax.debug.print("model_coeffs_i val: {s}", s = model_coeffs_i)
@@ -1877,6 +1878,7 @@ def FOCE_inner_loss_fn(
     #jax.debug.print("Inner Bad State Status: {s}", s = is_bad_state)
     safe_coeffs = jnp.ones_like(model_coeffs_i)
     solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
+    #solver_coeffs = model_coeffs_i
     # --- Data Likelihood Part ---
     # Solve the ODE for this individual with the current b_i guess
     #jax.debug.print("model_coeffs_i shape: {s}", s = model_coeffs_i.shape)
@@ -2380,7 +2382,7 @@ class FOCE_approx_neg2ll_loss_jax_fdxINNER():
     @staticmethod
     def grad_method():
         return jax.grad, jax.value_and_grad
-
+    
 class FOCEi_approx_neg2ll_loss_jax_fdxOUTER():
     """FOCEi loss where finite differences (`finitediffx`) is used to estimate the gradient of the outer optimizer.
     FOCE loss is used to determine if an optmize step provides an improvement. FOCEi loss is used to estimate the gradient
@@ -2777,36 +2779,39 @@ def approx_neg2ll_loss_jax(
     #jax.debug.print("n_subject_level_eff shape: {s}", s = n_subject_level_eff.shape )
     #jax.debug.print("pop_coeff_for_J_idx shape: {s}", s = pop_coeff_for_J_idx.shape )
     
-#     #jax.debug.print(
-#     """
-#     --- Calling estimate_b_i_vmapped_fdx ---
-#     initial_b_i_batch type: {b_i_type}
-#     padded_y_batch type: {padded_y_type}
-#     data_contribution_batch type: {data_contrib_type}
-#     ode_t0_vals_batch type: {ode_t0_type}
-#     time_mask_y_batch type: {time_mask_type}
-#     pop_coeff type: {pop_coeff_type}
-#     sigma2 type: {sigma2_type}
-#     n_random_effects type: {n_rand_type}
-#     compiled_ivp_solver type: {ivp_solver_type}
-#     compiled_augdyn_ivp_solver type: {augdyn_solver_type}
-#     pop_coeff_w_bi_idx type: {pc_idx_type}
-#     use_surrogate_neg2ll type: {use_surrogate_type}
-#     """,
-#     b_i_type=type(b_i),
-#     padded_y_type=type(padded_y),
-#     data_contrib_type=type(data_contribution),
-#     ode_t0_type=type(ode_t0_vals),
-#     time_mask_type=type(time_mask_y),
-#     pop_coeff_type=type(pop_coeff),
-#     sigma2_type=type(sigma2),
-#     n_rand_type=type(n_subject_level_eff),
-#     ivp_solver_type=type(compiled_ivp_solver_novmap_arr),
-#     augdyn_solver_type=type(compiled_augdyn_ivp_solver_novmap_arr),
-#     pc_idx_type=type(pop_coeff_for_J_idx),
-#     use_surrogate_type=type(use_surrogate_neg2ll)
-# )
-
+    #     #jax.debug.print(
+    #     """
+    #     --- Calling estimate_b_i_vmapped_fdx ---
+    #     initial_b_i_batch type: {b_i_type}
+    #     padded_y_batch type: {padded_y_type}
+    #     data_contribution_batch type: {data_contrib_type}
+    #     ode_t0_vals_batch type: {ode_t0_type}
+    #     time_mask_y_batch type: {time_mask_type}
+    #     pop_coeff type: {pop_coeff_type}
+    #     sigma2 type: {sigma2_type}
+    #     n_random_effects type: {n_rand_type}
+    #     compiled_ivp_solver type: {ivp_solver_type}
+    #     compiled_augdyn_ivp_solver type: {augdyn_solver_type}
+    #     pop_coeff_w_bi_idx type: {pc_idx_type}
+    #     use_surrogate_neg2ll type: {use_surrogate_type}
+    #     """,
+    #     b_i_type=type(b_i),
+    #     padded_y_type=type(padded_y),
+    #     data_contrib_type=type(data_contribution),
+    #     ode_t0_type=type(ode_t0_vals),
+    #     time_mask_type=type(time_mask_y),
+    #     pop_coeff_type=type(pop_coeff),
+    #     sigma2_type=type(sigma2),
+    #     n_rand_type=type(n_subject_level_eff),
+    #     ivp_solver_type=type(compiled_ivp_solver_novmap_arr),
+    #     augdyn_solver_type=type(compiled_augdyn_ivp_solver_novmap_arr),
+    #     pc_idx_type=type(pop_coeff_for_J_idx),
+    #     use_surrogate_type=type(use_surrogate_neg2ll)
+    # )
+    no_foce_log_coeffs = data_contribution + pop_coeff
+    is_bad_state_0 = jnp.any(no_foce_log_coeffs > 700) | jnp.any(no_foce_log_coeffs < -20)
+    jax.debug.print('PRE FOCE b_i bad state status: {s}', s = is_bad_state_0)
+    
     b_i, hessian_i, inner_loss_i = compiled_estimate_b_i_foce(
         initial_b_i_batch=b_i,
         padded_y_batch=padded_y,
@@ -2866,6 +2871,7 @@ def approx_neg2ll_loss_jax(
         #                 """, x = solver_coeffs)
         model_coeffs_i = jnp.exp(log_coeffs)
         solver_coeffs = model_coeffs_i
+        #jax.debug.print("Solving outer 2nd order IVP")
         padded_full_preds, padded_pred_y, J_full, J_conc_full = compiled_augdyn_ivp_solver_arr(
             ode_t0_vals,
             solver_coeffs
