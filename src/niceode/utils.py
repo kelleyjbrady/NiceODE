@@ -3010,8 +3010,15 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             
         diffrax_solver = Kvaerno5()
         #diffrax_solver = Tsit5()
-        diffrax_step_ctrl = PIDController(rtol=self.ode_solver_tol, atol=self.ode_solver_tol)
+        adjoint_tol = np.max([1e-4,self.ode_solver_tol/1000 ])
+        diffrax_step_ctrl = PIDController(rtol=adjoint_tol, atol=adjoint_tol)
         dt0 = 0.1
+        #
+        #adjoint_solver = Kvaerno5()
+        #adjoint = RecursiveCheckpointAdjoint(
+        #    stepsize_controller = PIDController(rtol=adjoint_tol, atol=adjoint_tol),
+        #    max_steps = 16**5
+        #)
         
         partial_solve_ivp = partial(
             self._solve_2ndorder_augdyn_ivp_jax_worker,
@@ -3022,9 +3029,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             diffrax_solver=diffrax_solver,
             diffrax_step_ctrl = diffrax_step_ctrl,
             dt0 = dt0, 
-            diffrax_max_steps = maxsteps, 
+            diffrax_max_steps = 16**5, 
             n_states = aug_dyn_2nd_order_ode.n_states,
-            n_params = aug_dyn_2nd_order_ode.n_params
+            n_params = aug_dyn_2nd_order_ode.n_params, 
+            #adjoint = adjoint
             
         )
         vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
@@ -4042,7 +4050,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if _jax_objective_grad is None:
             _gradient_is_available = False
         if debugging_jax:
-            return _jax_objective_function, _opt_params
+            return _jax_objective_function, _opt_params, loss_static_kwargs
         
         
         #--------------------------------
