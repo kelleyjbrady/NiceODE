@@ -1354,49 +1354,87 @@ def estimate_b_i_vmapped_ift(
         Z_i_masked = Z_i * time_mask_y_i[:, None]
         
         _sigma2 = sigma2[0]
-        H_approx = 2 * (Z_i_masked.T @ Z_i_masked) / _sigma2       
+        H_data_term1 = Z_i_masked.T @ Z_i_masked
+        H_data_term2 = jnp.einsum('tij,t->ij', H_masked[:, pop_coeff_w_bi_idx][:, :, pop_coeff_w_bi_idx], residuals_masked)
+        H_data = (H_data_term1 - H_data_term2) / _sigma2
+             
         L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
-        # 2. Create an identity matrix of the same size
         identity = jnp.eye(omega2.shape[0], dtype=omega2.dtype)
-        # 3. Efficiently solve for the inverse using the Cholesky factor
         inv_omega2 = jax.scipy.linalg.cho_solve((L, True), identity)
-        # 4. Compute the full Hessian needed for the FOCEi term
-        H_foce = H_approx + (2 * inv_omega2)
+        H_prior = inv_omega2
+        
+        H_foce = 2 * (H_data + H_prior)
 
-        return estimated_b_i, H_foce, final_inner_loss_value, S_masked, H_masked, residuals_masked, scaling_factors_b
+        return estimated_b_i, H_foce, final_inner_loss_value, S_masked, H_masked, residuals_masked, scaling_factors_b, model_coeffs_at_opt
     
     def _estimate_single_b_i_fwd(*args):
         # args now only contains the 9 JAX array arguments
         outputs = estimate_single_b_i_impl(*args)
-        estimated_b_i, H_foce, final_inner_loss, S_masked, H_masked, residuals_masked, scaling_factors_b = outputs
+        estimated_b_i, H_foce, final_inner_loss, S_masked, H_masked, residuals_masked, scaling_factors_b, model_coeffs_at_opt = outputs
         fwd_output = estimated_b_i, H_foce, final_inner_loss
-        residuals = (estimated_b_i, H_foce, S_masked, H_masked, residuals_masked, scaling_factors_b) + args
+        residuals = (estimated_b_i, H_foce, S_masked, H_masked, residuals_masked, scaling_factors_b, model_coeffs_at_opt) + args
         return fwd_output, residuals
     
     def _estimate_single_b_i_bwd(residuals, g):
-        (estimated_b_i, H_foce, S_masked, H_masked, residuals_masked, scaling_factors_b,
+        (estimated_b_i, H_foce, S_masked, H_masked, residuals_masked, scaling_factors_b,model_coeffs_at_opt,
          initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
          pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx) = residuals
         g_b_i, g_H_foce, g_loss = g
 
         v = jax.scipy.linalg.solve(H_foce, g_b_i, assume_a='pos')
         
-        #sliced and scale S, this is the same as Z_i from the forward pass
-        S_wrt_b = S_masked[:, pop_coeff_w_bi_idx] * scaling_factors_b[None, :]
-        S_wrt_pc = S_wrt_b
-        #slice and scale H
-        H_sliced  = H_masked[:, pop_coeff_w_bi_idx][:, :, pop_coeff_w_bi_idx]
-        H_wrt_b_pc = (H_sliced * scaling_factors_b[None, None, :] * scaling_factors_b[None, :, None])
+        S_wrt_ode_coeffs = S_masked
+        H_wrt_ode_coeffs = H_masked
         
-        # This is d(inner_grad)/d(pop_coeff)
-        term1 = jnp.einsum('tij,t->ij', H_wrt_b_pc, residuals_masked)
-        term2 = S_wrt_b.T @ S_wrt_pc
-        J_cross_pc = (-2 / sigma2[0]) * (term1 - term2) # d(residuals)/d(pc) = -d(preds)/d(pc)
-        #is this followign the same as the einsum above?
-        #J_cross_pc = (-2 / sigma2[0]) * (H_wrt_b_pc.T @ residuals_masked - Z_i.T @ Z_i)
-        grad_pop_coeff = -v @ J_cross_pc
+        # 1. Calculate S_wrt_b (sensitivity w.r.t. random effects)
+        # This uses sliced sensitivities and sliced scaling factors
+        S_wrt_b = S_wrt_ode_coeffs[:, pop_coeff_w_bi_idx] * scaling_factors_b[None, :]
+        
+         # 2. Calculate S_wrt_pc (sensitivity w.r.t. population coefficients)
+        # This uses the FULL sensitivity matrix and FULL scaling factors
+        S_wrt_pc = S_wrt_ode_coeffs * model_coeffs_at_opt[None, :]
+        
+        # 3. Calculate the mixed Hessian H_wrt_b_pc = d^2(y) / db_i / dpc_k
+        n_b = len(pop_coeff_w_bi_idx)
+        n_pc = S_wrt_ode_coeffs.shape[1]
+
+        # Part 1 of the formula: The second-order term involving H
+        # We slice H by b_idx on the first axis and use the full pc axis on the second
+        H_term = (H_wrt_ode_coeffs[:, pop_coeff_w_bi_idx, :] * # Slice H for b
+              scaling_factors_b[None, :, None] * # Scale by b-related coeffs
+              model_coeffs_at_opt[None, None, :])                 # Scale by all pop_coeffs
+        
+        # Part 2 of the formula: The first-order term involving S
+        # This places the columns of S_wrt_pc corresponding to random effects 
+        # onto the diagonal of the final (n_b, n_pc) matrix for each time point.
+        selection_matrix = jnp.zeros((n_b, n_pc)).at[jnp.arange(n_b), pop_coeff_w_bi_idx].set(1)
+        S_term = jnp.einsum('tk,jk->tjk', S_wrt_pc, selection_matrix)
+        
+        H_wrt_b_pc = H_term + S_term
+
+        # 4. Assemble the final cross-partial, J_cross_pc
+        term1_final = jnp.einsum('tij,t->ij', H_wrt_b_pc, residuals_masked)
+        term2_final = S_wrt_b.T @ S_wrt_pc
+        J_cross_pc = (-2 / sigma2[0]) * (term1_final - term2_final)
+        
+        implicit_grad_pc = -v @ J_cross_pc
+        
+        # Define a function for the explicit dependency of the loss on pop_coeff
+        def explicit_loss_pc(pc, b_i_star, s2):
+            # This logic should mirror your outer loss data term, with b_i fixed
+            b_i_work = jnp.zeros_like(pc)
+            b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(b_i_star)
+            combined_coeffs = pc + b_i_work
+            log_coeffs = data_contrib_i + combined_coeffs
+            model_coeffs_i = jnp.exp(log_coeffs)
+            _, pred_y = compiled_ivp_solver(ode_t0_i, model_coeffs_i) # You need the non-augmented solver here
+            masked_residuals = jnp.where(time_mask_y_i, padded_y_i - pred_y, 0.0)
+            return jnp.sum(masked_residuals**2) / s2
+
+        explicit_grad_pc = jax.grad(explicit_loss_pc, argnums=0)(pop_coeff, estimated_b_i, sigma2[0])
+
+        grad_pop_coeff = implicit_grad_pc + explicit_grad_pc
         grad_data_contrib = grad_pop_coeff
-        
         #----estimate grad for s2----
         
         def data_likelihood(s2):
@@ -1440,7 +1478,9 @@ def estimate_b_i_vmapped_ift(
          S_masked,
          H_masked,
          residuals_masked,
-         scaling_factors_b) = estimate_single_b_i_impl(
+         scaling_factors_b, 
+         model_coeffs_at_opt
+         ) = estimate_single_b_i_impl(
             initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
             pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx
         )
