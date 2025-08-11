@@ -1213,7 +1213,7 @@ def estimate_b_i_vmapped_ift(
     #use_surrogate_neg2ll,
     ):
         """The implementation of the optimization for one subject."""
-        obj_fn = lambda b_i: FOCE_inner_loss_fn(
+        obj_fn = lambda b_i: FOCE_inner_loss_fn_lax(
             b_i=b_i,
             padded_y_i=padded_y_i,
             pop_coeff_i=pop_coeff,
@@ -1231,6 +1231,8 @@ def estimate_b_i_vmapped_ift(
                 # 2. Set up an optax optimizer
         learning_rate = 0.08  # Tune as needed
         num_inner_steps = 200 # Tune as needed
+        b_i_lower_bound = -8
+        b_i_upper_bound = 8
         lr_schedule = optax.exponential_decay(
         init_value=learning_rate,
         transition_steps=num_inner_steps,
@@ -1258,7 +1260,12 @@ def estimate_b_i_vmapped_ift(
                 grad_norm = jnp.linalg.norm(safe_grads)
                 converged = grad_norm < 1e-2
                 updates, opt_state = optimizer.update(safe_grads, opt_state, params)
-                new_params = optax.apply_updates(params, updates)
+                new_params_unconstrained = optax.apply_updates(params, updates)
+                
+                new_params = jnp.clip(new_params_unconstrained, 
+                              b_i_lower_bound, 
+                              b_i_upper_bound)
+                
                 
                 current_loss = obj_fn(new_params)
                 new_lh = lh.at[i].set(current_loss)
@@ -1284,23 +1291,43 @@ def estimate_b_i_vmapped_ift(
         estimated_b_i, opt_state, has_converged, loss_history, norm_history = jax.lax.fori_loop(
             0, num_inner_steps, update_step, initial_state
         )
+        jax.debug.print("""
+                        --------
+                        Subject Convergence Status: {hs}
+                        
+                        Loss History: {lh}
+                        
+                        Norm History: {nh}
+                        """, 
+                        hs = has_converged, lh = loss_history, nh = norm_history
+                        )
 
         # --- Hessian Approximation ---
         def predict_fn(b_i_for_pred):
-
+            #jax.debug.print("Post fit b_i: {bi}", )
             b_i_work = jnp.zeros_like(pop_coeff)
             b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(b_i_for_pred)
             combined_coeffs = pop_coeff + b_i_work
             model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
             is_bad_state = jnp.any(~jnp.isfinite(model_coeffs_i)) | jnp.any(model_coeffs_i < 1e-9)
-            jax.debug.print("Post Fit Inner Bad State Status: {s}", s = is_bad_state)
+            jax.debug.print("""Post Fit Inner Bad State Status: {s}
+                            
+                            Post fit b_i: {bi}
+                            
+                            model_coeffs_i: {mci}
+                            
+                            t0: {t0}
+                            """, s = is_bad_state, bi = b_i_for_pred, mci = model_coeffs_i, t0 = ode_t0_i)
             #safe_coeffs = jnp.ones_like(model_coeffs_i)
             #solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
+            #jax.debug.print("Solving Post fit 0th order IVP")
+            _ = compiled_ivp_solver(ode_t0_i, model_coeffs_i)
+            #jax.debug.print("Solving Post fit 2nd order IVP")
             _, pred_conc, _, S_conc_full, _, H_conc_full = compiled_2ndorder_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
             
             # We need the elements in J corresponding to the mask, implemented below
             return  pred_conc, S_conc_full, H_conc_full, model_coeffs_i
-
+        
         final_inner_loss_value = obj_fn(estimated_b_i)
         
         pred_conc, S, H, model_coeffs_at_opt = predict_fn(estimated_b_i)
