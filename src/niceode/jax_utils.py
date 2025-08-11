@@ -1415,7 +1415,7 @@ def estimate_b_i_vmapped_ift(
         # 4. Assemble the final cross-partial, J_cross_pc
         term1_final = jnp.einsum('tij,t->ij', H_wrt_b_pc, residuals_masked)
         term2_final = S_wrt_b.T @ S_wrt_pc
-        J_cross_pc = (-2 / sigma2[0]) * (term1_final - term2_final)
+        J_cross_pc = (-2 / sigma2[0]) * (term2_final - term1_final)
         
         implicit_grad_pc = -v @ J_cross_pc
         
