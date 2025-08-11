@@ -1405,7 +1405,7 @@ def estimate_b_i_vmapped_ift(
             #                """)
             return jnp.sum(time_mask_y_i) * jnp.log(s2) + jnp.sum(residuals_masked**2) / s2
         
-        J_cross_s2 = (S_wrt_b.T @ residuals_masked) / (sigma2[0]**2)
+        J_cross_s2 = 2*(S_wrt_b.T @ residuals_masked) / (sigma2[0]**2)
         implicit_grad_s2 = -v @ J_cross_s2
         explicit_grad_s2 = jax.grad(data_likelihood)(sigma2[0])
         total_grad_s2_scalar = explicit_grad_s2 + implicit_grad_s2
