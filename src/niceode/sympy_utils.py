@@ -32,25 +32,26 @@ def generate_aug_dynamcis_ode_sympy(symbolic_ode:SymbolicODE):
     dSdt = symbolic_ode.J_y * S + symbolic_ode.J_p
     
 
-    #Dynamics for H
+   # Dynamics for H
     dHdt_list = []
     for k in range(symbolic_ode.n_params):
         H_k = H_list[k]
         dJp_dpk = symbolic_ode.dJ_p_dp_list[k]
         
-        # This loop correctly calculates d(J_y)/dp_k via the chain rule.
-        # Let's rename the result to be more descriptive.
-        dJy_dpk = sympy.zeros(symbolic_ode.n_states, symbolic_ode.n_states) # It's a 2x2
+        # 1. Get the explicit part of the derivative
+        dJy_dpk_explicit = symbolic_ode.dJ_y_dp_list[k]
+        
+        # 2. Calculate the implicit (chain rule) part of the derivative
+        dJy_dpk_implicit = sympy.zeros(symbolic_ode.n_states, symbolic_ode.n_states)
         for j in range(symbolic_ode.n_states):
             dJ_y_dyj = sympy.diff(symbolic_ode.J_y, symbolic_ode.states[j])
-            dJy_dpk += dJ_y_dyj * S[j, k]
+            dJy_dpk_implicit += dJ_y_dyj * S[j, k]
         
-        # THE FIX: The full term in the equation is (d(J_y)/dp_k) * S
-        # This is a (2, 2) @ (2, 3) matrix multiplication, which yields a (2, 3) matrix.
-        full_contraction_term = dJy_dpk * S
-
-        # Now all terms in the sum have the correct (2, 3) shape.
-        dHk_dt = symbolic_ode.J_y * H_k + full_contraction_term + dJp_dpk
+        # 3. Combine them to get the total derivative
+        total_dJy_dpk = dJy_dpk_explicit + dJy_dpk_implicit
+        
+        # 4. Use the total derivative in the final expression
+        dHk_dt = symbolic_ode.J_y * H_k + total_dJy_dpk * S + dJp_dpk
         dHdt_list.append(dHk_dt)
     
     # Flatten all symbolic components for the function signature
