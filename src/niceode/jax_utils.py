@@ -3024,3 +3024,229 @@ def approx_neg2ll_loss_jax(
         operands
     )
 
+
+def debug_omega_loss_only(pop_coeff:jnp.ndarray, 
+    sigma2:jnp.ndarray, 
+    omega2:jnp.ndarray, 
+    theta:jnp.ndarray, 
+    theta_data:jnp.ndarray,
+    padded_y:jnp.ndarray,
+    unpadded_y_len,
+    time_mask_y,
+    time_mask_J,
+    compiled_augdyn_ivp_solver_arr,
+    compiled_augdyn_ivp_solver_novmap_arr,
+    compiled_2ndorder_augdyn_ivp_solver_arr,
+    compiled_2ndorder_augdyn_ivp_solver_novmap_arr,
+    compiled_ivp_solver_arr,
+    compiled_ivp_solver_novmap_arr,
+    ode_t0_vals, 
+    pop_coeff_for_J_idx,
+    compiled_estimate_b_i_foce, 
+    compiled_estimate_b_i_fo,
+    jittable_estimate_foc_i,
+    jittable_sum_neg2ll_terms, 
+    use_surrogate_neg2ll,
+    inner_optimizer_tol, 
+    inner_optimizer_maxiter,
+    raw_incoming_optimizer_vals,):
+    
+    print("Compiling `approx_neg2ll_loss_jax`")
+    #jax.debug.print("Raw Optmizer Values: {v}", v = raw_incoming_optimizer_vals)
+    #jax.debug.print("theta shape: {s}", s = theta.shape )
+    n_subjects = time_mask_y.shape[0]
+    n_coeffs = pop_coeff.shape[0]
+    n_subject_level_eff = pop_coeff_for_J_idx.shape[0]
+    unpadded_y_len_batch = jnp.sum(time_mask_y, axis = 1)
+    if theta.shape[0] == 0:
+        
+        data_contribution = jnp.zeros((n_subjects, n_coeffs))
+    else:
+        data_contribution = theta @ theta_data
+    #jax.debug.print("time_mask_y shape: {s}", s = time_mask_y.shape )
+    #jax.debug.print("data_contribution shape: {j}", j=data_contribution.shape)
+    #jax.debug.print("pop_coeff shape: {j}", j=pop_coeff.shape)
+    
+    #estimate b_i here
+    b_i = jnp.zeros((n_subjects, n_subject_level_eff))
+    
+    # 1. Run the inner optimization exactly as before to get the final b_i
+    # This call should be identical to the one in your real loss function.
+    b_i, hessian_i, inner_loss_i = compiled_estimate_b_i_foce(
+        initial_b_i_batch=b_i,
+        padded_y_batch=padded_y,
+        data_contribution_batch=data_contribution,
+        ode_t0_vals_batch=ode_t0_vals,
+        time_mask_y_batch=time_mask_y,
+        # unpadded_y_len_batch = unpadded_y_len_batch,
+        pop_coeff=pop_coeff,
+        sigma2=sigma2,
+        omega2=omega2,
+        n_random_effects=n_subject_level_eff,
+        compiled_ivp_solver=compiled_ivp_solver_novmap_arr,
+        compiled_augdyn_ivp_solver=compiled_augdyn_ivp_solver_novmap_arr,
+        compiled_2ndorder_augdyn_ivp_solver=compiled_2ndorder_augdyn_ivp_solver_novmap_arr,
+        pop_coeff_w_bi_idx=pop_coeff_for_J_idx,
+        use_surrogate_neg2ll=use_surrogate_neg2ll,
+        inner_optimizer_tol=inner_optimizer_tol,
+        inner_optimizer_maxiter=inner_optimizer_maxiter,
+    )
+
+    # 2. Calculate the inverse of omega2
+    L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
+    identity = jnp.eye(omega2.shape[0], dtype=omega2.dtype)
+    inv_omega2 = jax.scipy.linalg.cho_solve((L, True), identity)
+
+    # 3. The loss is ONLY the sum of prior penalties over all subjects
+    # This is the simplified part. We ignore the data likelihood.
+    # Note: We need to use vmap or a loop to handle the mat-vec product per subject
+    prior_penalties = jax.vmap(lambda b: b @ inv_omega2 @ b)(b_i)
+    total_loss = jnp.sum(prior_penalties)
+
+    return total_loss, 1.0
+
+
+
+class DEBUG_FOCE_approx_neg2ll_loss_jax_fdxOUTER():
+    """FOCE loss where finite differences (`finitediffx`) is used to estimate the gradient of the outer optimizer.
+    
+    
+    """
+    def __init__(self):
+        self.loss_val_idx = 0
+        self.grad_val_idx = 0
+        self.grad_is_fdx = True
+    
+    @staticmethod
+    def loss_fn(
+    pop_coeff, 
+    sigma2, 
+    omega2, 
+    theta, 
+    theta_data,
+    padded_y,
+    unpadded_y_len,
+    time_mask_y,
+    time_mask_J,
+    compiled_augdyn_ivp_solver_arr,
+    compiled_augdyn_ivp_solver_novmap_arr,
+    compiled_2ndorder_augdyn_ivp_solver_arr,
+    compiled_2ndorder_augdyn_ivp_solver_novmap_arr,
+    compiled_ivp_solver_arr,
+    compiled_ivp_solver_novmap_arr,
+    ode_t0_vals,
+    pop_coeff_for_J_idx,
+    use_surrogate_neg2ll,
+    raw_incoming_optimizer_vals,
+    inner_optimizer_tol = None, 
+    inner_optimizer_maxiter = None,
+    **kwargs,
+    ):
+        print("Compiling `FOCE_approx_neg2ll_loss_jax`")
+        loss = debug_omega_loss_only(
+            pop_coeff = pop_coeff, 
+            sigma2 = sigma2, 
+            omega2 = omega2, 
+            theta = theta, 
+            theta_data = theta_data,
+            padded_y = padded_y,
+            unpadded_y_len = unpadded_y_len,
+            time_mask_y = time_mask_y,
+            time_mask_J = time_mask_J,
+            compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
+            compiled_augdyn_ivp_solver_novmap_arr = compiled_augdyn_ivp_solver_novmap_arr,
+            compiled_2ndorder_augdyn_ivp_solver_arr = compiled_2ndorder_augdyn_ivp_solver_arr,
+            compiled_2ndorder_augdyn_ivp_solver_novmap_arr = compiled_2ndorder_augdyn_ivp_solver_novmap_arr,
+            compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+            compiled_ivp_solver_novmap_arr = compiled_ivp_solver_novmap_arr,
+            ode_t0_vals = ode_t0_vals,
+            pop_coeff_for_J_idx = pop_coeff_for_J_idx,
+            compiled_estimate_b_i_foce = estimate_b_i_vmapped,
+            compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
+            jittable_estimate_foc_i=foc_interaction_term_passthrough, 
+            jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
+            use_surrogate_neg2ll = use_surrogate_neg2ll,
+            inner_optimizer_tol = inner_optimizer_tol, 
+            inner_optimizer_maxiter = inner_optimizer_maxiter,
+            raw_incoming_optimizer_vals = raw_incoming_optimizer_vals,
+            
+        )
+        
+        return loss
+    @staticmethod
+    def grad_method():
+        return partial(fdx.fgrad, offsets = fdx.Offset(accuracy=3)), partial(fdx.value_and_fgrad, offsets = fdx.Offset(accuracy=3))
+
+class DEBUG_FOCE_approx_neg2ll_loss_jax_iftINNER():
+    """FOCE loss for debugging ONLY. You should not use this loss. 
+    
+    """
+    def __init__(self, bypass_notimplemented = False):
+        #if bypass_notimplemented:
+        self.loss_val_idx = 0
+        self.grad_val_idx = 0
+        self.grad_is_fdx = False
+        #else:
+        #    raise NotImplementedError(f"{self.__name__} is for debugging only. Use `FOCE_approx_neg2ll_loss_jax_fdxOUTER` or `FOCE_approx_neg2ll_loss_jax`")
+    @staticmethod
+    def loss_fn(
+    pop_coeff, 
+    sigma2, 
+    omega2, 
+    theta, 
+    theta_data,
+    padded_y,
+    unpadded_y_len,
+    time_mask_y,
+    time_mask_J,
+    compiled_augdyn_ivp_solver_arr,
+    compiled_augdyn_ivp_solver_novmap_arr,
+    compiled_2ndorder_augdyn_ivp_solver_arr,
+    compiled_2ndorder_augdyn_ivp_solver_novmap_arr,
+    compiled_ivp_solver_arr,
+    compiled_ivp_solver_novmap_arr,
+    ode_t0_vals,
+    pop_coeff_for_J_idx,
+    use_surrogate_neg2ll,
+    raw_incoming_optimizer_vals,
+    inner_optimizer_tol = None, 
+    inner_optimizer_maxiter = None,
+    **kwargs,
+    ):
+        
+        print("Compiling `FOCE_approx_neg2ll_loss_jax`")
+        
+        estimate_b_i_vmapped_ift_FOCE = partial(estimate_b_i_vmapped_ift, interaction_term_objective = interaction_term_objective_passthrough)
+        loss = debug_omega_loss_only(
+            pop_coeff = pop_coeff, 
+            sigma2 = sigma2, 
+            omega2 = omega2, 
+            theta = theta, 
+            theta_data = theta_data,
+            padded_y = padded_y,
+            unpadded_y_len = unpadded_y_len,
+            time_mask_y = time_mask_y,
+            time_mask_J = time_mask_J,
+            compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
+            compiled_augdyn_ivp_solver_novmap_arr = compiled_augdyn_ivp_solver_novmap_arr,
+            compiled_2ndorder_augdyn_ivp_solver_arr = compiled_2ndorder_augdyn_ivp_solver_arr,
+            compiled_2ndorder_augdyn_ivp_solver_novmap_arr = compiled_2ndorder_augdyn_ivp_solver_novmap_arr,
+            compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+            compiled_ivp_solver_novmap_arr = compiled_ivp_solver_novmap_arr,
+            ode_t0_vals = ode_t0_vals,
+            pop_coeff_for_J_idx = pop_coeff_for_J_idx,
+            compiled_estimate_b_i_foce = estimate_b_i_vmapped_ift_FOCE,
+            compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
+            jittable_estimate_foc_i=foc_interaction_term_passthrough, 
+            jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
+            use_surrogate_neg2ll = use_surrogate_neg2ll,
+            inner_optimizer_tol = inner_optimizer_tol, 
+            inner_optimizer_maxiter = inner_optimizer_maxiter,
+            raw_incoming_optimizer_vals = raw_incoming_optimizer_vals
+            
+        )
+        
+        return loss
+    @staticmethod
+    def grad_method():
+        return jax.grad, jax.value_and_grad
