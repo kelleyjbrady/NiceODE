@@ -3967,7 +3967,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         
         #----------JAX Setup-------------
-        debugging_jax = False
+        debugging_jax = True
         params_idx_jax = deepcopy(params_idx)
         required_keys = ['pop', 'sigma', 'omega', 'theta']
         existing_keys = [i for i in params_idx_jax]
@@ -4050,7 +4050,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if _jax_objective_grad is None:
             _gradient_is_available = False
         if debugging_jax:
-            return _jax_objective_function, _opt_params, loss_static_kwargs
+            return _jax_objective_function, _opt_params, loss_static_kwargs, unpacker_static_kwargs
         
         
         #--------------------------------
