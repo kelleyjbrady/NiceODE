@@ -1743,43 +1743,76 @@ def DEBUG_OMEGA_estimate_b_i_vmapped_ift(
             return  pred_conc, S_conc_full, H_conc_full, model_coeffs_i
         
         final_inner_loss_value = obj_fn(estimated_b_i)
+        jax.debug.print("estimated_b_i: {bi}", bi = estimated_b_i)
+        #pred_conc, S, H, model_coeffs_at_opt = predict_fn(estimated_b_i)
+        #
+        #residuals_masked = jnp.where(time_mask_y_i, padded_y_i - pred_conc, 0.0)
+        #
+        #H_masked = H * time_mask_y_i[:, None, None]
+        #
+        #S_masked = S * time_mask_y_i[:, None]
+        #
+        #
+        ##estimate the H_foce needed for calculating the interaction term in FOCEi
+        #scaling_factors_b = model_coeffs_at_opt[pop_coeff_w_bi_idx]
+        ##jax.debug.print("""
+        ##                -----------------
+        ##                S shape: {ss}
+        ##                
+        ##                pop_coeff_w_bi_idx shape: {ps}
+        ##                
+        ##                scaling_factors_b shape: {bs}
+        ##                -----------------
+        ##                """, ss = S.shape, ps = pop_coeff_w_bi_idx.shape, bs = scaling_factors_b.shape)
+        #Z_i = S[:, pop_coeff_w_bi_idx] * scaling_factors_b[None, :]
+        #Z_i_masked = Z_i * time_mask_y_i[:, None]
+        #
+        #_sigma2 = sigma2[0]
+        #H_data_term1 = Z_i_masked.T @ Z_i_masked
+        #H_data_term2 = jnp.einsum('tij,t->ij', H_masked[:, pop_coeff_w_bi_idx][:, :, pop_coeff_w_bi_idx], residuals_masked)
+        #H_data = (H_data_term1 - H_data_term2) / _sigma2
+        #     
+        #L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
+        #identity = jnp.eye(omega2.shape[0], dtype=omega2.dtype)
+        #inv_omega2 = jax.scipy.linalg.cho_solve((L, True), identity)
+        #H_prior = inv_omega2
+        #
+        #H_foce = 2 * (H_data + H_prior)
         
-        pred_conc, S, H, model_coeffs_at_opt = predict_fn(estimated_b_i)
-        
-        residuals_masked = jnp.where(time_mask_y_i, padded_y_i - pred_conc, 0.0)
-        
-        H_masked = H * time_mask_y_i[:, None, None]
-        
-        S_masked = S * time_mask_y_i[:, None]
-        
-        
-        #estimate the H_foce needed for calculating the interaction term in FOCEi
+        # --- TEMPORARY DEBUGGING HESSIAN ---
+        # We need model_coeffs_at_opt to calculate the analytical Hessian
+        b_i_work = jnp.zeros_like(pop_coeff).at[pop_coeff_w_bi_idx].set(estimated_b_i)
+        model_coeffs_at_opt = jnp.exp(data_contrib_i + pop_coeff + b_i_work)
         scaling_factors_b = model_coeffs_at_opt[pop_coeff_w_bi_idx]
-        #jax.debug.print("""
-        #                -----------------
-        #                S shape: {ss}
-        #                
-        #                pop_coeff_w_bi_idx shape: {ps}
-        #                
-        #                scaling_factors_b shape: {bs}
-        #                -----------------
-        #                """, ss = S.shape, ps = pop_coeff_w_bi_idx.shape, bs = scaling_factors_b.shape)
-        Z_i = S[:, pop_coeff_w_bi_idx] * scaling_factors_b[None, :]
-        Z_i_masked = Z_i * time_mask_y_i[:, None]
-        
-        _sigma2 = sigma2[0]
-        H_data_term1 = Z_i_masked.T @ Z_i_masked
-        H_data_term2 = jnp.einsum('tij,t->ij', H_masked[:, pop_coeff_w_bi_idx][:, :, pop_coeff_w_bi_idx], residuals_masked)
-        H_data = (H_data_term1 - H_data_term2) / _sigma2
-             
+        # A should be the same matrix as used in your simplified inner loss.
+        A = jnp.eye(time_mask_y_i.shape[0], pop_coeff.shape[0])
+        S_simple = A @ jnp.diag(model_coeffs_at_opt)
+        S_simple_b = S_simple[:, pop_coeff_w_bi_idx]
+
+        H_data = 2 * (S_simple_b.T @ S_simple_b) / sigma2[0]
+
         L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
         identity = jnp.eye(omega2.shape[0], dtype=omega2.dtype)
         inv_omega2 = jax.scipy.linalg.cho_solve((L, True), identity)
-        H_prior = inv_omega2
-        
-        H_foce = 2 * (H_data + H_prior)
+        H_prior = 2 * inv_omega2
 
-        return estimated_b_i, H_foce, final_inner_loss_value, S_masked, H_masked, residuals_masked, scaling_factors_b, model_coeffs_at_opt
+        H_foce = H_data + H_prior # This is the new, analytically correct Hessian
+        # --- END OF TEMPORARY CHANGE ---
+
+        # NOTE: The residuals must also come from the simplified model for the bwd pass
+        #       You will need to pass them through. For now, let's focus on getting
+        #       H_foce correct, as it's the main suspect.
+        # A placeholder is used for the unused S and H from the real model.
+        #S_placeholder = jnp.zeros((time_mask_y_i.shape[0], pop_coeff.shape[0]))
+        #H_placeholder = jnp.zeros((time_mask_y_i.shape[0], pop_coeff.shape[0], pop_coeff.shape[0]))
+        simple_preds = A @ model_coeffs_at_opt
+        simple_residuals = jnp.where(time_mask_y_i, padded_y_i - simple_preds, 0.0)
+        H_simple = jnp.zeros((time_mask_y_i.shape[0], pop_coeff.shape[0], pop_coeff.shape[0]))
+        
+        jax.debug.print("H_foce: {hf}", hf = H_foce)
+        return (estimated_b_i, H_foce, final_inner_loss_value, 
+                S_simple, H_simple, simple_residuals, # Pass placeholders
+                scaling_factors_b, model_coeffs_at_opt)
     
     def _estimate_single_b_i_fwd(*args):
         # args now only contains the 9 JAX array arguments
@@ -1796,6 +1829,8 @@ def DEBUG_OMEGA_estimate_b_i_vmapped_ift(
         g_b_i, g_H_foce, g_loss = g
 
         v = jax.scipy.linalg.solve(H_foce, g_b_i, assume_a='pos')
+        
+        jax.debug.print("--- V from inside VJP --- \n{x}", x=v)
         
         S_wrt_ode_coeffs = S_masked
         H_wrt_ode_coeffs = H_masked
@@ -1829,7 +1864,7 @@ def DEBUG_OMEGA_estimate_b_i_vmapped_ift(
         # 4. Assemble the final cross-partial, J_cross_pc
         term1_final = jnp.einsum('tij,t->ij', H_wrt_b_pc, residuals_masked)
         term2_final = S_wrt_b.T @ S_wrt_pc
-        J_cross_pc = (-2 / sigma2[0]) * (term2_final - term1_final)
+        J_cross_pc = (2 / sigma2[0]) * (term2_final - term1_final)
         
         implicit_grad_pc = -v @ J_cross_pc
         
@@ -1841,12 +1876,16 @@ def DEBUG_OMEGA_estimate_b_i_vmapped_ift(
             combined_coeffs = pc + b_i_work
             log_coeffs = data_contrib_i + combined_coeffs
             model_coeffs_i = jnp.exp(log_coeffs)
-            _, pred_y = compiled_ivp_solver(ode_t0_i, model_coeffs_i) # You need the non-augmented solver here
+            #_, pred_y = compiled_ivp_solver(ode_t0_i, model_coeffs_i) # You need the non-augmented solver here
+            
+            A = jnp.eye(time_mask_y_i.shape[0], model_coeffs_i.shape[0])
+            pred_y = A @ model_coeffs_i
+            
             masked_residuals = jnp.where(time_mask_y_i, padded_y_i - pred_y, 0.0)
             return jnp.sum(masked_residuals**2) / s2
 
         explicit_grad_pc = jax.grad(explicit_loss_pc, argnums=0)(pop_coeff, estimated_b_i, sigma2[0])
-
+        explicit_grad_pc = 0.0
         grad_pop_coeff = implicit_grad_pc + explicit_grad_pc
         grad_data_contrib = grad_pop_coeff
         #----estimate grad for s2----
@@ -1859,7 +1898,9 @@ def DEBUG_OMEGA_estimate_b_i_vmapped_ift(
         
         J_cross_s2 = 2*(S_wrt_b.T @ residuals_masked) / (sigma2[0]**2)
         implicit_grad_s2 = -v @ J_cross_s2
+        #implicit_grad_s2 = 0.0
         explicit_grad_s2 = jax.grad(data_likelihood)(sigma2[0])
+        explicit_grad_s2 = 0.0
         total_grad_s2_scalar = explicit_grad_s2 + implicit_grad_s2
         total_grad_s2 = jnp.array([total_grad_s2_scalar])
         
@@ -1872,11 +1913,21 @@ def DEBUG_OMEGA_estimate_b_i_vmapped_ift(
         J_cross_o2 = jax.jacobian(prior_grad_fn, argnums=1)(estimated_b_i, omega2)
         implicit_grad_o2 = -v @ J_cross_o2
         
-        explicit_grad_o2_foce = jax.grad(explicit_fo_foce_objective, argnums=0)(
-        omega2, S_wrt_b, residuals_masked, sigma2[0]
-        )
-        explicit_grad_of_interaction_o2 = interaction_term_objective(H_foce)
-        total_grad_o2 = explicit_grad_o2_foce + implicit_grad_o2 + explicit_grad_of_interaction_o2
+        #explicit_grad_o2_foce = jax.grad(explicit_fo_foce_objective, argnums=0)(
+        #omega2, S_wrt_b, residuals_masked, sigma2[0]
+        #)
+        #explicit_grad_of_interaction_o2 = interaction_term_objective(H_foce)
+        def explicit_omega_loss(o2_to_grad, b_i_fixed):
+            L, _ = jax.scipy.linalg.cho_factor(o2_to_grad, lower=True)
+            identity = jnp.eye(o2_to_grad.shape[0], dtype=o2_to_grad.dtype)
+            inv_o2 = jax.scipy.linalg.cho_solve((L, True), identity)
+            
+            return b_i_fixed @ inv_o2 @ b_i_fixed
+
+        # Calculate the explicit gradient of this correct function
+        explicit_grad_o2 = jax.grad(explicit_omega_loss, argnums=0)(omega2, estimated_b_i)
+        #total_grad_o2 = explicit_grad_o2_foce + implicit_grad_o2 + explicit_grad_of_interaction_o2
+        total_grad_o2 = implicit_grad_o2 + explicit_grad_o2
         
         return (None, None, grad_data_contrib, None, None,
                 grad_pop_coeff, total_grad_s2, total_grad_o2, None)
@@ -2118,6 +2169,205 @@ def estimate_b_i_vmapped(
     
     return all_b_i_estimates, all_hessians, all_final_inner_loss
 
+def DEBUG_OMEGA_estimate_b_i_vmapped(
+    # Batched inputs (one entry per subject)
+    initial_b_i_batch,
+    padded_y_batch,
+    data_contribution_batch,
+    ode_t0_vals_batch,
+    time_mask_y_batch,
+    #unpadded_y_len_batch,
+    # Shared inputs (same for all subjects)
+    pop_coeff,
+    sigma2,
+    omega2,
+    n_random_effects,
+    compiled_ivp_solver,
+    compiled_augdyn_ivp_solver,
+    pop_coeff_w_bi_idx,
+    use_surrogate_neg2ll,
+    **kwargs
+):
+    """
+    Estimates b_i for all subjects in parallel using a vmapped Optax optimizer.
+    """
+    print('Compiling `estimate_b_i_vmapped`')
+    #jax.debug.print("""
+    #                initial_b_i_batch = {initial_b_i_batch}
+    #                padded_y_batch = {padded_y_batch}
+    #                data_contribution_batch = {data_contribution_batch}
+    #                ode_t0_vals_batch = {ode_t0_vals_batch}
+    #                time_mask_y_batch = {time_mask_y_batch}
+    #                pop_coeff = {pop_coeff}
+    #                sigma2 = {sigma2}
+    #                omega2 = {omega2}
+    #                n_random_effects = {n_random_effects}
+    #                compiled_ivp_solver = {compiled_ivp_solver}
+    #                pop_coeff_w_bi_idx = {pop_coeff_w_bi_idx}
+    #                """, 
+    #                initial_b_i_batch = initial_b_i_batch.shape,
+    #                padded_y_batch = padded_y_batch.shape,
+    #                data_contribution_batch = data_contribution_batch.shape,
+    #                ode_t0_vals_batch = ode_t0_vals_batch.shape,
+    #                time_mask_y_batch = time_mask_y_batch.shape,
+    #                pop_coeff = pop_coeff.shape,
+    #                sigma2 = sigma2.shape,
+    #                omega2 = omega2.shape,
+    #                n_random_effects = n_random_effects,
+    #                compiled_ivp_solver = compiled_ivp_solver,
+    #                pop_coeff_w_bi_idx = pop_coeff_w_bi_idx.shape,
+    #                )
+    # Define the optimization for a single subject
+    def _estimate_single_b_i(initial_b_i,
+                             padded_y_i,
+                             data_contrib_i,
+                             ode_t0_i,
+                             time_mask_y_i,
+                             #unpadded_y_i_len,
+                             ):
+        
+        # The objective function with data for this subject closed over
+        obj_fn = lambda b_i: FOCE_inner_loss_fn(
+            b_i = b_i, 
+            padded_y_i = padded_y_i,
+            pop_coeff_i=pop_coeff,
+            data_contribution_i = data_contrib_i,
+            sigma2 = sigma2,
+            omega2 = omega2,
+            ode_t0_val_i = ode_t0_i,
+            time_mask_y_i=time_mask_y_i,
+            n_random_effects=n_random_effects, 
+            compiled_ivp_solver=compiled_ivp_solver,
+            pop_coeff_w_bi_idx = pop_coeff_w_bi_idx,
+            use_surrogate_neg2ll = use_surrogate_neg2ll,
+            
+        )
+
+        # 2. Set up an optax optimizer
+        learning_rate = 0.08  # Tune as needed
+        num_inner_steps = 200 # Tune as needed
+        lr_schedule = optax.exponential_decay(
+        init_value=learning_rate,
+        transition_steps=num_inner_steps,
+        decay_rate=0.1 
+    )
+        optimizer = optax.adam(learning_rate=lr_schedule)
+        opt_state = optimizer.init(initial_b_i)
+        
+        
+        grad_fn = jax.grad(obj_fn)
+        #if omega is near zero, then optimzing b_i will probably lead to 
+        #very large pop coeffs w/ very small b_i, effectively canceling 
+        #eachother out in a mathematically valid, but practicaly invalid way
+        omega_is_near_zero = jnp.diag(jnp.sqrt(omega2)) < 1e-5 
+        
+        def update_step(i, state_tuple):
+            params, opt_state, has_converged, loss_history, norm_history = state_tuple
+            
+            def do_update(operand):
+                params, opt_state, lh, nh = operand
+                grads = grad_fn(params)
+                
+                #sanitize the grads for the whole inner optmization for the current iteration 
+                #based on the heuristic calculated above (`omega_is_near_zero`)
+                safe_grads = jnp.where(omega_is_near_zero, 0.0, grads)
+                grad_norm = jnp.linalg.norm(safe_grads)
+                converged = grad_norm < 1e-2
+                updates, opt_state = optimizer.update(safe_grads, opt_state, params)
+                new_params = optax.apply_updates(params, updates)
+                
+                current_loss = obj_fn(new_params)
+                new_lh = lh.at[i].set(current_loss)
+                new_nh = nh.at[i].set(grad_norm)
+                return new_params, opt_state, converged, new_lh, new_nh
+            def do_nothing(operand):
+                params, opt_state, lh, nh = operand
+                #current_loss = obj_fn(params)
+                new_lh = lh.at[i].set(0.0)
+                new_nh = nh.at[i].set(0.0)
+                #jax.debug.print("Inner Optmizer Converged")
+                return params, opt_state, True, new_lh, new_nh
+            
+            return jax.lax.cond(has_converged,
+                do_nothing,
+                do_update,
+                (params, opt_state, loss_history, norm_history))
+            
+        
+        loss_history_init = jnp.zeros(num_inner_steps)
+        gradnorm_history_init = jnp.zeros(num_inner_steps)
+        initial_state = (initial_b_i, opt_state, False, loss_history_init, gradnorm_history_init)
+        estimated_b_i, opt_state, has_converged, loss_history, norm_history = jax.lax.fori_loop(
+            0, num_inner_steps, update_step, initial_state
+        )
+        #jax.debug.print("""Inner Optimization finished with convergence status: {s}
+        #                loss history: {h}
+        #                norm history: {n}
+        #                """, s = has_converged, h = loss_history, n = norm_history)
+        
+        def predict_fn(b_i_for_pred):
+            # This logic is copied from your FOCE_inner_loss_fn
+            b_i_work = jnp.zeros_like(pop_coeff)
+            b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(b_i_for_pred)
+            combined_coeffs = pop_coeff + b_i_work
+            model_coeffs_i = jnp.exp(data_contrib_i + combined_coeffs)
+            
+            # We don't need the "safe_coeffs" logic here, as we're already at the optimum
+            _, _, _, J_conc_full = compiled_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
+            
+            # We need the predictions corresponding to the mask
+            return  J_conc_full
+        
+        final_inner_loss_value = obj_fn(estimated_b_i)
+
+        # Get model_coeffs at the solution to calculate the analytical Hessian
+        b_i_work = jnp.zeros_like(pop_coeff).at[pop_coeff_w_bi_idx].set(estimated_b_i)
+        model_coeffs_at_opt = jnp.exp(data_contrib_i + pop_coeff + b_i_work)
+
+        # --- Calculate the Analytical Hessian for the Simplified Linear Model ---
+
+        # A must be the same matrix as used in the inner loss
+        A = jnp.eye(time_mask_y_i.shape[0], pop_coeff.shape[0])
+
+        # This is the Jacobian d(pred)/d(log_coeffs) for the simplified model
+        S_simple = A @ jnp.diag(model_coeffs_at_opt)
+
+        # Slice to get the Jacobian with respect to b_i
+        S_simple_b = S_simple[:, pop_coeff_w_bi_idx]
+
+        # Use the Gauss-Newton formula (which is exact for a linear model)
+        H_approx = 2 * (S_simple_b.T @ S_simple_b) / sigma2[0]
+
+        # The prior part of the Hessian remains the same
+        L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
+        identity = jnp.eye(omega2.shape[0], dtype=omega2.dtype)
+        inv_omega2 = jax.scipy.linalg.cho_solve((L, True), identity)
+        H_prior = 2 * inv_omega2
+
+        # The final, correct Hessian for the simplified problem
+        H_foce = H_approx + H_prior
+        
+        return estimated_b_i, H_foce, final_inner_loss_value
+
+    # Vmap the single-subject optimization function
+    # `in_axes` specifies which arguments to map over. `None` means broadcast.
+    vmapped_optimizer = jax.vmap(
+        _estimate_single_b_i,
+        in_axes=(0, 0, 0, 0, 0, ),  # Map over all batched inputs
+    )
+    
+    # Execute the vmapped function
+    all_b_i_estimates, all_hessians, all_final_inner_loss = vmapped_optimizer(
+        initial_b_i_batch,
+        padded_y_batch,
+        data_contribution_batch,
+        ode_t0_vals_batch,
+        time_mask_y_batch,
+        #unpadded_y_len_batch
+    )
+    
+    return all_b_i_estimates, all_hessians, all_final_inner_loss
+
 def FOCE_inner_loss_fn_lax(
     b_i,  # The parameters we are optimizing (random effects)
     # --- Static data for this subject (won't change during inner opt) ---
@@ -2172,7 +2422,15 @@ def FOCE_inner_loss_fn_lax(
         #jax.debug.print("model_coeffs_i shape: {s}", s = model_coeffs_i.shape)
         #jax.debug.print("ode_t0_val_i shape: {s}", s = ode_t0_val_i.shape)
         #jax.debug.print("Solving Inner Optmizer IVP . . .")
-        padded_full_preds_i, padded_pred_y_i = compiled_ivp_solver( ode_t0_val_i, solver_coeffs,)
+        
+        #commented ivp solve for debugging purposes ------------
+        #padded_full_preds_i, padded_pred_y_i = compiled_ivp_solver( ode_t0_val_i, solver_coeffs,)
+        
+        A = jnp.eye(time_mask_y_i.shape[0], model_coeffs_i.shape[0]) 
+        padded_pred_y_i = A @ model_coeffs_i
+        
+        #----------------
+        
         #jax.debug.print("padded_preds_i shape: {s}", s = padded_pred_y_i.shape)
         #jax.debug.print("time_mask_y_i shape: {s}", s = time_mask_y_i.shape)
         #jax.debug.print("padded_y_i shape: {s}", s = padded_y_i.shape)
@@ -2344,7 +2602,15 @@ def FOCE_inner_loss_fn(
     #jax.debug.print("model_coeffs_i shape: {s}", s = model_coeffs_i.shape)
     #jax.debug.print("ode_t0_val_i shape: {s}", s = ode_t0_val_i.shape)
     #jax.debug.print("Solving Inner Optmizer IVP . . .")
-    padded_full_preds_i, padded_pred_y_i = compiled_ivp_solver( ode_t0_val_i, solver_coeffs,)
+    
+    #same debugging change ----------
+    #padded_full_preds_i, padded_pred_y_i = compiled_ivp_solver( ode_t0_val_i, solver_coeffs,)
+    
+    A = jnp.eye(time_mask_y_i.shape[0], model_coeffs_i.shape[0]) 
+    padded_pred_y_i = A @ model_coeffs_i
+    
+    #-------------------
+    
     #jax.debug.print("padded_preds_i shape: {s}", s = padded_pred_y_i.shape)
     #jax.debug.print("time_mask_y_i shape: {s}", s = time_mask_y_i.shape)
     #jax.debug.print("padded_y_i shape: {s}", s = padded_y_i.shape)
@@ -3576,7 +3842,7 @@ class DEBUG_FOCE_approx_neg2ll_loss_jax_fdxOUTER():
             compiled_ivp_solver_novmap_arr = compiled_ivp_solver_novmap_arr,
             ode_t0_vals = ode_t0_vals,
             pop_coeff_for_J_idx = pop_coeff_for_J_idx,
-            compiled_estimate_b_i_foce = estimate_b_i_vmapped,
+            compiled_estimate_b_i_foce = DEBUG_OMEGA_estimate_b_i_vmapped,
             compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
             jittable_estimate_foc_i=foc_interaction_term_passthrough, 
             jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
@@ -3631,7 +3897,7 @@ class DEBUG_FOCE_approx_neg2ll_loss_jax_iftINNER():
         
         print("Compiling `FOCE_approx_neg2ll_loss_jax`")
         
-        estimate_b_i_vmapped_ift_FOCE = partial(estimate_b_i_vmapped_ift, interaction_term_objective = interaction_term_objective_passthrough)
+        estimate_b_i_vmapped_ift_FOCE = partial(DEBUG_OMEGA_estimate_b_i_vmapped_ift, interaction_term_objective = interaction_term_objective_passthrough)
         loss = debug_omega_loss_only(
             pop_coeff = pop_coeff, 
             sigma2 = sigma2, 
