@@ -436,6 +436,36 @@ def _jittable_param_unpack(opt_params, #parameters being optmized by something l
 
                             ):
     
+    jax.debug.print("""
+                    opt_params: {opt_params}
+                    theta_update_to_indices: {theta_update_to_indices}
+                    theta_update_from_indices: {theta_update_from_indices}
+                    theta_total_len: {theta_total_len}
+                    params_idx: {params_idx}
+                    fixed_params: {fixed_params}
+                    opt_params_combined_params_idx: {opt_params_combined_params_idx}
+                    fixed_params_combined_params_idx: {fixed_params_combined_params_idx}
+                    total_n_params: {total_n_params}
+                    init_params_for_scaling: {init_params_for_scaling}
+                    use_full_omega: {use_full_omega}
+                    omega_lower_chol_idx: {omega_lower_chol_idx}
+                    omega_diag_size: {omega_diag_size}, 
+                    """, 
+                    opt_params= opt_params,
+                    theta_update_to_indices= theta_update_to_indices,
+                    theta_update_from_indices= theta_update_from_indices,
+                    theta_total_len= theta_total_len,
+                    params_idx= params_idx,
+                    fixed_params= fixed_params,
+                    opt_params_combined_params_idx= opt_params_combined_params_idx,
+                    fixed_params_combined_params_idx= fixed_params_combined_params_idx,
+                    total_n_params= total_n_params,
+                    init_params_for_scaling= init_params_for_scaling,
+                    use_full_omega= use_full_omega,
+                    omega_lower_chol_idx= omega_lower_chol_idx,
+                    omega_diag_size= omega_diag_size,
+                    )
+    
     #pop_coeffs_for_J_idx = [pop_coeff_cols[i] for i in pop_coeff_cols if i[0] in [i[0][0] for i in omega_diag_cols]]
     
     combined_params = jnp.zeros(total_n_params)
@@ -482,6 +512,16 @@ def _jittable_param_unpack(opt_params, #parameters being optmized by something l
         "raw_incoming_optimizer_vals":opt_params
         
     } 
+    
+    jax.debug.print("""
+                    pop_coeff:{pop_coeffs}, 
+                    sigma2:{sigma2}, 
+                    omega2:{omega2}, 
+                    theta:{thetas_work}, 
+                    raw_incoming_optimizer_vals:{opt_params}
+                    """, pop_coeffs = pop_coeffs, sigma2 = sigma2, 
+                    omega2 = omega2, thetas_work = thetas_work, opt_params = opt_params
+                    )
 
     return dynamic_loss_kwargs
 
@@ -1513,7 +1553,7 @@ def estimate_b_i_vmapped_ift(
 def DEBUG_OMEGA_estimate_b_i_vmapped_ift(
     initial_b_i_batch,
     padded_y_batch,
-    data_contribution_batch,
+    data_contribution_batch,    
     ode_t0_vals_batch,
     time_mask_y_batch,
     pop_coeff,
@@ -1532,6 +1572,41 @@ def DEBUG_OMEGA_estimate_b_i_vmapped_ift(
 
     # Vmap the single-subject optimization function with the custom VJP.
     # `in_axes` specifies which arguments to map over (0) vs. broadcast (None).
+    
+    jax.debug.print("""
+                    initial_b_i_batch: {initial_b_i_batch},
+                    padded_y_batch: {padded_y_batch},
+                    data_contribution_batch: {data_contribution_batch},
+                    ode_t0_vals_batch: {ode_t0_vals_batch},
+                    time_mask_y_batch: {time_mask_y_batch},
+                    pop_coeff: {pop_coeff},
+                    sigma2: {sigma2},
+                    omega2: {omega2},
+                    n_random_effects: {n_random_effects},
+                    compiled_ivp_solver: {compiled_ivp_solver},
+                    compiled_2ndorder_augdyn_ivp_solver: {compiled_2ndorder_augdyn_ivp_solver},
+                    pop_coeff_w_bi_idx: {pop_coeff_w_bi_idx},
+                    use_surrogate_neg2ll: {use_surrogate_neg2ll},
+                    interaction_term_objective: {interaction_term_objective},
+                    
+                    
+                    """,
+                    initial_b_i_batch=initial_b_i_batch,
+                    padded_y_batch=padded_y_batch,
+                    data_contribution_batch=data_contribution_batch,
+                    ode_t0_vals_batch=ode_t0_vals_batch,
+                    time_mask_y_batch=time_mask_y_batch,
+                    pop_coeff=pop_coeff,
+                    sigma2=sigma2,
+                    omega2=omega2,
+                    n_random_effects=n_random_effects,
+                    compiled_ivp_solver=compiled_ivp_solver,
+                    compiled_2ndorder_augdyn_ivp_solver=compiled_2ndorder_augdyn_ivp_solver,
+                    pop_coeff_w_bi_idx=pop_coeff_w_bi_idx,
+                    use_surrogate_neg2ll=use_surrogate_neg2ll,
+                    interaction_term_objective=interaction_term_objective,
+                    )
+    
     
     #@jax.jit
     def estimate_single_b_i_impl(
