@@ -2423,13 +2423,7 @@ def FOCE_inner_loss_fn_lax(
         #jax.debug.print("ode_t0_val_i shape: {s}", s = ode_t0_val_i.shape)
         #jax.debug.print("Solving Inner Optmizer IVP . . .")
         
-        #commented ivp solve for debugging purposes ------------
-        #padded_full_preds_i, padded_pred_y_i = compiled_ivp_solver( ode_t0_val_i, solver_coeffs,)
-        
-        A = jnp.eye(time_mask_y_i.shape[0], model_coeffs_i.shape[0]) 
-        padded_pred_y_i = A @ model_coeffs_i
-        
-        #----------------
+        padded_full_preds_i, padded_pred_y_i = compiled_ivp_solver( ode_t0_val_i, solver_coeffs,)
         
         #jax.debug.print("padded_preds_i shape: {s}", s = padded_pred_y_i.shape)
         #jax.debug.print("time_mask_y_i shape: {s}", s = time_mask_y_i.shape)
@@ -2603,13 +2597,7 @@ def FOCE_inner_loss_fn(
     #jax.debug.print("ode_t0_val_i shape: {s}", s = ode_t0_val_i.shape)
     #jax.debug.print("Solving Inner Optmizer IVP . . .")
     
-    #same debugging change ----------
-    #padded_full_preds_i, padded_pred_y_i = compiled_ivp_solver( ode_t0_val_i, solver_coeffs,)
-    
-    A = jnp.eye(time_mask_y_i.shape[0], model_coeffs_i.shape[0]) 
-    padded_pred_y_i = A @ model_coeffs_i
-    
-    #-------------------
+    padded_full_preds_i, padded_pred_y_i = compiled_ivp_solver( ode_t0_val_i, solver_coeffs,)
     
     #jax.debug.print("padded_preds_i shape: {s}", s = padded_pred_y_i.shape)
     #jax.debug.print("time_mask_y_i shape: {s}", s = time_mask_y_i.shape)
