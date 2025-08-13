@@ -1,0 +1,71 @@
+import jax
+import jax.numpy as jnp
+import finitediffx as fdx
+import jaxopt
+
+# ===================================================================
+# 1. Hardcoded Inputs & Helper Functions
+# ===================================================================
+opt_params = jnp.array([
+    0.47, 1.09, 3.55, -1.386, -0.51, 0.0, -1.20, 0.0, 0.0, -2.30
+], dtype=jnp.float64)
+
+padded_y_i = jnp.array([0.74, 2.84, 6.57, 10.5, 9.66, 8.58, 8.36, 7.47, 6.89, 5.94, 3.28], dtype=jnp.float64)
+time_mask_y_i = jnp.ones_like(padded_y_i, dtype=bool)
+data_contrib_i = jnp.zeros(3, dtype=jnp.float64)
+initial_b_i = jnp.zeros(3, dtype=jnp.float64)
+
+def unpack_params(params):
+    pop_coeff = params[0:3]
+    sigma2 = jnp.exp(params[3])
+    omega_chol_vals = params[4:10]
+    omega_lchol = jnp.zeros((3, 3), dtype=jnp.float64).at[jnp.tril_indices(3)].set(omega_chol_vals)
+    omega_lchol = omega_lchol.at[jnp.diag_indices(3)].set(jnp.exp(jnp.diag(omega_lchol)))
+    omega2 = omega_lchol @ omega_lchol.T
+    return pop_coeff, jnp.array([sigma2]), omega2
+
+def toy_inner_loss(b_i, pop_coeff, sigma2, omega2):
+    # b_i is the variable being optimized by the inner solver.
+    # pop_coeff, sigma2, omega2 are fixed parameters for the inner solve.
+    model_coeffs_i = jnp.exp(data_contrib_i + pop_coeff + b_i)
+    A = jnp.eye(time_mask_y_i.shape[0], model_coeffs_i.shape[0])
+    pred_y_i = A @ model_coeffs_i
+    residuals_i = jnp.where(time_mask_y_i, padded_y_i - pred_y_i, 0.0)
+    sum_sq_residuals = jnp.sum(residuals_i**2)
+    loss_data = jnp.sum(time_mask_y_i) * jnp.log(sigma2[0]) + sum_sq_residuals / sigma2[0]
+    L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
+    log_det_omega2 = 2 * jnp.sum(jnp.log(jnp.diag(L)))
+    prior_penalty = b_i @ jax.scipy.linalg.cho_solve((L, True), b_i)
+    return loss_data + log_det_omega2 + prior_penalty
+
+# ===================================================================
+# 2. The Inner b_i Estimator using jaxopt (Corrected Pattern)
+# ===================================================================
+def estimate_b_i_with_jaxopt(pop_coeff, sigma2, omega2):
+    """Finds the optimal b_i using a jaxopt solver."""
+    
+    # The solver is initialized with the function directly.
+    # The parameters that are NOT being optimized (pop_coeff, etc.) are now
+    # explicit arguments to the inner loss function.
+    solver = jaxopt.LBFGS(fun=toy_inner_loss, tol=1e-5, maxiter=500)
+    
+    # The fixed parameters are passed as keyword arguments to solver.run()
+    solution = solver.run(initial_b_i, pop_coeff=pop_coeff, sigma2=sigma2, omega2=omega2)
+    
+    return solution.params
+
+# ===================================================================
+# 3. The Final MRE Test
+# ===================================================================
+def final_outer_loss(params):
+    pop_coeff, sigma2, omega2 = unpack_params(params)
+    b_i = estimate_b_i_with_jaxopt(pop_coeff, sigma2, omega2)
+    inv_o2 = jnp.linalg.inv(omega2)
+    return b_i @ inv_o2 @ b_i
+
+print("--- Running Final MRE Comparison with jaxopt ---")
+fdx_grad_mre = fdx.fgrad(final_outer_loss)(opt_params)
+jax_grad_mre = jax.grad(final_outer_loss)(opt_params)
+
+print("\nfinitediffx (MRE):\n", fdx_grad_mre)
+print("\njax.grad (MRE with jaxopt):\n", jax_grad_mre)

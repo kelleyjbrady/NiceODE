@@ -554,7 +554,9 @@ def _jittable_param_unpack(opt_params, #parameters being optmized by something l
 
 with open("debug_unpacker_kwargs.jb", 'rb') as f:
     unpacker_kwargs = jb.load(f)
-    
+
+print(str(unpacker_kwargs))
+
 initial_b_i_batch =  jnp.array([[0., 0., 0.]]),
 padded_y_batch= jnp.array([[ 0.74,  2.84,  6.57 ,10.5,   9.66,  8.58,  8.36,  7.47,  6.89,  5.94,  3.28]])
 data_contribution_batch= jnp.array([[0., 0., 0.]])
@@ -568,6 +570,12 @@ unpack_partial = partial(
 
 def debug_loss(opt_params):
     p = unpack_partial(opt_params = opt_params)
+    
+    print("\n--- Verifying Unpacker ---")
+    print("opt_params changing:", opt_params)
+    print("Resulting pop_coeff:", p['pop_coeff'])
+    print("Resulting sigma2:", p['sigma2'])
+    print("Resulting omega2:\n", p['omega2'])
     
     data_contribution_batch= jnp.array([[0., 0., 0.]])
     p['data_contribution'] = data_contribution_batch
