@@ -49,7 +49,9 @@ from niceode.jax_utils import (FOCE_approx_neg2ll_loss_jax,
                                FOCE_approx_neg2ll_loss_jax_iftINNER_ALT,
                                FOCE_approx_neg2ll_loss_jax_iftINNER, 
                                FOCE_approx_neg2ll_loss_jax_fdxOUTER, 
-                               FOCEi_approx_neg2ll_loss_jax_fdxOUTER
+                               FOCEi_approx_neg2ll_loss_jax_fdxOUTER, 
+                               DEBUG_FOCE_approx_neg2ll_loss_jax_fdxOUTER,
+                                DEBUG_FOCE_approx_neg2ll_loss_jax_iftINNER
                                )
 #%%
 
@@ -70,6 +72,8 @@ nca_obj = NCA(
 )
 # %%
 noboot_tmp = nca_obj.estimate_all_nca_params(terminal_phase_adj_r2_thresh=0.85)
+
+df = df.loc[df['ID'] == 1, :].copy()
 # %%
 me_mod_fo =  CompartmentalModel(
         model_name = "debug_theoph_abs_ka-clME-vd_sse_nodep_dermal",
@@ -261,7 +265,7 @@ me_mod_fo =  CompartmentalModel(
                                     #use_full_omega=False, 
                                     significant_digits=5,
                                     me_loss_function=FO_approx_ll_loss,
-                                    jax_loss=FOCE_approx_neg2ll_loss_jax_iftINNER,
+                                    jax_loss=DEBUG_FOCE_approx_neg2ll_loss_jax_iftINNER,
                                     use_full_omega=True, 
                                     use_surrogate_neg2ll=True, 
                                     fit_jax_objective=True,
@@ -334,7 +338,7 @@ me_mod_fo =  CompartmentalModel(
                                     #use_full_omega=False, 
                                     significant_digits=5,
                                     me_loss_function=FO_approx_ll_loss,
-                                    jax_loss=FOCE_approx_neg2ll_loss_jax_fdxOUTER,
+                                    jax_loss=DEBUG_FOCE_approx_neg2ll_loss_jax_fdxOUTER,
                                     use_full_omega=True, 
                                     use_surrogate_neg2ll=True, 
                                     fit_jax_objective=True,
@@ -381,7 +385,7 @@ with sns.axes_style("whitegrid"):
         axs.annotate(txt, (x[i], y[i]), xytext=(5, 5), textcoords='offset points')
     plt.tight_layout()
     
-plt.savefig("prev_grad.png")
+#plt.savefig("update_sympy_Hfoce_bwd_grad.png")
 
 #%%
 fit_pymc = True
