@@ -1,3 +1,7 @@
+#####Manual Declaration
+debug_log*
+*.png
+
 #####Checkpoints
 *.jb
 plots/*
