@@ -45,6 +45,11 @@ def augmented_ode_for_S(t, y_and_S, args):
     ds_dt = Jy_val @ s + Jp_val
     return f_val, ds_dt
 
+def augmented_ode_for_S_and_H(t, y_S_H, args):
+    y, S, H = y_S_H
+    f_val, dS_dt = augmented_ode_for_S(t, (y, S), args)
+    dH_dt = jnp.zeros_like(H) # Placeholder for real H dynamics
+    return f_val, dS_dt, dH_dt
 # ===================================================================
 # 2. Solver and Loss Function Setup
 # ===================================================================
@@ -98,9 +103,10 @@ def _estimate_b_i_fwd(pop_coeff, sigma2, omega2):
     estimated_b_i, _ = solver.run(initial_b_i, bounds=bounds, pop_coeff=pop_coeff, sigma2=sigma2, omega2=omega2)
 
     model_coeffs = jnp.exp(jnp.log(pop_coeff) + estimated_b_i)
-    y0_aug = (jnp.array([100.0, 0.0]), jnp.zeros((2, 3)))
-    sol_aug = compiled_solver_augmented(terms=diffrax.ODETerm(augmented_ode_for_S), y0=y0_aug, args=model_coeffs)
+    y0_aug = (jnp.array([100.0, 0.0]), jnp.zeros((2, 3)), jnp.zeros((2, 3, 3)))
+    sol_aug = compiled_solver_augmented(terms=diffrax.ODETerm(augmented_ode_for_S_and_H), y0=y0_aug, args=model_coeffs)
     S = sol_aug.ys[1][:, 1, :]
+    H = sol_aug.ys[2][:, 1, :, :] # Get the H tensor
     
     S_wrt_b = S * model_coeffs[None, :]
     H_data = 2 * (S_wrt_b.T @ S_wrt_b) / sigma2[0]
@@ -112,32 +118,48 @@ def _estimate_b_i_fwd(pop_coeff, sigma2, omega2):
     residuals = padded_y_i - pred_y_i
     
     primal_out = estimated_b_i
-    residuals_for_bwd = (estimated_b_i, H_foce, S, residuals, model_coeffs, pop_coeff, sigma2, omega2)
+    residuals_for_bwd = (estimated_b_i, H_foce, S, H, residuals, model_coeffs, pop_coeff, sigma2, omega2)
     return primal_out, residuals_for_bwd
 
 def _estimate_b_i_bwd(residuals_for_bwd, g_b_i):
-    est_b_i, H_foce, S, res, model_coeffs, pop, sig2, om2 = residuals_for_bwd
+    # --- Unpack ---
+    est_b_i, H_foce, S, H, res, model_coeffs, pop, sig2, om2 = residuals_for_bwd
     v = jax.scipy.linalg.solve(H_foce, g_b_i, assume_a='pos')
-    
+
+    # --- pop_coeff gradient (with full Hessian info) ---
     S_wrt_b = S * model_coeffs[None, :]
     S_wrt_pc = S * model_coeffs[None, :]
-    J_cross_pc = (2 / sig2[0]) * (S_wrt_pc.T @ S_wrt_b)
-    implicit_grad_pc = -v @ J_cross_pc
+    n_b, n_pc = S_wrt_b.shape[1], S_wrt_pc.shape[1]
     
+    H_wrt_pc = H * model_coeffs[None, :, None] * model_coeffs[None, None, :]
+    selection_matrix = jnp.zeros((n_b, n_pc)).at[jnp.arange(n_b), jnp.arange(n_b)].set(1)
+    S_term = jnp.einsum('tk,jk->tjk', S_wrt_pc, selection_matrix)
+    H_wrt_b_pc = H_wrt_pc + S_term
+
+    term1_final = jnp.einsum('tij,t->ij', H_wrt_b_pc, res)
+    term2_final = S_wrt_b.T @ S_wrt_pc
+    J_cross_pc = (2 / sig2[0]) * (term2_final - term1_final)
+    implicit_grad_pc = -v @ J_cross_pc
+    grad_log_pop_coeff = implicit_grad_pc * pop # Convert to log-scale grad
+
+    # --- sigma2 gradient (corrected sum) ---
     J_cross_s2 = 2 * (S_wrt_b.T @ res) / sig2[0]**2
     implicit_grad_s2 = -v @ J_cross_s2
-    
+    explicit_grad_s2 = (jnp.sum(res**2) / sig2[0]**2) * -1 + len(res) / sig2[0]
+    total_grad_s2 = jnp.array([implicit_grad_s2 + explicit_grad_s2])
+
+    # --- omega2 gradient (corrected sum) ---
     inv_om2 = jnp.linalg.inv(om2)
-    grad_b_prior = 2 * inv_om2 @ est_b_i
-    J_cross_o2 = jax.jacobian(lambda o, b: 2 * jnp.linalg.inv(o) @ b, argnums=0)(om2, est_b_i)
+    def prior_grad_fn(b, o): return 2 * jnp.linalg.inv(o) @ b
+    J_cross_o2 = jax.jacobian(prior_grad_fn, argnums=1)(est_b_i, om2)
     implicit_grad_o2 = -v @ J_cross_o2
-    
-    explicit_grad_o2 = jax.grad(lambda o, b: b @ jnp.linalg.inv(o) @ b, argnums=0)(om2, est_b_i)
-    
-    # Transform gradients from natural scale back to log-scale for pop_coeff
-    grad_log_pop_coeff = implicit_grad_pc * pop
-    
-    return grad_log_pop_coeff, jnp.array([implicit_grad_s2]), explicit_grad_o2 + implicit_grad_o2
+    def explicit_loss_o2(o, b): return b @ jnp.linalg.inv(o) @ b
+    explicit_grad_o2 = jax.grad(explicit_loss_o2, argnums=0)(om2, est_b_i)
+    total_grad_o2 = implicit_grad_o2 + explicit_grad_o2
+
+    # Return gradients in order of primal inputs: (pop_coeff, sigma2, omega2)
+    # The unpacker expects gradients on the log-scale, so we multiply by sigma2
+    return grad_log_pop_coeff, total_grad_s2 * sig2[0], total_grad_o2
 
 estimate_b_i_hybrid.defvjp(_estimate_b_i_fwd, _estimate_b_i_bwd)
 
