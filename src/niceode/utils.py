@@ -2535,7 +2535,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                        diffrax_solver=None, 
                        diffrax_step_ctrl = None,    
                        diffrax_max_steps = None, 
-                       pop_coeff_for_J_idx = None
+                       pop_coeff_for_J_idx = None, 
+                       adjoint = None
                        ):
         print("Compiling `_solve_augdyn_ivp_jax_worker`")
         #aug_ode = create_aug_dynamics_ode(ode_func, pop_coeff_for_J_idx)
@@ -2544,6 +2545,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         S0 = jnp.zeros((num_states, num_j_params))
         augmented_y0 = (y0, S0)
         ode_term = ODETerm(aug_ode_func)
+        #adjoint = RecursiveCheckpointAdjoint()
         
         solution = diffeqsolve(
         terms=ode_term,
@@ -2556,6 +2558,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         max_steps=diffrax_max_steps,
         saveat=SaveAt(ts=teval),
         stepsize_controller=diffrax_step_ctrl,
+        adjoint=adjoint
         )
         
         y_trajectory, J_trajectory = solution.ys
@@ -2578,7 +2581,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                        diffrax_step_ctrl = None,    
                        diffrax_max_steps = None, 
                        n_states = None,
-                       n_params = None
+                       n_params = None, 
+                       adjoint = None
                        ):
         print("Compiling `_solve_2ndorder_augdyn_ivp_jax_worker`")
         
@@ -2587,6 +2591,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         augmented_y0 = (y0, S0, H0) 
         ode_term = ODETerm(aug_ode_func)
+        #adjoint = RecursiveCheckpointAdjoint()
+        
         
         solution = diffeqsolve(
         terms=ode_term,
@@ -2599,6 +2605,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         max_steps=diffrax_max_steps,
         saveat=SaveAt(ts=teval),
         stepsize_controller=diffrax_step_ctrl,
+        adjoint = adjoint
         )
         
         y_trajectory, S_trajectory, H_trajectory = solution.ys
@@ -2620,7 +2627,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                        mass_to_depvar = None,
                        diffrax_solver=None, 
                        diffrax_step_ctrl = None,    
-                       diffrax_max_steps = None
+                       diffrax_max_steps = None, 
+                       adjoint = None
                        ):
         print("Compiling `_solve_ivp_jax_worker`")
         ode_term = ODETerm(ode_func)
@@ -2630,6 +2638,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         #adjoint = BacksolveAdjoint(solver = diffrax_solver, 
         #                           stepsize_controller=diffrax_step_ctrl, 
         #                           )
+        #adjoint = RecursiveCheckpointAdjoint()
         solution = diffeqsolve(
         terms = ode_term,
         solver = diffrax_solver,
@@ -2641,7 +2650,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         max_steps=diffrax_max_steps,
         saveat=SaveAt(ts=teval), # Specify time points for output
         stepsize_controller=diffrax_step_ctrl, 
-        #adjoint=adjoint
+        adjoint=adjoint
         )
         
         central_mass_trajectory = solution.ys[:, 0]
@@ -2977,7 +2986,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if (aug_check1 and aug_check2):
             
             aug_ode_func = create_aug_dynamics_ode(self.pk_model_class.diffrax_ode, pop_coeffs_for_J_idx)
-            
+            adjoint_method = diffrax.RecursiveCheckpointAdjoint()
+            #step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-6)
+            #adjoint_method = BacksolveAdjoint(solver = Tsit5(),
+            #                                  max_steps = 16**8,
+            #                                  stepsize_controller=step_ctrl)
             diffrax_solver = Kvaerno5()
             #diffrax_solver = Tsit5()
             diffrax_step_ctrl = PIDController(rtol=self.ode_solver_tol, atol=self.ode_solver_tol)
@@ -2993,7 +3006,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 diffrax_step_ctrl = diffrax_step_ctrl,
                 dt0 = dt0, 
                 diffrax_max_steps = maxsteps, 
-                pop_coeff_for_J_idx = pop_coeffs_for_J_idx
+                pop_coeff_for_J_idx = pop_coeffs_for_J_idx, 
+                adjoint = adjoint_method
                 
             )
             vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
@@ -3007,7 +3021,11 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         #second order augmented dynamics ode
         aug_dyn_2nd_order_ode = self.pk_model_class.sympy_ode()
         aug_ode_func = generate_aug_dynamcis_ode_sympy(aug_dyn_2nd_order_ode)
-            
+        adjoint_method = diffrax.RecursiveCheckpointAdjoint()
+        #step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-6)
+        #adjoint_method = BacksolveAdjoint(solver = Tsit5(),
+        #                                      max_steps = 16**8,
+        #                                      stepsize_controller=step_ctrl)
         diffrax_solver = Kvaerno5()
         #diffrax_solver = Tsit5()
         adjoint_tol = np.max([1e-4,self.ode_solver_tol/1000 ])
@@ -3032,7 +3050,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
             diffrax_max_steps = 16**5, 
             n_states = aug_dyn_2nd_order_ode.n_states,
             n_params = aug_dyn_2nd_order_ode.n_params, 
-            #adjoint = adjoint
+            adjoint = adjoint_method
             
         )
         vmapped_solve = jax.vmap(partial_solve_ivp, in_axes=(0, 0,) )
@@ -3047,10 +3065,13 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         if not (self.jax_ivp_stiff_solver_is_compiled):
             diffrax_solver = Kvaerno5()
             #diffrax_solver = Tsit5()
-            
+            adjoint_method = diffrax.RecursiveCheckpointAdjoint()
+            #step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-6)
+            #adjoint_method = BacksolveAdjoint(solver = Tsit5(),
+            #                                  max_steps = 16**8,
+            #                                  stepsize_controller=step_ctrl)
             diffrax_step_ctrl = PIDController(rtol=self.ode_solver_tol, atol=self.ode_solver_tol)
             dt0 = 0.1
-            
             partial_solve_ivp = partial(
                 self._solve_ivp_jax_worker,
                 ode_func = self.pk_model_class.diffrax_ode,
@@ -3060,8 +3081,9 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 diffrax_solver=diffrax_solver,
                 diffrax_step_ctrl = diffrax_step_ctrl,
                 dt0 = dt0, 
-                diffrax_max_steps = maxsteps
-                
+                diffrax_max_steps = maxsteps,
+                adjoint = adjoint_method
+
             )
             
             

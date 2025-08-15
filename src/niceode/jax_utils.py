@@ -6,6 +6,7 @@ import numdifftools as nd
 import optax
 import finitediffx as fdx
 import warnings
+import jaxopt
 
 
 def _predict_jax_jacobian(
@@ -1564,7 +1565,7 @@ def estimate_b_i_vmapped_jaxopt(
     compiled_2ndorder_augdyn_ivp_solver,
     pop_coeff_w_bi_idx,
     use_surrogate_neg2ll,
-    interaction_term_objective,
+    #interaction_term_objective,
     **kwargs,  # Absorb unused kwargs
 ):
     """Estimates b_i for all subjects by vmapping the custom VJP function."""
@@ -1573,113 +1574,74 @@ def estimate_b_i_vmapped_jaxopt(
     # Vmap the single-subject optimization function with the custom VJP.
     # `in_axes` specifies which arguments to map over (0) vs. broadcast (None).
     
-    #@jax.jit
-    def estimate_single_b_i_impl(
-    initial_b_i,
-    padded_y_i,
-    data_contrib_i,
-    ode_t0_i,
-    time_mask_y_i,
-    # Shared parameters we want to differentiate with respect to
-    pop_coeff,
-    sigma2,
-    omega2,
-    # Other static arguments
-    #n_random_effects,
-    #compiled_ivp_solver,
-    #compiled_augdyn_ivp_solver,
-    pop_coeff_w_bi_idx,
-    #use_surrogate_neg2ll,
-    ):
-        """The implementation of the optimization for one subject."""
-        obj_fn = lambda b_i: FOCE_inner_loss_fn_lax(
-            b_i=b_i,
-            padded_y_i=padded_y_i,
-            pop_coeff_i=pop_coeff,
-            data_contribution_i=data_contrib_i,
-            sigma2=sigma2,
-            omega2=omega2,
-            ode_t0_val_i=ode_t0_i,
-            time_mask_y_i=time_mask_y_i,
-            n_random_effects=n_random_effects,
-            compiled_ivp_solver=compiled_ivp_solver,
-            pop_coeff_w_bi_idx=pop_coeff_w_bi_idx,
-            use_surrogate_neg2ll=use_surrogate_neg2ll,
-        )
-
-                # 2. Set up an optax optimizer
-        learning_rate = 0.08  # Tune as needed
-        num_inner_steps = 200 # Tune as needed
-        b_i_lower_bound = -8
-        b_i_upper_bound = 8
-        lr_schedule = optax.exponential_decay(
-        init_value=learning_rate,
-        transition_steps=num_inner_steps,
-        decay_rate=0.1 
+    inner_loss_for_solver = partial(
+        FOCE_inner_loss_fn_lax,
+        n_random_effects=n_random_effects,
+        compiled_ivp_solver=compiled_ivp_solver,
+        pop_coeff_w_bi_idx=pop_coeff_w_bi_idx,
+        use_surrogate_neg2ll=use_surrogate_neg2ll
     )
-        optimizer = optax.adam(learning_rate=lr_schedule)
-        opt_state = optimizer.init(initial_b_i)
+    
+    #@jax.jit
+    def estimate_single_b_i_jaxopt(
+        # Per-subject (dynamic) arguments
+        initial_b_i,
+        padded_y_i,
+        data_contrib_i,
+        ode_t0_i,
+        time_mask_y_i,
+         # Shared (dynamic) arguments
+        pop_coeff,
+        sigma2,
+        omega2,
+        # Other static arguments
+        #n_random_effects,
+        #compiled_ivp_solver,
+        #compiled_2ndorder_augdyn_ivp_solver,
+        #pop_coeff_w_bi_idx,
+        #use_surrogate_neg2ll,
+        ):
+        """The implementation of the optimization for one subject."""
         
-        grad_fn = jax.grad(obj_fn)
-        #if omega is near zero, then optimzing b_i will probably lead to 
-        #very large pop coeffs w/ very small b_i, effectively canceling 
-        #eachother out in a mathematically valid, but practicaly invalid way
-        omega_is_near_zero = jnp.diag(jnp.sqrt(omega2)) < 1e-5 
         
-        def update_step(i, state_tuple):
-            params, opt_state, has_converged, loss_history, norm_history = state_tuple
-            
-            def do_update(operand):
-                params, opt_state, lh, nh = operand
-                grads = grad_fn(params)
-                
-                #sanitize the grads for the whole inner optmization for the current iteration 
-                #based on the heuristic calculated above (`omega_is_near_zero`)
-                safe_grads = jnp.where(omega_is_near_zero, 0.0, grads)
-                grad_norm = jnp.linalg.norm(safe_grads)
-                converged = grad_norm < 1e-2
-                updates, opt_state = optimizer.update(safe_grads, opt_state, params)
-                new_params_unconstrained = optax.apply_updates(params, updates)
-                
-                new_params = jnp.clip(new_params_unconstrained, 
-                              b_i_lower_bound, 
-                              b_i_upper_bound)
-                
-                
-                current_loss = obj_fn(new_params)
-                new_lh = lh.at[i].set(current_loss)
-                new_nh = nh.at[i].set(grad_norm)
-                return new_params, opt_state, converged, new_lh, new_nh
-            def do_nothing(operand):
-                params, opt_state, lh, nh = operand
-                #current_loss = obj_fn(params)
-                new_lh = lh.at[i].set(0.0)
-                new_nh = nh.at[i].set(0.0)
-                #jax.debug.print("Inner Optmizer Converged")
-                return params, opt_state, True, new_lh, new_nh
-            
-            return jax.lax.cond(has_converged,
-                do_nothing,
-                do_update,
-                (params, opt_state, loss_history, norm_history))
-            
-        
-        loss_history_init = jnp.zeros(num_inner_steps)
-        gradnorm_history_init = jnp.zeros(num_inner_steps)
-        initial_state = (initial_b_i, opt_state, False, loss_history_init, gradnorm_history_init)
-        estimated_b_i, opt_state, has_converged, loss_history, norm_history = jax.lax.fori_loop(
-            0, num_inner_steps, update_step, initial_state
+        #learning_rate = 0.08  
+        #num_inner_steps = 200 
+#
+        #lr_schedule = optax.exponential_decay(
+        #init_value=learning_rate,
+        #transition_steps=num_inner_steps,
+        #decay_rate=0.1 
+        #)
+        #optimizer = optax.adam(learning_rate=lr_schedule)
+        #solver = jaxopt.OptaxSolver(fun=inner_loss_for_solver,
+        #                            opt = optimizer,
+        #                            maxiter=200, tol=0, 
+        #                            implicit_diff=True, 
+        #                            unroll=False
+        #                            )
+        #bounds = jnp.tile(jnp.array([-8,8]), (initial_b_i.shape[0], 1))
+        n_random_effects = initial_b_i.shape[0]
+        lower_bounds = jnp.full(n_random_effects, -8.0)
+        upper_bounds = jnp.full(n_random_effects, 8.0)
+        bounds = (lower_bounds, upper_bounds)
+        solver = jaxopt.LBFGSB(fun=inner_loss_for_solver,
+                               maxiter=500,
+                               tol=1e-3, 
+                               linesearch="backtracking",
+                               unroll=False
+                               
+                               )
+        estimated_b_i, state = solver.run(
+            initial_b_i,
+            bounds = bounds,
+            padded_y_i=padded_y_i, pop_coeff_i=pop_coeff,
+            data_contribution_i=data_contrib_i, sigma2=sigma2, omega2=omega2,
+            ode_t0_val_i=ode_t0_i, time_mask_y_i=time_mask_y_i,
+            #n_random_effects=n_random_effects,
+            #compiled_ivp_solver=compiled_ivp_solver, # Pass the solver here
+            #pop_coeff_w_bi_idx=pop_coeff_w_bi_idx,
+            #use_surrogate_neg2ll=use_surrogate_neg2ll
         )
-        jax.debug.print("""
-                        --------
-                        Subject Convergence Status: {hs}
-                        
-                        Loss History: {lh}
-                        
-                        Norm History: {nh}
-                        """, 
-                        hs = has_converged, lh = loss_history, nh = norm_history
-                        )
 
         # --- Hessian Approximation ---
         def predict_fn(b_i_for_pred):
@@ -1700,15 +1662,18 @@ def estimate_b_i_vmapped_jaxopt(
             #safe_coeffs = jnp.ones_like(model_coeffs_i)
             #solver_coeffs = jnp.where(is_bad_state, safe_coeffs, model_coeffs_i)
             #jax.debug.print("Solving Post fit 0th order IVP")
-            _ = compiled_ivp_solver(ode_t0_i, model_coeffs_i)
+            #_ = compiled_ivp_solver(ode_t0_i, model_coeffs_i)
             #jax.debug.print("Solving Post fit 2nd order IVP")
-            _, pred_conc, _, S_conc_full, _, H_conc_full = compiled_2ndorder_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
             
+            _, pred_conc, _, S_conc_full, _, H_conc_full = compiled_2ndorder_augdyn_ivp_solver(ode_t0_i, model_coeffs_i)
+            #S_conc_full = 1.0
+            #H_conc_full = 1.0
             # We need the elements in J corresponding to the mask, implemented below
             return  pred_conc, S_conc_full, H_conc_full, model_coeffs_i
         
-        final_inner_loss_value = obj_fn(estimated_b_i)
+        #final_inner_loss_value = obj_fn(estimated_b_i)
         
+
         pred_conc, S, H, model_coeffs_at_opt = predict_fn(estimated_b_i)
         
         residuals_masked = jnp.where(time_mask_y_i, padded_y_i - pred_conc, 0.0)
@@ -1716,7 +1681,7 @@ def estimate_b_i_vmapped_jaxopt(
         H_masked = H * time_mask_y_i[:, None, None]
         
         S_masked = S * time_mask_y_i[:, None]
-        
+
         
         #estimate the H_foce needed for calculating the interaction term in FOCEi
         scaling_factors_b = model_coeffs_at_opt[pop_coeff_w_bi_idx]
@@ -1736,7 +1701,7 @@ def estimate_b_i_vmapped_jaxopt(
         H_data_term1 = Z_i_masked.T @ Z_i_masked
         H_data_term2 = jnp.einsum('tij,t->ij', H_masked[:, pop_coeff_w_bi_idx][:, :, pop_coeff_w_bi_idx], residuals_masked)
         H_data = (H_data_term1 - H_data_term2) / _sigma2
-             
+            
         L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
         identity = jnp.eye(omega2.shape[0], dtype=omega2.dtype)
         inv_omega2 = jax.scipy.linalg.cho_solve((L, True), identity)
@@ -1744,134 +1709,35 @@ def estimate_b_i_vmapped_jaxopt(
         
         H_foce = 2 * (H_data + H_prior)
 
-        return estimated_b_i, H_foce, final_inner_loss_value, S_masked, H_masked, residuals_masked, scaling_factors_b, model_coeffs_at_opt
+        return estimated_b_i, H_foce, state#.value
+
+    #def estimate_single_b_i(
+    #    initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
+    #    pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx
+    #):
+    #    (estimated_b_i,
+    #     H_foce,
+    #     final_inner_loss_value,
+    #     ) = estimate_single_b_i_impl(
+    #        initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
+    #        pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx
+    #    )
+    #    
+    #    return estimated_b_i, H_foce, final_inner_loss_value,
     
-    def _estimate_single_b_i_fwd(*args):
-        # args now only contains the 9 JAX array arguments
-        outputs = estimate_single_b_i_impl(*args)
-        estimated_b_i, H_foce, final_inner_loss, S_masked, H_masked, residuals_masked, scaling_factors_b, model_coeffs_at_opt = outputs
-        fwd_output = estimated_b_i, H_foce, final_inner_loss
-        residuals = (estimated_b_i, H_foce, S_masked, H_masked, residuals_masked, scaling_factors_b, model_coeffs_at_opt) + args
-        return fwd_output, residuals
-    
-    def _estimate_single_b_i_bwd(residuals, g):
-        (estimated_b_i, H_foce, S_masked, H_masked, residuals_masked, scaling_factors_b,model_coeffs_at_opt,
-         initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
-         pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx) = residuals
-        g_b_i, g_H_foce, g_loss = g
-
-        v = jax.scipy.linalg.solve(H_foce, g_b_i, assume_a='pos')
-        
-        S_wrt_ode_coeffs = S_masked
-        H_wrt_ode_coeffs = H_masked
-        
-        # 1. Calculate S_wrt_b (sensitivity w.r.t. random effects)
-        # This uses sliced sensitivities and sliced scaling factors
-        S_wrt_b = S_wrt_ode_coeffs[:, pop_coeff_w_bi_idx] * scaling_factors_b[None, :]
-        
-         # 2. Calculate S_wrt_pc (sensitivity w.r.t. population coefficients)
-        # This uses the FULL sensitivity matrix and FULL scaling factors
-        S_wrt_pc = S_wrt_ode_coeffs * model_coeffs_at_opt[None, :]
-        
-        # 3. Calculate the mixed Hessian H_wrt_b_pc = d^2(y) / db_i / dpc_k
-        n_b = len(pop_coeff_w_bi_idx)
-        n_pc = S_wrt_ode_coeffs.shape[1]
-
-        # Part 1 of the formula: The second-order term involving H
-        # We slice H by b_idx on the first axis and use the full pc axis on the second
-        H_term = (H_wrt_ode_coeffs[:, pop_coeff_w_bi_idx, :] * # Slice H for b
-              scaling_factors_b[None, :, None] * # Scale by b-related coeffs
-              model_coeffs_at_opt[None, None, :])                 # Scale by all pop_coeffs
-        
-        # Part 2 of the formula: The first-order term involving S
-        # This places the columns of S_wrt_pc corresponding to random effects 
-        # onto the diagonal of the final (n_b, n_pc) matrix for each time point.
-        selection_matrix = jnp.zeros((n_b, n_pc)).at[jnp.arange(n_b), pop_coeff_w_bi_idx].set(1)
-        S_term = jnp.einsum('tk,jk->tjk', S_wrt_pc, selection_matrix)
-        
-        H_wrt_b_pc = H_term + S_term
-
-        # 4. Assemble the final cross-partial, J_cross_pc
-        term1_final = jnp.einsum('tij,t->ij', H_wrt_b_pc, residuals_masked)
-        term2_final = S_wrt_b.T @ S_wrt_pc
-        J_cross_pc = (-2 / sigma2[0]) * (term2_final - term1_final)
-        
-        implicit_grad_pc = -v @ J_cross_pc
-        
-        # Define a function for the explicit dependency of the loss on pop_coeff
-        def explicit_loss_pc(pc, b_i_star, s2):
-            # This logic should mirror your outer loss data term, with b_i fixed
-            b_i_work = jnp.zeros_like(pc)
-            b_i_work = b_i_work.at[pop_coeff_w_bi_idx].set(b_i_star)
-            combined_coeffs = pc + b_i_work
-            log_coeffs = data_contrib_i + combined_coeffs
-            model_coeffs_i = jnp.exp(log_coeffs)
-            _, pred_y = compiled_ivp_solver(ode_t0_i, model_coeffs_i) # You need the non-augmented solver here
-            masked_residuals = jnp.where(time_mask_y_i, padded_y_i - pred_y, 0.0)
-            return jnp.sum(masked_residuals**2) / s2
-
-        explicit_grad_pc = jax.grad(explicit_loss_pc, argnums=0)(pop_coeff, estimated_b_i, sigma2[0])
-
-        grad_pop_coeff = implicit_grad_pc + explicit_grad_pc
-        grad_data_contrib = grad_pop_coeff
-        #----estimate grad for s2----
-        
-        def data_likelihood(s2):
-            #jax.debug.print("""
-            #                
-            #                """)
-            return jnp.sum(time_mask_y_i) * jnp.log(s2) + jnp.sum(residuals_masked**2) / s2
-        
-        J_cross_s2 = 2*(S_wrt_b.T @ residuals_masked) / (sigma2[0]**2)
-        implicit_grad_s2 = -v @ J_cross_s2
-        explicit_grad_s2 = jax.grad(data_likelihood)(sigma2[0])
-        total_grad_s2_scalar = explicit_grad_s2 + implicit_grad_s2
-        total_grad_s2 = jnp.array([total_grad_s2_scalar])
-        
-        #---estimate grad for o2----
- 
-        def prior_grad_fn(b_in, o2):
-            # Gradient of the prior penalty w.r.t b_i
-            return jax.grad(prior_penalty_chol, argnums=0)(b_in, o2)
-        
-        J_cross_o2 = jax.jacobian(prior_grad_fn, argnums=1)(estimated_b_i, omega2)
-        implicit_grad_o2 = -v @ J_cross_o2
-        
-        explicit_grad_o2_foce = jax.grad(explicit_fo_foce_objective, argnums=0)(
-        omega2, S_wrt_b, residuals_masked, sigma2[0]
-        )
-        explicit_grad_of_interaction_o2 = interaction_term_objective(H_foce)
-        total_grad_o2 = explicit_grad_o2_foce + implicit_grad_o2 + explicit_grad_of_interaction_o2
-        
-        return (None, None, grad_data_contrib, None, None,
-                grad_pop_coeff, total_grad_s2, total_grad_o2, None)
-    
-    @jax.custom_vjp
-    def estimate_single_b_i(
-        initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
-        pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx
-    ):
-        (estimated_b_i,
-         H_foce,
-         final_inner_loss_value,
-         S_masked,
-         H_masked,
-         residuals_masked,
-         scaling_factors_b, 
-         model_coeffs_at_opt
-         ) = estimate_single_b_i_impl(
-            initial_b_i, padded_y_i, data_contrib_i, ode_t0_i, time_mask_y_i,
-            pop_coeff, sigma2, omega2, pop_coeff_w_bi_idx
-        )
-        
-        return estimated_b_i, H_foce, final_inner_loss_value,
-        
-    estimate_single_b_i.defvjp(_estimate_single_b_i_fwd, _estimate_single_b_i_bwd)
+    #b_i_estimator = partial(
+    #    estimate_single_b_i_jaxopt,
+    #    n_random_effects=n_random_effects,
+    #    compiled_ivp_solver=compiled_ivp_solver, # Pass the adjoint-configured solver
+    #    compiled_2ndorder_augdyn_ivp_solver = compiled_2ndorder_augdyn_ivp_solver,
+    #    pop_coeff_w_bi_idx=pop_coeff_w_bi_idx,
+    #    use_surrogate_neg2ll=use_surrogate_neg2ll
+    #)
     
     vmapped_optimizer = jax.vmap(
-        estimate_single_b_i,
-        in_axes=(0, 0, 0, 0, 0, None, None, None, None),
-        out_axes=0
+        estimate_single_b_i_jaxopt,
+        in_axes=(0, 0, 0, 0, 0, None, None, None),
+        #out_axes=0
     )
 
     # Execute the vmapped function
@@ -1883,8 +1749,7 @@ def estimate_b_i_vmapped_jaxopt(
         time_mask_y_batch,
         pop_coeff,
         sigma2,
-        omega2,
-        pop_coeff_w_bi_idx
+        omega2
     )
 
     return all_b_i_estimates, all_hessians, all_final_inner_loss
@@ -3561,7 +3426,7 @@ class FOCE_approx_neg2ll_loss_jax_fdxOUTER():
             compiled_ivp_solver_novmap_arr = compiled_ivp_solver_novmap_arr,
             ode_t0_vals = ode_t0_vals,
             pop_coeff_for_J_idx = pop_coeff_for_J_idx,
-            compiled_estimate_b_i_foce = estimate_b_i_vmapped,
+            compiled_estimate_b_i_foce = estimate_b_i_vmapped_jaxopt,
             compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
             jittable_estimate_foc_i=foc_interaction_term_passthrough, 
             jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
@@ -3576,6 +3441,78 @@ class FOCE_approx_neg2ll_loss_jax_fdxOUTER():
     @staticmethod
     def grad_method():
         return partial(fdx.fgrad, offsets = fdx.Offset(accuracy=3)), partial(fdx.value_and_fgrad, offsets = fdx.Offset(accuracy=3))
+
+class FOCE_approx_neg2ll_loss_jax_jaxoptINNER():
+    """FOCE loss where finite differences (`finitediffx`) is used to estimate the gradient of the outer optimizer.
+    
+    
+    """
+    def __init__(self):
+        self.loss_val_idx = 0
+        self.grad_val_idx = 0
+        self.grad_is_fdx = True
+    
+    @staticmethod
+    def loss_fn(
+    pop_coeff, 
+    sigma2, 
+    omega2, 
+    theta, 
+    theta_data,
+    padded_y,
+    unpadded_y_len,
+    time_mask_y,
+    time_mask_J,
+    compiled_augdyn_ivp_solver_arr,
+    compiled_augdyn_ivp_solver_novmap_arr,
+    compiled_2ndorder_augdyn_ivp_solver_arr,
+    compiled_2ndorder_augdyn_ivp_solver_novmap_arr,
+    compiled_ivp_solver_arr,
+    compiled_ivp_solver_novmap_arr,
+    ode_t0_vals,
+    pop_coeff_for_J_idx,
+    use_surrogate_neg2ll,
+    raw_incoming_optimizer_vals,
+    inner_optimizer_tol = None, 
+    inner_optimizer_maxiter = None,
+    **kwargs,
+    ):
+        print("Compiling `FOCE_approx_neg2ll_loss_jax`")
+        loss = approx_neg2ll_loss_jax(
+            pop_coeff = pop_coeff, 
+            sigma2 = sigma2, 
+            omega2 = omega2, 
+            theta = theta, 
+            theta_data = theta_data,
+            padded_y = padded_y,
+            unpadded_y_len = unpadded_y_len,
+            time_mask_y = time_mask_y,
+            time_mask_J = time_mask_J,
+            compiled_augdyn_ivp_solver_arr = compiled_augdyn_ivp_solver_arr,
+            compiled_augdyn_ivp_solver_novmap_arr = compiled_augdyn_ivp_solver_novmap_arr,
+            compiled_2ndorder_augdyn_ivp_solver_arr = compiled_2ndorder_augdyn_ivp_solver_arr,
+            compiled_2ndorder_augdyn_ivp_solver_novmap_arr = compiled_2ndorder_augdyn_ivp_solver_novmap_arr,
+            compiled_ivp_solver_arr = compiled_ivp_solver_arr,
+            compiled_ivp_solver_novmap_arr = compiled_ivp_solver_novmap_arr,
+            ode_t0_vals = ode_t0_vals,
+            pop_coeff_for_J_idx = pop_coeff_for_J_idx,
+            compiled_estimate_b_i_foce = estimate_b_i_vmapped_jaxopt,
+            compiled_estimate_b_i_fo = estimate_b_i_fo_passthrough, 
+            jittable_estimate_foc_i=foc_interaction_term_passthrough, 
+            jittable_sum_neg2ll_terms=sum_neg2ll_terms_passthrough,
+            use_surrogate_neg2ll = use_surrogate_neg2ll,
+            inner_optimizer_tol = inner_optimizer_tol, 
+            inner_optimizer_maxiter = inner_optimizer_maxiter,
+            raw_incoming_optimizer_vals = raw_incoming_optimizer_vals,
+            
+        )
+        
+        return loss
+    @staticmethod
+    def grad_method():
+        return jax.grad, jax.value_and_grad
+
+
 
 class FOCE_approx_neg2ll_loss_jax():
     """FOCE loss where Scipy's finite difference algorithm is used to estimate the gradient of the outer optimizer.

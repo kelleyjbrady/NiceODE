@@ -51,7 +51,8 @@ from niceode.jax_utils import (FOCE_approx_neg2ll_loss_jax,
                                FOCE_approx_neg2ll_loss_jax_fdxOUTER, 
                                FOCEi_approx_neg2ll_loss_jax_fdxOUTER, 
                                DEBUG_FOCE_approx_neg2ll_loss_jax_fdxOUTER,
-                                DEBUG_FOCE_approx_neg2ll_loss_jax_iftINNER
+                                DEBUG_FOCE_approx_neg2ll_loss_jax_iftINNER, 
+                                FOCE_approx_neg2ll_loss_jax_jaxoptINNER
                                )
 #%%
 
@@ -265,7 +266,7 @@ me_mod_fo =  CompartmentalModel(
                                     #use_full_omega=False, 
                                     significant_digits=5,
                                     me_loss_function=FO_approx_ll_loss,
-                                    jax_loss=DEBUG_FOCE_approx_neg2ll_loss_jax_iftINNER,
+                                    jax_loss=FOCE_approx_neg2ll_loss_jax_jaxoptINNER,
                                     use_full_omega=True, 
                                     use_surrogate_neg2ll=True, 
                                     fit_jax_objective=True,
@@ -277,7 +278,9 @@ if fit_model:
     me_mod_fo = me_mod_fo.fit2(df, ci_level = None, debug_fit=False, )
 if load_jb:
     me_mod_fo = jb.load(r"/workspaces/PK-Analysis/debug/logs/fitted_model_cb_debug.jb.jb")
-
+#%%
+me_mod_fo[0](me_mod_fo[1])
+#%%
 jvg = jax.value_and_grad(me_mod_fo[0])(me_mod_fo[1])
 
 #fvg = fdx.value_and_fgrad(me_mod_fo[0])(me_mod_fo[1])
@@ -338,7 +341,7 @@ me_mod_fo =  CompartmentalModel(
                                     #use_full_omega=False, 
                                     significant_digits=5,
                                     me_loss_function=FO_approx_ll_loss,
-                                    jax_loss=DEBUG_FOCE_approx_neg2ll_loss_jax_fdxOUTER,
+                                    jax_loss=FOCE_approx_neg2ll_loss_jax_fdxOUTER,
                                     use_full_omega=True, 
                                     use_surrogate_neg2ll=True, 
                                     fit_jax_objective=True,
