@@ -47,6 +47,7 @@ optax = "^0.2.5"
 jaxopt = "^0.8.5"
 finitediffx = "^0.1.0"
 sympy = "^1.14.0"
+pymc-extras = {git = "https://github.com/pymc-devs/pymc-extras"}
 
 
 

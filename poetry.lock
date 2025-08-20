@@ -107,6 +107,29 @@ all = ["bokeh (>=3)", "contourpy", "dask[distributed]", "dm-tree (>=0.1.8)", "ne
 preview = ["arviz-base[h5netcdf]", "arviz-plots", "arviz-stats[xarray]"]
 
 [[package]]
+name = "arviz-stats"
+version = "0.6.0"
+description = "Statistical computation and diagnostics for ArviZ."
+optional = false
+python-versions = ">=3.11"
+groups = ["main"]
+files = [
+    {file = "arviz_stats-0.6.0-py3-none-any.whl", hash = "sha256:ec327c3d4249562f9b000a484a371a373eaa0b4f516a25ad59b69eb06d70e103"},
+    {file = "arviz_stats-0.6.0.tar.gz", hash = "sha256:0a85f7c062aeeae35afc0e7a21bb00d0557a3b9704193e5307a4298270ebadfb"},
+]
+
+[package.dependencies]
+numpy = ">=2"
+scipy = ">=1.10"
+
+[package.extras]
+doc = ["h5netcdf", "jupyter-sphinx", "myst-nb", "myst-parser[linkify]", "numpydoc", "sphinx", "sphinx-book-theme", "sphinx-copybutton", "sphinx-design", "sphinx_autosummary_accessors"]
+numba = ["numba", "xarray_einstats[einops]"]
+test = ["pytest", "pytest-cov"]
+test-xarray = ["h5netcdf", "pytest", "pytest-cov"]
+xarray = ["arviz-base (>=0.6.0)", "numba", "xarray-einstats"]
+
+[[package]]
 name = "asttokens"
 version = "3.0.0"
 description = "Annotate AST trees with source code positions"
@@ -141,6 +164,26 @@ dev = ["cloudpickle ; platform_python_implementation == \"CPython\"", "hypothesi
 docs = ["cogapp", "furo", "myst-parser", "sphinx", "sphinx-notfound-page", "sphinxcontrib-towncrier", "towncrier"]
 tests = ["cloudpickle ; platform_python_implementation == \"CPython\"", "hypothesis", "mypy (>=1.11.1) ; platform_python_implementation == \"CPython\" and python_version >= \"3.10\"", "pympler", "pytest (>=4.3.0)", "pytest-mypy-plugins ; platform_python_implementation == \"CPython\" and python_version >= \"3.10\"", "pytest-xdist[psutil]"]
 tests-mypy = ["mypy (>=1.11.1) ; platform_python_implementation == \"CPython\" and python_version >= \"3.10\"", "pytest-mypy-plugins ; platform_python_implementation == \"CPython\" and python_version >= \"3.10\""]
+
+[[package]]
+name = "better-optimize"
+version = "0.1.6"
+description = "A drop-in replacement for scipy optimize functions with quality of life improvements"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "better_optimize-0.1.6-py3-none-any.whl", hash = "sha256:bc409f2ee726765c79134ead75815c8309180eba367eab9286ddb8c90fa1bfa9"},
+    {file = "better_optimize-0.1.6.tar.gz", hash = "sha256:7fedab9769cb2a0bd27a6a7b0a660a625d8f139d589d27d35201dfdf7c59bd44"},
+]
+
+[package.dependencies]
+numpy = "*"
+rich = "*"
+scipy = ">=1.15"
+
+[package.extras]
+tests = ["pre-commit", "pytest", "pytest-cov"]
 
 [[package]]
 name = "blackjax"
@@ -3346,6 +3389,30 @@ express = ["numpy"]
 kaleido = ["kaleido (>=1.0.0)"]
 
 [[package]]
+name = "preliz"
+version = "0.20.0"
+description = "Exploring and eliciting probability distributions."
+optional = false
+python-versions = ">=3.11"
+groups = ["main"]
+files = [
+    {file = "preliz-0.20.0-py3-none-any.whl", hash = "sha256:9b6ba6da04e2acaae82865276215037f6c0e5fabc8ad19f491dedb07244a9592"},
+    {file = "preliz-0.20.0.tar.gz", hash = "sha256:3cf6679df6307f9a9aea3df770e3145139a246fff4d214abd9e8e6a8cd1ad8b5"},
+]
+
+[package.dependencies]
+arviz_stats = ">=0.6.0"
+matplotlib = ">=3.8"
+numba = ">=0.59"
+numpy = ">=2.0"
+scipy = ">=1.12"
+
+[package.extras]
+full = ["ipympl", "ipywidgets", "nbclient (>=0.2)"]
+lab = ["jupyterlab"]
+notebook = ["notebook"]
+
+[[package]]
 name = "prompt-toolkit"
 version = "3.0.51"
 description = "Library for building powerful interactive command lines in Python"
@@ -3697,6 +3764,37 @@ rich = ">=13.7.1"
 scipy = ">=1.4.1"
 threadpoolctl = ">=3.1.0,<4.0.0"
 typing-extensions = ">=3.7.4"
+
+[[package]]
+name = "pymc-extras"
+version = "0.4.1.dev9+g32a42b4ee"
+description = "A home for new additions to PyMC, which may include unusual probability distribitions, advanced model fitting algorithms, or any code that may be inappropriate to include in the pymc repository, but may want to be made available to users."
+optional = false
+python-versions = ">=3.11"
+groups = ["main"]
+files = []
+develop = false
+
+[package.dependencies]
+better-optimize = ">=0.1.5"
+preliz = ">=0.20.0"
+pydantic = ">=2.0.0"
+pymc = ">=5.24.1"
+pytensor = ">=2.31.4"
+scikit-learn = "*"
+
+[package.extras]
+complete = ["dask[complete] (<2025.1.1)", "xhistogram"]
+dask-histogram = ["dask[complete] (<2025.1.1)", "xhistogram"]
+dev = ["blackjax", "dask[all] (<2025.1.1)", "pytest (>=6.0)", "pytest-mock", "statsmodels"]
+docs = ["nbsphinx (>=0.4.2)", "pymc-sphinx-theme (>=0.16)", "sphinx (>=4.0)"]
+histogram = ["xhistogram"]
+
+[package.source]
+type = "git"
+url = "https://github.com/pymc-devs/pymc-extras"
+reference = "HEAD"
+resolved_reference = "32a42b4eed8fe64612442579de4a085ec780bbce"
 
 [[package]]
 name = "pyparsing"
@@ -5194,4 +5292,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<3.14"
-content-hash = "09b42193d5c8b17fd0f887f2c1d509c391866f62181e48efc8ac259274052189"
+content-hash = "b0a2d5103b076b25c3a67220d8827efadf9957c9f235b3af72132b27f270f32d"
