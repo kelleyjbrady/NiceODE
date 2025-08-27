@@ -104,7 +104,7 @@ Next, I tested the bi-level optimization architecture itself by replacing my man
 
 - Conclusion: This proved that for a standard, differentiable inner loss, jaxopt is the correct and working solution for this type of problem.
 
-## MRE 3: The Final Test with jaxopt and diffeqsolve
+## MRE 3: The "Toy Problem" jaxopt and diffeqsolve
 
 The final MRE combined the successful jaxopt architecture with the real ODE solver, which was correctly configured with an adjoint method to make it differentiable.
 
@@ -112,7 +112,23 @@ The final MRE combined the successful jaxopt architecture with the real ODE solv
 
 - Result: This final configuration failed, producing a cascade of deep, low-level JAX errors (Reverse-mode differentiation does not work..., Unexpected tangent...).
 
-- Conclusion: This was the definitive result of the entire investigation. You are correct that we tried to create the correct VJP here, but its failure was not due to a simple lack of understanding of the calculus. Rather, it proved a fundamental architectural incompatibility between jaxopt's custom VJP (for implicit differentiation) and diffrax's custom VJP (for the ODE adjoint) when they are nested. A fully automated gradient was not achievable with the current library versions, confirming that the only viable path forward was the hybrid model with a manually specified VJP.
+- Conclusion: This was a definitive result. It proved a fundamental architectural incompatibility between jaxopt's custom VJP (for implicit differentiation) and diffrax's custom VJP (for the ODE adjoint) when they are nested. This confirmed that a fully automated gradient was not achievable and that a manual VJP was the only viable architecture.
+
+## MRE 3b: The Manual VJP Implementation Challenge
+
+The final phase of the investigation was to correctly implement the necessary hybrid architecture identified in MRE #3.
+
+Setup: I built a final MRE using the "hybrid" approach: a robust jaxopt solver for the forward pass to find the b_i values, followed by a meticulously crafted manual backward pass (bwd) that implemented the Implicit Function Theorem using the pre-computed ODE sensitivities computed using forward sensitivity analysis. We corrected all known mathematical errors, including subtle sign flips and missing chain rule transformations.
+
+Result: Despite the architectural and mathematical corrections, the gradients from this final, high-fidelity manual VJP still did not match the finite difference ground truth.
+
+Conclusion & Future Work: This was the most important learning of the entire project. It demonstrates that a correct high-level understanding of the calculus is not sufficient. The practical, numerical implementation of the IFT for a non-trivial, real-world model is extraordinarily difficult and sensitive. The final failure points to a subtle, low-level numerical bug that has resisted all attempts at discovery. This frames several opportunities for future work:
+
+- Numerical Deep Dive: A more rigorous investigation is needed to debug the specific numerical values of each component of the VJP (the v vector and the J_cross matrices) to pinpoint the exact source of the error.
+
+- Alternative Formulations: Could the FOCE objective or the ODE model itself be re-parameterized to be more numerically stable and amenable to differentiation?
+
+- Tooling Development: This entire process highlights an opportunity for better tooling within the JAX ecosystem for this specific and important class of bi-level, VJP-nested problems.
 
 # Present State of the Project
 - Frequentist FO Objective: 
