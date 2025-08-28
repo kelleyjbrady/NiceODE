@@ -4,8 +4,24 @@ import finitediffx as fdx
 import jaxopt
 import diffrax
 from functools import partial
+#----Introduction----
+#This file attempts to rely on jaxopt's IFT implementation when there is a diffrax diffeq solve inside of the 
+#jaxopt optmization loop. 
+# 
+#----Purpose----
+# This is effectively taking jaxopt_mre_gemini.py and including the diffeq solve to 
+#test if including the diffeq solve causes the optmization to fail. 
 
-#This file demonstrate the limitations of diffrax for use within an inner loss function. 
+#----Result----
+#The optimization fails with:
+# "ValueError: Reverse-mode differentiation does not work
+# for lax.while_loop or lax.fori_loop with dynamic start/stop values.
+# Try using lax.scan, or using fori_loop with static start/stop."
+
+#----Conclusion----
+#IF we are to get this working a custom vjp will be required across in the inner opt which contains 
+#a diffrax diffeq solve. 
+
 
 # ===================================================================
 # 1. Hardcoded Inputs & ODE Definition
@@ -33,12 +49,12 @@ def one_compartment_ode(t, y, args):
 # ===================================================================
 # 2. Diffrax Solver Setup (With a Stiff Solver and Adjoint)
 # ===================================================================
-# --- THE FIX: Use a solver designed for stiff ODEs ---
+
 stiff_ode_solver = diffrax.Kvaerno5()
 step_ctrl = diffrax.PIDController(rtol=1e-6, atol=1e-6)
 #adjoint_method = diffrax.BacksolveAdjoint(solver=stiff_ode_solver, stepsize_controller=step_ctrl)
 adjoint_method = diffrax.RecursiveCheckpointAdjoint()
-# This is the final, correctly configured ODE solver for the inner loss
+
 compiled_solver = partial(diffrax.diffeqsolve, 
                           solver=stiff_ode_solver, 
                           t0=observation_times[0], 
@@ -92,8 +108,8 @@ def final_outer_loss(params):
 
 print("--- Running Final MRE Comparison with Stiff Solver ---")
 loss = final_outer_loss(opt_params)
-fdx_grad_mre = fdx.fgrad(final_outer_loss)(opt_params)
-jax_grad_mre = jax.grad(final_outer_loss)(opt_params)
+fdx_grad_mre = fdx.fgrad(final_outer_loss)(opt_params) #this works
+jax_grad_mre = jax.grad(final_outer_loss)(opt_params) #this fails with the error described in "Result"
 
 print("\nfinitediffx (MRE):\n", fdx_grad_mre)
 print("\njax.grad (MRE with jaxopt):\n", jax_grad_mre)

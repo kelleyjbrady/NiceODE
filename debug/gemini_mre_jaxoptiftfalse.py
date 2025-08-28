@@ -5,7 +5,27 @@ import jaxopt
 import diffrax
 from functools import partial
 
-#this file demonstrates that unrolling the inner optmizer is the same as 'rolling your own' with optax
+#----Introduction----
+#In contrast to gemini_ivp_mre.py this MRE DOES NOT rely on jaxopt's IFT implementation when 
+# there is a diffrax diffeq solve inside of the jaxopt optmization loop. 
+# 
+#----Purpose----
+# By not relying on jaxopt's IFT implementation we should end up at the same bug as when we define the optmizer
+#using jaxopt. This is becauase setting a jaxopt optmiziers implicit_diff=False tells jax to 'unroll' each step of the opt
+#in the same manner which is the default when optax defines the whole optmiziation process in a 'manual'/explicit manner
+
+#----Result----
+#The optimization fails with:
+# "ValueError: Reverse-mode differentiation does not work
+# for lax.while_loop or lax.fori_loop with dynamic start/stop values.
+# Try using lax.scan, or using fori_loop with static start/stop."
+
+#----Conclusion----
+#IF we are to get this working a custom vjp will be required across in the inner opt which contains 
+#a diffrax diffeq solve. 
+
+
+#this file demonstrates that unrolling an inner jaxopt optmizer is the same as 'rolling your own' with optax
 
 # ===================================================================
 # 1. Hardcoded Inputs & ODE Definition
