@@ -7,7 +7,7 @@ import flax
 from functools import partial
 import joblib as jb
 
-#This MRE pulls out the functional components from the components of NiceODE. 
+#This MRE pulls the functional components of NiceODE into one .py script. 
 #The data loaded from joblib below and explicitly loaded is the data from the first subject
 #in the theoph toy dataset. 
 
