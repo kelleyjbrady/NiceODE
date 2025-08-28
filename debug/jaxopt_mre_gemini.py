@@ -22,7 +22,7 @@ import jaxopt
 #generates the correct gradient. 
 
 # ===================================================================
-# 1. Hardcoded Inputs & Helper Functions
+# 1. Hardcoded Inputs
 # ===================================================================
 opt_params = jnp.array([
     0.47, 1.09, 3.55, -1.386, -0.51, 0.0, -1.20, 0.0, 0.0, -2.30
@@ -32,6 +32,10 @@ padded_y_i = jnp.array([0.74, 2.84, 6.57, 10.5, 9.66, 8.58, 8.36, 7.47, 6.89, 5.
 time_mask_y_i = jnp.ones_like(padded_y_i, dtype=bool)
 data_contrib_i = jnp.zeros(3, dtype=jnp.float64)
 initial_b_i = jnp.zeros(3, dtype=jnp.float64)
+
+# ===================================================================
+# 2. Helper Functions (Unpacking, Inner Loss)
+# ===================================================================
 
 def unpack_params(params):
     pop_coeff = params[0:3]
@@ -57,7 +61,7 @@ def toy_inner_loss(b_i, pop_coeff, sigma2, omega2):
     return loss_data + log_det_omega2 + prior_penalty
 
 # ===================================================================
-# 2. The Inner b_i Estimator using jaxopt (Corrected Pattern)
+# 3. The Inner b_i Estimator using jaxopt WITHOUT custom vjp
 # ===================================================================
 def estimate_b_i_with_jaxopt(pop_coeff, sigma2, omega2):
     """Finds the optimal b_i using a jaxopt solver."""
@@ -73,7 +77,7 @@ def estimate_b_i_with_jaxopt(pop_coeff, sigma2, omega2):
     return solution.params
 
 # ===================================================================
-# 3. The Final MRE Test
+# 4. MRE Test
 # ===================================================================
 def final_outer_loss(params):
     pop_coeff, sigma2, omega2 = unpack_params(params)

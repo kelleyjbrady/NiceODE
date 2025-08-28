@@ -26,7 +26,7 @@ import finitediffx as fdx
 #2) The custom vjp mathematics are wrong. 
 
 # ===================================================================
-# 1. Hardcoded Inputs for the Minimal Reproducible Example
+# 1. Hardcoded Inputs
 # ===================================================================
 # Parameters to be optimized (a flat vector)
 opt_params = jnp.array([
@@ -59,7 +59,7 @@ def unpack_params(params):
     return pop_coeff, jnp.array([sigma2]), omega2 # Ensure sigma2 is shape (1,)
 
 def toy_inner_loss(b_i, pop_coeff, sigma2, omega2):
-    """The simplified inner loss using the linear model."""
+    """Simplified inner loss using a linear model."""
     model_coeffs_i = jnp.exp(data_contrib_i + pop_coeff + b_i)
     
     A = jnp.eye(time_mask_y_i.shape[0], model_coeffs_i.shape[0])
@@ -77,7 +77,7 @@ def toy_inner_loss(b_i, pop_coeff, sigma2, omega2):
     return loss_data + log_det_omega2 + prior_penalty
 
 # ===================================================================
-# 3. The Custom VJP Estimator (IFT version)
+# 3. The Inner b_i Estimator using optax and custom vjp
 # ===================================================================
 def _estimate_b_i_impl(pop_coeff, sigma2, omega2):
     """Forward pass: finds b_i and calculates values needed for VJP."""
@@ -154,7 +154,7 @@ def estimate_b_i_final(pop_coeff, sigma2, omega2):
 estimate_b_i_final.defvjp(_estimate_b_i_fwd, _estimate_b_i_bwd)
 
 # ===================================================================
-# 4. The Final MRE Test
+# 4. MRE Test
 # ===================================================================
 def final_outer_loss(params):
     pop_coeff, sigma2, omega2 = unpack_params(params)
