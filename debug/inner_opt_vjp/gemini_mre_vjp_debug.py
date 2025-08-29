@@ -122,7 +122,7 @@ def _estimate_b_i_bwd(residuals, g_b_i):
     v = jax.scipy.linalg.solve(H_foce, g_b_i, assume_a='pos')
     
     # Implicit grad for pop_coeff
-    S_wrt_pc = S * model_coeffs[None, :]
+    S_wrt_log_pc = S #* model_coeffs[None, :]
     J_cross_pc = (2 / sig2[0]) * (S_wrt_pc.T @ S) # H term is zero for linear model
     implicit_grad_pc = -v @ J_cross_pc
     
