@@ -103,17 +103,44 @@ def _estimate_b_i_impl(pop_coeff, sigma2, omega2):
         estimated_b_i = solution.params
     # --- Analytical values for the Toy Problem ---
     model_coeffs = jnp.exp(data_contrib_i + pop_coeff + estimated_b_i)
-    
+    # 1. First-order sensitivities (S_simple)
     A = jnp.eye(time_mask_y_i.shape[0], pop_coeff.shape[0])
     S_simple = A @ jnp.diag(model_coeffs)
-    H_data = 2 * (S_simple.T @ S_simple) / sigma2[0]
     
-    def quadratic_prior_only(b, o2):
-        L, _ = jax.scipy.linalg.cho_factor(o2, lower=True)
-        return b @ jax.scipy.linalg.cho_solve((L, True), b)
+    hessian_calc = 'AD'
     
-    H_prior = jax.hessian(quadratic_prior_only, argnums=0)(estimated_b_i, omega2)
-    H_foce = H_data + H_prior
+    if hessian_calc == 'analytical_exact':
+        
+        # 2. Second-order sensitivities (H_ss)
+        # For y = exp(c + b), the second derivative d^2(y)/db^2 is also exp(c + b).
+        # H_ss is a tensor representing d^2(y)/db_i/db_j. For our model, it's diagonal.
+        H_ss_term = A @ jnp.diag(model_coeffs) 
+        H_ss = jnp.einsum('ti,ij->tij', H_ss_term, jnp.eye(pop_coeff.shape[0]))
+
+        # 3. Residuals at the solution
+        simple_preds = A @ model_coeffs
+        simple_residuals = jnp.where(time_mask_y_i, padded_y_i - simple_preds, 0.0)
+
+        # 4. Assemble the FULL data Hessian
+        # H_data = (2/sigma^2) * [S.T @ S - sum(residuals * H_ss)]
+        H_data_term1 = S_simple.T @ S_simple
+        H_data_term2 = jnp.einsum('tij,t->ij', H_ss, simple_residuals)
+        H_data = 2 * (H_data_term1 - H_data_term2) / sigma2[0]
+
+        # 5. Assemble the FULL prior Hessian
+        inv_omega2 = jnp.linalg.inv(omega2)
+        H_prior = 2 * inv_omega2
+        
+        # 6. The final, exact Hessian
+        H_foce = H_data + H_prior
+        # --- END CORRECTION ---
+    elif hessian_calc == 'AD':
+         H_foce = jax.hessian(obj_fn)(estimated_b_i)
+    elif hessian_calc == 'GNapprx':
+        H_data = 2 * (S_simple.T @ S_simple) / sigma2[0]
+        inv_omega2 = jnp.linalg.inv(omega2)
+        H_prior = 2 * inv_omega2
+        H_foce = H_data + H_prior
 
     simple_preds = A @ model_coeffs
     simple_residuals = jnp.where(time_mask_y_i, padded_y_i - simple_preds, 0.0)
@@ -128,7 +155,11 @@ def _estimate_b_i_bwd(residuals, g_b_i):
     """Backward pass: computes the VJP with the corrected omega gradient."""
     est_b_i, H_foce, S, res, model_coeffs, pop, sig2, om2 = residuals
     
-    v = jax.scipy.linalg.solve(H_foce, g_b_i, assume_a='pos')
+    
+    lambda_regularization = 1e-6
+    H_foce_regularized = H_foce + lambda_regularization * jnp.eye(H_foce.shape[0])
+    v = jax.scipy.linalg.solve(H_foce_regularized, g_b_i, assume_a='pos')
+    #v = jax.scipy.linalg.solve(H_foce, g_b_i, assume_a='pos')
     
     #Pop Coeff Grad
     S_wrt_log_pc = S
@@ -160,7 +191,8 @@ def _estimate_b_i_bwd(residuals, g_b_i):
     # --- Explicit Gradient Term ---
     # Grad of the quadratic term w.r.t. o2
     # NOTE THE CORRECTIONS: argnums=1 and the argument order (est_b_i, om2)
-    explicit_grad_o2 = jax.grad(quadratic_prior_only, argnums=1)(est_b_i, om2)
+    #explicit_grad_o2 = jax.grad(quadratic_prior_only, argnums=1)(est_b_i, om2)
+    explicit_grad_o2 = 0.0
     
     grad_omega2 = implicit_grad_o2 + explicit_grad_o2
     
