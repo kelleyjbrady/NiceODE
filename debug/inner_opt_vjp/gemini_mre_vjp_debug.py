@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 import finitediffx as fdx
+import jaxopt
 
 #----Introduction----
 #This MRE is paired with jaxopt_mre_gemini.py.
@@ -83,18 +84,23 @@ def _estimate_b_i_impl(pop_coeff, sigma2, omega2):
     """Forward pass: finds b_i and calculates values needed for VJP."""
     obj_fn = lambda b_i: toy_inner_loss(b_i, pop_coeff, sigma2, omega2)
     
-    optimizer = optax.adam(0.05)
-    opt_state = optimizer.init(initial_b_i)
-    grad_fn = jax.grad(obj_fn)
+    use_optax = False
+    if use_optax:
+        optimizer = optax.adam(0.05)
+        opt_state = optimizer.init(initial_b_i)
+        grad_fn = jax.grad(obj_fn)
 
-    def update_step(i, state):
-        params, opt_state = state
-        grads = grad_fn(params)
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        return optax.apply_updates(params, updates), opt_state
+        def update_step(i, state):
+            params, opt_state = state
+            grads = grad_fn(params)
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            return optax.apply_updates(params, updates), opt_state
 
-    estimated_b_i, _ = jax.lax.fori_loop(0, 10000, update_step, (initial_b_i, opt_state))
-
+        estimated_b_i, _ = jax.lax.fori_loop(0, 10000, update_step, (initial_b_i, opt_state))
+    else:
+        solver = jaxopt.LBFGS(fun=obj_fn, tol=1e-5, maxiter=500)
+        solution = solver.run(initial_b_i)
+        estimated_b_i = solution.params
     # --- Analytical values for the Toy Problem ---
     model_coeffs = jnp.exp(data_contrib_i + pop_coeff + estimated_b_i)
     
@@ -102,8 +108,11 @@ def _estimate_b_i_impl(pop_coeff, sigma2, omega2):
     S_simple = A @ jnp.diag(model_coeffs)
     H_data = 2 * (S_simple.T @ S_simple) / sigma2[0]
     
-    inv_omega2 = jnp.linalg.inv(omega2)
-    H_prior = 2 * inv_omega2
+    def quadratic_prior_only(b, o2):
+        L, _ = jax.scipy.linalg.cho_factor(o2, lower=True)
+        return b @ jax.scipy.linalg.cho_solve((L, True), b)
+    
+    H_prior = jax.hessian(quadratic_prior_only, argnums=0)(estimated_b_i, omega2)
     H_foce = H_data + H_prior
 
     simple_preds = A @ model_coeffs
@@ -134,32 +143,31 @@ def _estimate_b_i_bwd(residuals, g_b_i):
     explicit_grad_s2_scalar = 0.0
 
     #Omega Grad
-    def full_prior_penalty(b, o2):
-        """This function now exactly matches the prior term in toy_inner_loss."""
+    def quadratic_prior_only(b, o2):
+        """Calculates b.T @ inv(o2) @ b using a stable method."""
         L, _ = jax.scipy.linalg.cho_factor(o2, lower=True)
-        log_det_o2 = 2 * jnp.sum(jnp.log(jnp.diag(L)))
-        penalty = b @ jax.scipy.linalg.cho_solve((L, True), b)
-        return log_det_o2 + penalty
+        return b @ jax.scipy.linalg.cho_solve((L, True), b)
 
+    # --- Implicit Gradient Term ---
     def prior_grad_fn(b, o2):
-        # The gradient of the FULL prior penalty w.r.t. b
-        return jax.grad(full_prior_penalty, argnums=0)(b, o2)
+        # Grad of the quadratic term w.r.t. b
+        return jax.grad(quadratic_prior_only, argnums=0)(b, o2)
 
-    # The cross-partial of the FULL prior penalty
+    # Cross-partial is d/d(o2) of the grad w.r.t. b
     J_cross_o2 = jax.jacobian(prior_grad_fn, argnums=1)(est_b_i, om2)
     implicit_grad_o2 = -v @ J_cross_o2
     
-    # The explicit gradient MUST match the outer loss.
-    def explicit_omega_loss(o2, b): 
-        """This function now uses the consistent Cholesky method."""
-        L, _ = jax.scipy.linalg.cho_factor(o2, lower=True)
-        return b @ jax.scipy.linalg.cho_solve((L, True), b)
-    explicit_grad_o2 = jax.grad(explicit_omega_loss, argnums=0)(om2, est_b_i)
+    # --- Explicit Gradient Term ---
+    # Grad of the quadratic term w.r.t. o2
+    # NOTE THE CORRECTIONS: argnums=1 and the argument order (est_b_i, om2)
+    explicit_grad_o2 = jax.grad(quadratic_prior_only, argnums=1)(est_b_i, om2)
+    
+    grad_omega2 = implicit_grad_o2 + explicit_grad_o2
     
     # --- Return final gradients ---
     return (implicit_grad_pc + explicit_grad_pc, 
             jnp.array([implicit_grad_s2_scalar + explicit_grad_s2_scalar]),
-            implicit_grad_o2 + explicit_grad_o2)
+            grad_omega2)
 
 @jax.custom_vjp
 def estimate_b_i_final(pop_coeff, sigma2, omega2):
