@@ -116,36 +116,49 @@ def _estimate_b_i_fwd(pop_coeff, sigma2, omega2):
     return est_b_i, (est_b_i, H_foce, S, res, model_coeffs, pop_coeff, sigma2, omega2)
 
 def _estimate_b_i_bwd(residuals, g_b_i):
-    """Backward pass: computes the VJP."""
+    """Backward pass: computes the VJP with the corrected omega gradient."""
     est_b_i, H_foce, S, res, model_coeffs, pop, sig2, om2 = residuals
     
     v = jax.scipy.linalg.solve(H_foce, g_b_i, assume_a='pos')
     
-    # Implicit grad for pop_coeff
-    S_wrt_log_pc = S #* model_coeffs[None, :]
-    J_cross_pc = (2 / sig2[0]) * (S_wrt_pc.T @ S) # H term is zero for linear model
+    #Pop Coeff Grad
+    S_wrt_log_pc = S
+    S_wrt_b = S
+    J_cross_pc = (2 / sig2[0]) * (S_wrt_log_pc.T @ S_wrt_b)
     implicit_grad_pc = -v @ J_cross_pc
-    
-    # Implicit grad for sigma2
+    explicit_grad_pc = jnp.zeros_like(pop)
+
+    #Sigma Grad
     J_cross_s2 = 2 * (S.T @ res) / sig2[0]**2
     implicit_grad_s2_scalar = -v @ J_cross_s2
-    
-    # Implicit grad for omega2
-    def prior_grad_fn(b, o2): return jax.grad(lambda b,o2: b @ jnp.linalg.inv(o2) @ b, argnums=0)(b,o2)
+    explicit_grad_s2_scalar = 0.0
+
+    #Omega Grad
+    def full_prior_penalty(b, o2):
+        """This function now exactly matches the prior term in toy_inner_loss."""
+        L, _ = jax.scipy.linalg.cho_factor(o2, lower=True)
+        log_det_o2 = 2 * jnp.sum(jnp.log(jnp.diag(L)))
+        penalty = b @ jax.scipy.linalg.cho_solve((L, True), b)
+        return log_det_o2 + penalty
+
+    def prior_grad_fn(b, o2):
+        # The gradient of the FULL prior penalty w.r.t. b
+        return jax.grad(full_prior_penalty, argnums=0)(b, o2)
+
+    # The cross-partial of the FULL prior penalty
     J_cross_o2 = jax.jacobian(prior_grad_fn, argnums=1)(est_b_i, om2)
     implicit_grad_o2 = -v @ J_cross_o2
     
-    # This outer loss has no explicit dependency on pop_coeff or sigma2
-    explicit_grad_pc = jnp.zeros_like(pop)
-    explicit_grad_s2_scalar = 0.0
-
-    # It does have an explicit dependency on omega2
-    def explicit_omega_loss(o2, b): return b @ jnp.linalg.inv(o2) @ b
+    # The explicit gradient MUST match the outer loss.
+    def explicit_omega_loss(o2, b): 
+        """This function now uses the consistent Cholesky method."""
+        L, _ = jax.scipy.linalg.cho_factor(o2, lower=True)
+        return b @ jax.scipy.linalg.cho_solve((L, True), b)
     explicit_grad_o2 = jax.grad(explicit_omega_loss, argnums=0)(om2, est_b_i)
     
-    # Return tuple of gradients with shapes matching primal inputs
+    # --- Return final gradients ---
     return (implicit_grad_pc + explicit_grad_pc, 
-            jnp.array([implicit_grad_s2_scalar + explicit_grad_s2_scalar]), # <-- THE FIX
+            jnp.array([implicit_grad_s2_scalar + explicit_grad_s2_scalar]),
             implicit_grad_o2 + explicit_grad_o2)
 
 @jax.custom_vjp
@@ -159,8 +172,10 @@ estimate_b_i_final.defvjp(_estimate_b_i_fwd, _estimate_b_i_bwd)
 def final_outer_loss(params):
     pop_coeff, sigma2, omega2 = unpack_params(params)
     b_i = estimate_b_i_final(pop_coeff, sigma2, omega2)
-    inv_o2 = jnp.linalg.inv(omega2)
-    return b_i @ inv_o2 @ b_i
+    # Use the consistent, stable Cholesky method
+    L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
+    loss = b_i @ jax.scipy.linalg.cho_solve((L, True), b_i)
+    return loss
 
 print("--- Running MRE Comparison ---")
 fdx_grad_mre = fdx.value_and_fgrad(final_outer_loss)(opt_params)
