@@ -47,7 +47,7 @@ The package was developed for use with pharmacokinetic (PK) differential equatio
 as those seen in `src/diffeqs.py`, but the framework provided should work for any ODE's which can be expressed in the `scipy` or `sympy` functional format.  
 
 # Viability of Jax for NLME
-Established R methodologies for performing nlme modeling (`nlmixr2`: https://nlmixr2.org/) are performant, but do not use 'modern' jit-compiled broadly applicable AD methods such as Jax. Instead, `nlmixr2` utilizes a fixed set of rules for constructing gradient and loss functions given the user is working with diffeq's aligned with the PK context. At high level `nlmixr2` works by parsing a parameterization of a given ODE, then per parameter, given that it 'knows' how that parameter interacts with the others in the nlme PK context, it constructs bespoke c++ code which is used to analyltically determine the gradient and loss at each loss function evaluation. 
+Established R methodologies for performing nlme modeling (`nlmixr2`: https://nlmixr2.org/) are performant, but do not use 'modern' jit-compiled broadly applicable AD methods such as Jax. Instead, `nlmixr2` utilizes a fixed set of rules for constructing gradient and loss functions under the assumption that the user is working with diffeq's aligned with the PK context. At high level `nlmixr2` works by parsing a parameterization of a given ODE, then per parameter, given that it 'knows' how that parameter interacts with the others in the nlme PK context, it constructs bespoke c++ code which is used to analyltically determine the gradient and loss at each loss function evaluation. 
 
 In contrast, JAX takes a more general approach by using reverse-mode automatic differentiation (jax.grad) to trace a function's execution and compute its gradient. This is incredibly flexible, but for the FOCE method, it creates an extremely challenging technical problem. FOCE and FOCEi require a bi-level optimization: an outer optimization of population parameters, and an inner optimization to find the per-subject random effects (b_i). This is a "grad-of-a-grad" problem.
 
@@ -59,7 +59,7 @@ The journey to a working JAX-based FOCE gradient revealed several layers of comp
 
 3) The Hybrid Approach: The most promising architecture combined a robust jaxopt optimizer for the forward pass with our manual VJP for the backward pass. This avoided the nested VJP issue. However, even with a Minimal Reproducible Example (MRE), this approach failed to produce correct gradients, proving that subtle, unidentified numerical bugs remained in the manual VJP implementation.
 
-The conclusion is that obtaining a fast, stable, and accurate gradient for the FOCE objective in JAX is a frontier problem. While theoretically possible, it requires a level of numerical and mathematical precision in the manual VJP implementation that is exceptionally difficult to achieve.
+The conclusion is that obtaining a fast, stable, and accurate gradient for the FOCE objective in JAX is a frontier problem. While theoretically possible, it requires a level of numerical and mathematical precision in the manual VJP implementation that is exceptionally difficult to achieve without my doing additional graduate+ level research/knowledge accumulation specific to this problem. With such knowledge of 'exactly how to discuss the issue at hand' in the mind of the human user, it may be that model like Gemini 2.5 Pro could construct the required vjp following precise prompting and feedback. Without such human knowledge however, at the time of writing it does seem like I have identified an edge of Gemini 2.5 Pro's capabilities which interestingly intersects with the edge of what is possible with Jax. Given the current prevailing notion that LLM's have difficulty 'pushing the frontier of knowlege', the end state of this project is perhaps not so surprising.   
 
 # Project Learnings & Key Takeaways
 This project was a deep dive into the practical realities of advanced scientific computing in JAX. The key lessons learned were:
@@ -68,13 +68,13 @@ This project was a deep dive into the practical realities of advanced scientific
 
 2) The Manual VJP is a Last Resort: Manually implementing the Implicit Function Theorem is a powerful technique but is incredibly fragile. The backward pass must be a perfect, numerically stable implementation of the analytical derivatives.
 
-3) The Indispensable Adjoint: For reverse-mode AD (jax.grad) to work on any function containing an adaptive ODE solve, the diffrax solver must be configured with an adjoint method. The various adjoints are applicable in different situations, but  
+3) The Indispensable Adjoint: For reverse-mode AD (jax.grad) to work on any function containing an adaptive ODE solve, the diffrax solver must be configured with an adjoint method. The various adjoints are applicable in forward or reverse mode, but none of them go to the second derivative level.   
 
 4) Domain-Specific vs. General-Purpose Trade-offs: The speed of nlmixr2 comes from its specialized, generative approach. The power of JAX comes from its generality. This project demonstrates that applying a general tool to a highly specialized problem can expose the deepest and most challenging edge cases of the framework.
 
 # The Debugging Journey: The Search for a Workable Gradient
 
-The initial implementation of the FOCE gradient in JAX did not match the ground truth provided by finite differences. This kicked off an extensive debugging process to find the source of the error. Given the complexity of the system I created of a series of Minimal Reproducible Examples (MREs), each designed to isolate and test a specific component. The MREs are in the fix-vjp-calc branch, which is unmerged. 
+The initial implementation of the FOCE gradient in JAX did not match the ground truth provided by finite differences. This kicked off an extensive debugging process to find the source of the error. Given the complexity of the system I created of a series of Minimal Reproducible Examples (MREs), each designed to isolate and test a specific component. The MREs are in the `fix-vjp-calc` branch, which is not merged into the main branch. 
 
 ## A Note on Pair Programming with an LLM
 
@@ -84,7 +84,7 @@ This MRE process became a core part of my goal to test the limits of LLM pair pr
 
 - I was responsible for the high-level strategy, executing the code, and—most critically—identifying the contradictions when the results didn't match the theory. This allowed me to guide the process and ask the specific questions needed to uncover the next layer of the problem.
 
-## MRE 1: The "Toy Problem" with Optax and Manual VJP
+## MRE 1: Linear Model Simplification with Optax and Manual VJP
 
 The first step was to determine if the bug was in the diffrax ODE solver or in my custom VJP logic.
 
@@ -94,13 +94,15 @@ The first step was to determine if the bug was in the diffrax ODE solver or in m
 
 - Conclusion: This was a critical finding. It proved the bug was not in the ODE solver but was fundamental to my implementation of the optimizer loop or the VJP's backward pass.
 
-## MRE 2: The "Toy Problem" with jaxopt
+## MRE 2: Linear Model Simplification with jaxopt
+
+- `debug/inner_opt_vjp/jaxopt_mre_gemini.py`
 
 Next, I tested the bi-level optimization architecture itself by replacing my manual optimizer and VJP with a professional-grade IFT implementation.
 
 - Setup: I kept the simple linear model but used a jaxopt solver for the inner optimization.
 
-- Result: After resolving a TracerError related to JAX's internal mechanics, the gradients produced by jaxopt's built-in VJP perfectly matched the finite difference ground truth.
+- Result: The gradients produced by jaxopt's built-in VJP perfectly matched the finite difference ground truth.
 
 - Conclusion: This proved that for a standard, differentiable inner loss, jaxopt is the correct and working solution for this type of problem.
 
