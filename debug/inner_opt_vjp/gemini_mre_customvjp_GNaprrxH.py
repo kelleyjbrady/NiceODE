@@ -107,12 +107,11 @@ def _estimate_b_i_bwd(residuals_for_bwd, g_b_i):
     pop = jnp.exp(log_pop)
     S_wrt_b = S @ jnp.diag(mc)
     S_wrt_pc = S @ jnp.diag(mc)
-    #S_wrt_pc = S @ jnp.diag(mc / pop)
 
     # Note: Using Gauss-Newton (ignoring 2nd-order H tensor) for simplicity in the MRE
     J_cross_pc = (2.0 / sig2[0]) * (S_wrt_pc.T @ S_wrt_b)
-    grad_pop_coeff = -v @ J_cross_pc
-    grad_log_pop_coeff = grad_pop_coeff * pop
+    grad_log_pop_coeff = -v @ J_cross_pc
+    #grad_log_pop_coeff = grad_pop_coeff * pop
 
     J_cross_s2 = 2.0 * (S_wrt_b.T @ res) / sig2[0]**2
     implicit_grad_s2 = -v @ J_cross_s2

@@ -18,6 +18,16 @@ import joblib as jb
 #(perhaps we might even say it is too complicated to be an MRE), but it is short enough to 
 #completly share with an LLM without creating an excessive amount of context to parse. 
 
+#If this file can be fixed such that the gradients match, the various peices in NiceODE/src can be updated
+#to match. 
+
+#If someone comes across this repo and wants to spend some time getting NiceODE to work with a FOCE object THIS FILE
+#is where you should start work. Get this to work and the rest will fall into place.   
+
+#gemini_mre_customvjp_GNapprxH.py and gemini_mre_customvjp_fullH.py are 'even more MRE' than this file and getting those
+#to work would also be a produtive route, although grasping what is going on here will be required to update the package
+#with whatever fix is found. 
+
 
 def FOCE_inner_loss_fn_lax(
     b_i,  # The parameters we are optimizing (random effects)
@@ -563,7 +573,7 @@ def _jittable_param_unpack(opt_params, #parameters being optmized by something l
 
 #%%
 
-with open("debug_unpacker_kwargs.jb", 'rb') as f:
+with open(r"/workspaces/PK-Analysis/debug/inner_opt_vjp/debug_unpacker_kwargs.jb", 'rb') as f:
     unpacker_kwargs = jb.load(f)
 
 print(str(unpacker_kwargs))
@@ -899,80 +909,59 @@ def DEBUG_OMEGA_estimate_b_i_vmapped_ift(
     def _estimate_single_b_i_bwd(residuals, g):
         """
         Computes the backward pass for the custom VJP.
-        Rewritten from scratch to be clean and correct.
+        Corrected to be fully consistent with the log-scale parameterization.
         """
         # 1. Unpack all residuals from the forward pass and the incoming cotangents
-        (estimated_b_i, H_foce, S_masked, H_masked, residuals_masked, 
-        scaling_factors_b, model_coeffs_at_opt, initial_b_i, padded_y_i, 
-        data_contrib_i, ode_t0_i, time_mask_y_i, pop_coeff, sigma2, omega2, 
+        (estimated_b_i, H_foce, S_simple, H_simple, simple_residuals,
+        scaling_factors_b, model_coeffs_at_opt, initial_b_i, padded_y_i,
+        data_contrib_i, ode_t0_i, time_mask_y_i, log_pop_coeff, sigma2, omega2,
         pop_coeff_w_bi_idx) = residuals
         g_b_i, g_H_foce, g_loss = g
 
-        # 2. Calculate the 'v' vector. We have confirmed this part is working correctly.
+        # 2. Calculate the 'v' vector
         v = jax.scipy.linalg.solve(H_foce, g_b_i, assume_a='pos')
 
-        # --- Gradient w.r.t. Population Coefficients (pop_coeff) ---
+        # --- Gradient w.r.t. Log-Scale Parameters ---
         
-        # 3a. Calculate sensitivities w.r.t. b_i and pop_coeff using the chain rule
-        S_wrt_b = S_masked[:, pop_coeff_w_bi_idx] * scaling_factors_b[None, :]
-        S_wrt_pc = S_masked * model_coeffs_at_opt[None, :]
+        # 3a. Calculate sensitivities w.r.t. b_i.
+        # d(y)/db_i = d(y)/d(p) * d(p)/db_i = S_simple * diag(p)
+        S_wrt_b = S_simple[:, pop_coeff_w_bi_idx] * scaling_factors_b[None, :]
 
-        # 3b. Calculate the mixed Hessian d^2(y)/db_i/dpc_k for the linear toy model
-        n_b = len(pop_coeff_w_bi_idx)
-        n_pc = S_masked.shape[1]
-        H_term = H_masked[:, pop_coeff_w_bi_idx, :] * scaling_factors_b[None, :, None] * model_coeffs_at_opt[None, None, :]
-        selection_matrix = jnp.zeros((n_b, n_pc)).at[jnp.arange(n_b), pop_coeff_w_bi_idx].set(1)
-        S_term = jnp.einsum('tk,jk->tjk', S_wrt_pc, selection_matrix)
-        H_wrt_b_pc = H_term + S_term
-
-        # 3c. Calculate the mixed-partial J_cross_pc with the corrected sign
-        term1_final = jnp.einsum('tij,t->ij', H_wrt_b_pc, residuals_masked)
-        term2_final = S_wrt_b.T @ S_wrt_pc
-        J_cross_pc = (2 / sigma2[0]) * (term2_final - term1_final)
+        # 3b. Calculate sensitivities w.r.t. log_pop_coeff.
+        # d(y)/d(log_pc) = d(y)/d(p) * d(p)/d(log_pc) = S_simple * diag(p)
+        S_wrt_log_pc = S_simple * model_coeffs_at_opt[None, :]
         
-        # 3d. Calculate implicit and explicit gradients
-        implicit_grad_pc = -v @ J_cross_pc
+        # 3c. Calculate the cross-partial using the simple Gauss-Newton formula.
+        # This is the cross-partial between b_i and log_pop_coeff.
+        J_cross_log_pc = (2 / sigma2[0]) * (S_wrt_b.T @ S_wrt_log_pc)
         
-        # The explicit gradient MUST match the outer loss. For our debug tests,
-        # the outer loss has no explicit dependency on pop_coeff, so this is 0.0.
-        explicit_grad_pc = 0.0
-        grad_pop_coeff = implicit_grad_pc + explicit_grad_pc
-        grad_data_contrib = grad_pop_coeff
+        # 3d. The result is the gradient w.r.t. log_pop_coeff directly.
+        grad_log_pop_coeff = -v @ J_cross_log_pc
+        
+        # Since data_contribution is symmetric with log_pop_coeff, their gradients are identical.
+        grad_data_contrib = grad_log_pop_coeff
         
         # --- Gradient w.r.t. Sigma ---
-
-        # 4a. Calculate J_cross_s2
-        J_cross_s2 = 2 * (S_wrt_b.T @ residuals_masked) / sigma2[0] ** 2
-        
-        # 4b. Calculate implicit and explicit gradients
-        implicit_grad_s2 = -v @ J_cross_s2
-
-        # The explicit gradient MUST match the outer loss. For our debug tests,
-        # the outer loss has no explicit dependency on sigma2, so this is 0.0.
-        explicit_grad_s2 = 0.0
-        total_grad_s2 = jnp.array([implicit_grad_s2 + explicit_grad_s2])
+        J_cross_s2 = 2 * (S_wrt_b.T @ simple_residuals) / sigma2[0] ** 2
+        grad_sigma2 = jnp.array([-v @ J_cross_s2])
 
         # --- Gradient w.r.t. Omega ---
-
-        # 5a. Calculate J_cross_o2 for the prior
         def prior_grad_fn(b_in, o2):
             return jax.grad(prior_penalty_chol, argnums=0)(b_in, o2)
         J_cross_o2 = jax.jacobian(prior_grad_fn, argnums=1)(estimated_b_i, omega2)
-
-        # 5b. Calculate implicit and explicit gradients
         implicit_grad_o2 = -v @ J_cross_o2
 
-        # The explicit gradient MUST match the outer loss, which it does here.
         def explicit_omega_loss(o2_to_grad, b_i_fixed):
             inv_o2 = jnp.linalg.inv(o2_to_grad)
             return b_i_fixed @ inv_o2 @ b_i_fixed
         explicit_grad_o2 = jax.grad(explicit_omega_loss, argnums=0)(omega2, estimated_b_i)
         
-        total_grad_o2 = implicit_grad_o2 + explicit_grad_o2
+        grad_omega2 = implicit_grad_o2 + explicit_grad_o2
 
-        # 6. Return all gradients in the correct order
+        # 6. Return gradients in the correct VJP signature order.
+        # The 3rd input is data_contrib_i, the 6th is pop_coeff (which is log_pop_coeff).
         return (None, None, grad_data_contrib, None, None,
-                grad_pop_coeff, total_grad_s2, total_grad_o2, None)
+                grad_log_pop_coeff, grad_sigma2, grad_omega2, None)
     
     @jax.custom_vjp
     def estimate_single_b_i(
