@@ -59,7 +59,9 @@ The journey to a working JAX-based FOCE gradient revealed several layers of comp
 
 3) The Hybrid Approach: The most promising architecture combined a robust jaxopt optimizer for the forward pass with our manual VJP for the backward pass. This avoided the nested VJP issue. However, even with a Minimal Reproducible Example (MRE), this approach failed to produce correct gradients, proving that subtle, unidentified numerical bugs remained in the manual VJP implementation.
 
-The conclusion is that obtaining a fast, stable, and accurate gradient for the FOCE objective in JAX is a frontier problem. While theoretically possible, it requires a level of numerical and mathematical precision in the manual VJP implementation that is exceptionally difficult to achieve without my doing additional graduate+ level research/knowledge accumulation specific to this problem. With such knowledge of 'exactly how to discuss the issue at hand' in the mind of the human user, it may be that model like Gemini 2.5 Pro could construct the required vjp following precise prompting and feedback. Without such human knowledge however, at the time of writing it does seem like I have identified an edge of Gemini 2.5 Pro's capabilities which interestingly intersects with the edge of what is possible with Jax. Given the current prevailing notion that LLM's have difficulty 'pushing the frontier of knowlege', the end state of this project is perhaps not so surprising.   
+Obtaining a fast, stable, and accurate gradient for the FOCE objective in JAX is a frontier problem. While theoretically possible, it requires a level of numerical and mathematical precision in the manual VJP implementation that is exceptionally difficult to achieve without my doing additional graduate+ level research/knowledge accumulation specific to this problem.
+
+ With such knowledge of 'exactly how to discuss the issue at hand' empowering the human user to 'seed' the LLM such that it performs inference using a very specific, precisely relevant, portion of it's 'knowledge manifold', it may be that model like Gemini 2.5 Pro could construct the required vjp following precise prompting and feedback. Without such human knowledge however, at the time of writing it does seem like I have identified an edge of Gemini 2.5 Pro's capabilities which intersects with the edge of what is possible with Jax. Given the current prevailing notion that LLM's have difficulty 'pushing the frontier of knowlege', the end state of this project is perhaps not so surprising.   
 
 # Project Learnings & Key Takeaways
 This project was a deep dive into the practical realities of advanced scientific computing in JAX. The key lessons learned were:
@@ -74,15 +76,17 @@ This project was a deep dive into the practical realities of advanced scientific
 
 # The Debugging Journey: The Search for a Workable Gradient
 
-The initial implementation of the FOCE gradient in JAX did not match the ground truth provided by finite differences. This kicked off an extensive debugging process to find the source of the error. Given the complexity of the system I created of a series of Minimal Reproducible Examples (MREs), each designed to isolate and test a specific component. The MREs are in the `fix-vjp-calc` branch, which is not merged into the main branch. 
+The implementation of the FOCE gradient in JAX (`src/niceode/jax_utils.py`) did not match the ground truth provided by finite differences. This kicked off an extensive debugging process to find the source of the error. Given the complexity of the system I created of a series of Minimal Reproducible Examples (MREs), each designed to isolate and test a specific component. 
+
+- The MREs are in the `fix-vjp-calc` branch, which is not merged into the main branch. 
 
 ## A Note on Pair Programming with an LLM
 
-This MRE process became a core part of my goal to test the limits of LLM pair programming.
+This MRE process was a core part of my goal to test the limits of LLM pair programming.
 
-- The LLM (Gemini) served as a Socratic partner and a mathematical engine. It proposed debugging strategies (like the "toy problem" and the final "hybrid VJP"), derived the complex matrix calculus for the Implicit Function Theorem on the fly, and generated the boilerplate code for each MRE.
+- The LLM (Gemini 2.5 Pro) served as a Socratic partner and a mathematical engine. It generated boilerplate code for the various MRE based on MRE 2 (below), derived the complex matrix calculus for the Implicit Function Theorem on the fly, and provided suggestions for the next debugging steps.
 
-- I was responsible for the high-level strategy, executing the code, and—most critically—identifying the contradictions when the results didn't match the theory. This allowed me to guide the process and ask the specific questions needed to uncover the next layer of the problem.
+- I was responsible for the high-level strategy, crtical evaluation of LLM responses, and integration of generated code into existing code in a manner comprehensible with git diffs. Crtical evaluation was essential to ensure debugging strategies were not repeated or contradictory. I also identified that when working through a complex problem with an LLM it was essential for me to keep a record of the result of various debugging experiments and results. This record allowed me to 'remind' the LLM where 'we' were at in the problem solving process, guide next steps, and ask the specific questions needed to uncover the next layer of the problem.
 
 ## MRE 1: Demonstration of Core Problem
 
@@ -108,16 +112,18 @@ It seems therefore that if one can construct a custom vjp for MRE 3 it would the
 
 - `debug/inner_opt_vjp/gemini_mre_vjp_debug.py`
 
-This file attempts to address the solution pathway hypothesized in the discussion of MRE 3 above. The script contains many control paths for controlling how various elements of the vjp are estimated. For example, how the hessian is constructed and how the quantities in the reverse pass are estimated. 
+This file attempts to address the solution pathway hypothesized in the discussion of MRE 3 above. The script contains many control paths for setting how various elements of the vjp are estimated. For example, how the hessian is constructed and how the quantities in the reverse pass are estimated. 
 
 ### The Good News
-Ultimately the custom VJP was able to closesly match the finite differences gradients associated with the 'easy' to fit model parameters (the population level effects for the ODE parameters and model error) using analytical approximations of the IFT and exactly match the finite differences gradients when AD was used in the reverse pass. However, it is important to note that using AD in the reverse pass is not viable when the loss function being AD's contains a `diffrax.diffeqsolve`, so the exact AD match is more of a confirmation of the IFT approximation rather than the solution. 
+Ultimately the custom VJP was able to closesly match the finite differences gradients associated with the 'easy' to fit model parameters*  using analytical approximations of the IFT and exactly match the finite differences gradients when AD was used in the reverse pass. However, it is important to note that using AD in the reverse pass is not viable when the loss function being AD's contains a `diffrax.diffeqsolve`, so the exact AD match is more of a confirmation of the IFT-based analytical approximation rather than the ultimate solution. 
+
+*<sub>The population level effects for the ODE parameters and model error
 
 ### The Bad News
 In contrast my IFT implementation was NOT able to match the finite differences gradients for the components of the between subject variability matrix (`omega` in PK jargon). Strikingly, the AD estimation of gradients matched the results generated by my IFT implementation, but DID NOT match the finite differences estimation of the omega gradient (or the gradient generated by jaxopt which we know matches finite differences based on MRE 3). 
 
 ## MRE Conclusion
-Resolving the difference between my VJP IFT estimate of the omega gradient in MRE 4 is thus the outstanding unresolved issue which must be resolved in order to address the core problem demonstrated in MRE 1. I believe the solution may lie in an advanced implementation of the IFT which differentiates the optmality condition of the inner loss rather than the inner loss itself (the diff of the inner loss itself being the 'textbook' IFT implementation which clearly does not provide the appropriate resolution for estimating the omega gradient).   
+**Resolving the difference between my VJP IFT estimate of the omega gradient in MRE 4 is thus the outstanding unresolved issue which must be resolved in order to address the core problem demonstrated in MRE 1**. I believe the solution may lie in a more advanced implementation of the IFT which differentiates the optmality condition of the inner loss (Karush-Kuhn-Tucker (KKT) conditions) rather than the inner loss itself (the diff of the inner loss being the 'textbook' IFT implementation which clearly does not provide the appropriate resolution for estimating the omega gradient).   
 
 
 # Present State of the Project
