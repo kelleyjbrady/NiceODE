@@ -77,10 +77,14 @@ def toy_inner_loss(b_i, pop_coeff, sigma2, omega2):
     
     L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
     log_det_omega2 = 2 * jnp.sum(jnp.log(jnp.diag(L)))
-    jax.debug.print("log_det_omega2: {o}", o = log_det_omega2)
+    #jax.debug.print("log_det_omega2: {o}", o = log_det_omega2)
     prior_penalty = b_i @ jax.scipy.linalg.cho_solve((L, True), b_i)
     #loss_out = loss_data + log_det_omega2 + prior_penalty
-    loss_out = loss_data + prior_penalty
+    include_logdet_omega = True
+    if include_logdet_omega:
+        loss_out = loss_data + prior_penalty + log_det_omega2
+    else:
+        loss_out = loss_data + prior_penalty
     return loss_out
 
 # ===================================================================
@@ -122,7 +126,7 @@ def lbfgs_two_loop_recursion(g, s_history, y_history):
 def _estimate_b_i_impl(pop_coeff, sigma2, omega2):
     """Forward pass: finds b_i and calculates values needed for VJP."""
     
-    use_optax = True
+    use_optax = False
     if use_optax:
         optax_obj_fn = lambda b_i: toy_inner_loss(b_i, pop_coeff, sigma2, omega2)
         optimizer = optax.adam(0.05)
