@@ -50,14 +50,19 @@ def toy_inner_loss(b_i, pop_coeff, sigma2, omega2):
     # b_i is the variable being optimized by the inner solver.
     # pop_coeff, sigma2, omega2 are fixed parameters for the inner solve.
     model_coeffs_i = jnp.exp(data_contrib_i + pop_coeff + b_i)
+    
     A = jnp.eye(time_mask_y_i.shape[0], model_coeffs_i.shape[0])
     pred_y_i = A @ model_coeffs_i
+    
     residuals_i = jnp.where(time_mask_y_i, padded_y_i - pred_y_i, 0.0)
     sum_sq_residuals = jnp.sum(residuals_i**2)
+    
     loss_data = jnp.sum(time_mask_y_i) * jnp.log(sigma2[0]) + sum_sq_residuals / sigma2[0]
+    
     L, _ = jax.scipy.linalg.cho_factor(omega2, lower=True)
     log_det_omega2 = 2 * jnp.sum(jnp.log(jnp.diag(L)))
     prior_penalty = b_i @ jax.scipy.linalg.cho_solve((L, True), b_i)
+    
     return loss_data + log_det_omega2 + prior_penalty
 
 # ===================================================================
@@ -73,7 +78,7 @@ def estimate_b_i_with_jaxopt(pop_coeff, sigma2, omega2):
     
     # The fixed parameters are passed as keyword arguments to solver.run()
     solution = solver.run(initial_b_i, pop_coeff=pop_coeff, sigma2=sigma2, omega2=omega2)
-    
+    jax.debug.print("Solution State: {s}", s = solution.state)
     return solution.params
 
 # ===================================================================
