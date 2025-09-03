@@ -121,13 +121,13 @@ def lbfgs_two_loop_recursion(g, s_history, y_history):
 
 def _estimate_b_i_impl(pop_coeff, sigma2, omega2):
     """Forward pass: finds b_i and calculates values needed for VJP."""
-    #obj_fn = lambda b_i: toy_inner_loss(b_i, pop_coeff, sigma2, omega2)
     
-    use_optax = False
+    use_optax = True
     if use_optax:
+        optax_obj_fn = lambda b_i: toy_inner_loss(b_i, pop_coeff, sigma2, omega2)
         optimizer = optax.adam(0.05)
         opt_state = optimizer.init(initial_b_i)
-        grad_fn = jax.grad(obj_fn)
+        grad_fn = jax.grad(optax_obj_fn)
 
         def update_step(i, state):
             params, opt_state = state
@@ -136,6 +136,8 @@ def _estimate_b_i_impl(pop_coeff, sigma2, omega2):
             return optax.apply_updates(params, updates), opt_state
 
         estimated_b_i, _ = jax.lax.fori_loop(0, 10000, update_step, (initial_b_i, opt_state))
+        s_history = None
+        y_history = None
     else:
         #solver = jaxopt.LBFGS(fun=obj_fn, tol=1e-8, maxiter=5000)
         #solution = solver.run(initial_b_i)
@@ -297,7 +299,7 @@ def final_outer_loss(params):
 
 print("--- Running MRE Comparison ---")
 fdx_grad_mre = fdx.value_and_fgrad(final_outer_loss)(opt_params)
-jax_grad_mre = jax. value_and_grad(final_outer_loss)(opt_params)
+jax_grad_mre = jax.value_and_grad(final_outer_loss)(opt_params)
 
 print("\nfinitediffx Loss:\n", fdx_grad_mre[0])
 print("\njax.grad Loss:\n", jax_grad_mre[0])
