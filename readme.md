@@ -31,7 +31,7 @@ The project is built as a self-contained development environment featuring exper
 6) Once (5) is complete, open this repo with VSCode.
 
 7) You should be presented with a VSCode popup with the message *Folder contains a Dev Container configuration file. Reopen folder to develop in a container ([learn more](https://aka.ms/vscode-remote/docker)).* 
-    - **Close the message**, (8) describes a way to build the devcontainer which will work everytime beyond the first build. 
+    - **Close the message**, (8) describes a way to build the devcontainer which will work every time beyond the first build. 
 
 8) Open the VSCode command pallette (default: `CTRL+SHIFT+P`) and choose 'Dev Containers: Rebuild and Reopen". 
 
@@ -39,9 +39,9 @@ The project is built as a self-contained development environment featuring exper
 
 ## Rebuilding The Dev Container
 
-If you need to update the base containers part of Nice-ODE-Stack, you probably know what you are doing with Dev Containers. In brief, to propagate changes from the base containers into the dev container peform the following:
+If you need to update the base containers part of Nice-ODE-Stack, you probably know what you are doing with Dev Containers. In brief, to propagate changes from the base containers into the dev container perform the following:
 
-1) Make your changes to the components of Nice-ODE-Stack and ensure the build/compose suceeds. 
+1) Make your changes to the components of Nice-ODE-Stack and ensure the build/compose succeeds. 
 
 2) Open this repo locally with VSCode. If opened in Dev Container, Command Pallette->"Dev Containers: Reopen Folder Locally".
 
@@ -60,9 +60,9 @@ To install nlmixr2:
 
 3) Reopen the repo with VSCode.
     - The R installation will proceed 
-    - Subsequent openings of the repo will validate the R install in a less rigourous manner as compared to poetry.
+    - Subsequent openings of the repo will validate the R install in a less rigorous manner as compared to poetry.
         - There are R tools like Python's Poetry, but the focus of this project is on maintaining a python workspace. 
-        - Thus, it it possible that the R depandancies in the Nice-ODE-Stack may become incompatible with nlmixr2 in a way that is less likely for the python stack. 
+        - Thus, it it possible that the R dependencies in the Nice-ODE-Stack may become incompatible with nlmixr2 in a way that is less likely for the python stack. 
 
 ## Adding Python Packages to the Dev Container
 
@@ -90,13 +90,13 @@ A core motivation behind this work is the need for interpretable models in healt
 # Methodology
 ## Frequentist
 ### Objective
-Frequentist objective function modeling is performed using approximations of `2*negative log-likelihood` following from the laplacian approximation. Namely the relaxations of the laplacian known in the PK field as the First-Order (FO) and First-Oder w/ Conditional Estimation (FOCE) methods, and the forumlation of the laplacian approxmation known as First-Order Estimation w/ Conditional Estimation and Interaction (FOCEi) (Kim: http://dx.doi.org/10.12793/tcp.2015.23.1.1, Bae:http://dx.doi.org/10.12793/tcp.2016.24.4.161, Wang: http://dx.doi.org/10.1007/s10928-007-9060-6). The implementation of these methods and their gradients in a modern automatic differentiation framework like JAX formed the central and most challenging part of this project.
+Frequentist objective function modeling is performed using approximations of `2*negative log-likelihood` following from the laplacian approximation. Namely the relaxations of the laplacian known in the PK field as the First-Order (FO) and First-Oder w/ Conditional Estimation (FOCE) methods, and the formulation of the laplacian approximation known as First-Order Estimation w/ Conditional Estimation and Interaction (FOCEi) (Kim: http://dx.doi.org/10.12793/tcp.2015.23.1.1, Bae:http://dx.doi.org/10.12793/tcp.2016.24.4.161, Wang: http://dx.doi.org/10.1007/s10928-007-9060-6). The implementation of these methods and their gradients in a modern automatic differentiation framework like JAX formed the central and most challenging part of this project.
 ### Error Model
 Model error is currently implemented as additive error only. 
 
 ## Bayesian
 ### Objective
-Bayesian estimation is performed using non-centered heirarchical modeling of the subject level effects. Presently only one level of 'mixed' effect is supported at the subject-level, but the flexbility of the MCMC estimation means that extending the code which constructs the heirarchical model to include additional levels is trivial (for example modeling subject-level effects and dosing route level effects in one model).
+Bayesian estimation is performed using non-centered hierarchical modeling of the subject level effects. Presently only one level of 'mixed' effect is supported at the subject-level, but the flexibility of the MCMC estimation means that extending the code which constructs the hierarchical model to include additional levels is trivial (for example modeling subject-level effects and dosing route level effects in one model).
 ### Error Model
 Model error implemented as additive, proportional, or combined. 
 ### ODE Format
@@ -111,13 +111,13 @@ The package was developed for use with pharmacokinetic (PK) differential equatio
 as those seen in `src/diffeqs.py`, but the framework provided should work for any ODE's which can be expressed in the `scipy` or `sympy` functional format.  
 
 # Viability of Jax for NLME
-Established R methodologies for performing nlme modeling (`nlmixr2`: https://nlmixr2.org/) are performant, but do not use 'modern' jit-compiled broadly applicable AD methods such as Jax. Instead, `nlmixr2` utilizes a fixed set of rules for constructing gradient and loss functions under the assumption that the user is working with diffeq's aligned with the PK context. At high level `nlmixr2` works by parsing a parameterization of a given ODE, then, per parameter, given that it 'knows' how that parameter interacts with the others in the nlme PK context, it constructs bespoke c++ code which is used to analyltically determine the gradient and loss at each loss function evaluation. 
+Established R methodologies for performing nlme modeling (`nlmixr2`: https://nlmixr2.org/) are performant, but do not use 'modern' jit-compiled broadly applicable AD methods such as Jax. Instead, `nlmixr2` utilizes a fixed set of rules for constructing gradient and loss functions under the assumption that the user is working with diffeq's aligned with the PK context. At high level `nlmixr2` works by parsing a parameterization of a given ODE, then, per parameter, given that it 'knows' how that parameter interacts with the others in the nlme PK context, it constructs bespoke c++ code which is used to analytically determine the gradient and loss at each loss function evaluation. 
 
 In contrast, JAX takes a more general approach by using reverse-mode automatic differentiation (jax.grad) to trace a function's execution and compute its gradient. This is incredibly flexible, but for the FOCE method, it creates a challenging technical problem. FOCE and FOCEi require a bi-level optimization: an outer optimization of population parameters, and an inner optimization to find the per-subject random effects (b_i). This is a "grad-of-a-grad" problem.
 
 The journey to a working JAX-based FOCE gradient revealed several layers of complexity:
 
-1) The Manual VJP + Optax: The first approach was to manually implement the Implicit Function Theorem using jax.custom_vjp where the IFT described  the working of a 'manually' defined optax optmizer. This proved to be exceptionally difficult due to the complexity of the matrix calculus and extreme sensitivity to subtle mathematical and numerical errors. Even in a very stripped back Minimal Reproducible Example (MRE) context without an IVP on the inner optmizer, these numerical errors made it difficult to recover a gradient which matched the one estimated by finite differences.
+1) The Manual VJP + Optax: The first approach was to manually implement the Implicit Function Theorem using jax.custom_vjp where the IFT described  the working of a 'manually' defined optax optimizer. This proved to be exceptionally difficult due to the complexity of the matrix calculus and extreme sensitivity to subtle mathematical and numerical errors. Even in a very stripped back Minimal Reproducible Example (MRE) context without an IVP on the inner optimizer, these numerical errors made it difficult to recover a gradient which matched the one estimated by finite differences.
 
 2) The jaxopt Approach: The recommended JAX-native solution is to use a library like jaxopt, whose solvers are designed to be differentiable. However, this approach failed due to a fundamental incompatibility when nesting VJPs. The jaxopt solver's VJP, when trying to differentiate an inner loss function that itself contained a diffrax ODE solver with its own adjoint VJP, created a "VJP-of-a-VJP" problem that triggered low-level errors in JAX's AD machinery.
 
@@ -125,7 +125,7 @@ The journey to a working JAX-based FOCE gradient revealed several layers of comp
 
 Obtaining a fast, stable, and accurate gradient for the FOCE objective in JAX is a frontier problem. While theoretically possible, it requires a level of numerical and mathematical precision in the manual VJP implementation that is exceptionally difficult to achieve without my doing additional graduate+ level research/knowledge accumulation specific to this problem.
 
- Empowered with knowledge of 'exactly how to discuss the issue at hand' a human can attempt to seed the LLM such that it performs inference using a very specific, precisely relevant, portion of it's 'knowledge manifold'. Thus initialzied, it may be that model like Gemini 2.5 Pro could construct the required vjp following precise prompting and feedback. Without such human knowledge however, at the time of writing it does seem like I have identified an edge of Gemini 2.5 Pro's capabilities which intersects with the edge of what is possible with Jax. Given the current prevailing notion that LLM's have difficulty 'pushing the frontier of knowlege', the end state of this project is perhaps not so surprising.   
+ Empowered with knowledge of 'exactly how to discuss the issue at hand' a human can attempt to seed the LLM such that it performs inference using a very specific, precisely relevant, portion of it's 'knowledge manifold'. Thus initialized, it may be that model like Gemini 2.5 Pro could construct the required vjp following precise prompting and feedback. Without such human knowledge however, at the time of writing it does seem like I have identified an edge of Gemini 2.5 Pro's capabilities which intersects with the edge of what is possible with Jax. Given the current prevailing notion that LLM's have difficulty 'pushing the frontier of knowledge', the end state of this project is perhaps not so surprising.   
 
 # Project Learnings & Key Takeaways
 This project was a deep dive into the practical realities of advanced scientific computing in JAX. The key lessons learned were:
@@ -150,8 +150,8 @@ This MRE process was a core part of my goal to test the limits of LLM pair progr
 
 - The LLM (Gemini 2.5 Pro) served as a Socratic partner and a mathematical engine. It generated boilerplate code for the various MRE based on MRE 2 (below), derived the complex matrix calculus for the Implicit Function Theorem on the fly, and provided suggestions for the next debugging steps.
 
-- I was responsible for the high-level strategy, crtical evaluation of LLM responses, and integration of generated code into existing code in a manner comprehensible with git diffs. 
-    - Crtical evaluation was essential to ensure debugging strategies were not repeated or contradictory.
+- I was responsible for the high-level strategy, critical evaluation of LLM responses, and integration of generated code into existing code in a manner comprehensible with git diffs. 
+    - Critical evaluation was essential to ensure debugging strategies were not repeated or contradictory.
     - To work through a complex problem with an LLM it was essential for me to keep a record of the result of various debugging experiments. This record allowed me to 'remind' the LLM where 'we' were at in the problem solving process, guide next steps, and ask the specific questions needed to uncover the next layer of the problem. 
         - It is worth noting that I tried to get the LLM to maintain the debugging record as a table. Such an approach seemed to be on it's way to working, but did not work well enough to hand off the experiment tracking responsibility to the LLM. 
         - It seems possible that a collection of agents tailored to the problem might be able to handle such a task. However, it must be considered that the type of 'debugging' discussed here is fundamentally different than the 'how can I fix this traceback' debugging paradigm where LLMs perform reasonably well.   
@@ -160,19 +160,19 @@ This MRE process was a core part of my goal to test the limits of LLM pair progr
 
 - `debug/inner_opt_vjp/gemini_ivp_mre.py` 
 
-Demonstrates that an objective function containing an inner optmizer which itself contains an IVP solve (`diffrax.diffeqsolve`) fails because the custom vjp's utilized by `diffrax` and `jaxopt` do not go to the second derivative level.
+Demonstrates that an objective function containing an inner optimizer which itself contains an IVP solve (`diffrax.diffeqsolve`) fails because the custom vjp's utilized by `diffrax` and `jaxopt` do not go to the second derivative level.
 
 ## MRE 2: Less MRE More Consolidated Code
 
 - `debug/inner_opt_vjp/debug_customvjp.py` 
 
-This file contains all of the logic from the core package, with the `diffrax.diffeq` solve replaced by a matrix multiplcation. This file was further simplified into MRE 3 and 4. 
+This file contains all of the logic from the core package, with the `diffrax.diffeq` solve replaced by a matrix multiplication. This file was further simplified into MRE 3 and 4. 
 
 ## MRE 3: Linear Model Simplification with jaxopt IFT
 
 - `debug/inner_opt_vjp/jaxopt_mre_gemini.py`
 
-This file simplifies MRE 2 and demonstrates that the jaxopt IFT implementation generates the same gradient as finite differences. Critically, this match to finite differences is generated when the inner optmizer DOES NOT contain a `diffrax.diffeqsolve`, which we know fails based on MRE 1. 
+This file simplifies MRE 2 and demonstrates that the jaxopt IFT implementation generates the same gradient as finite differences. Critically, this match to finite differences is generated when the inner optimizer DOES NOT contain a `diffrax.diffeqsolve`, which we know fails based on MRE 1. 
 
 It seems therefore that if one can construct a custom vjp for MRE 3 it would then be possible to put the diffrax solver back into the inner optimizer and arrive at a solution to the issue demonstrated in MRE 1. 
 
@@ -183,7 +183,7 @@ It seems therefore that if one can construct a custom vjp for MRE 3 it would the
 This file attempts to address the solution pathway hypothesized in the discussion of MRE 3 above. The script contains many control paths for setting how various elements of the vjp are estimated. For example, how the hessian is constructed and how the quantities in the reverse pass are estimated. 
 
 ### The Good News
-The backward VJP function required some refinements related to scaling of the gradients. Fixes applied, the custom VJP closesly matched the finite differences gradients associated with the 'easy' to fit model parameters*  using an analytical approximations of the IFT.  The custom vjp gradients exactly matched the finite differences gradients when AD was used in the reverse pass to construct the IFT. However, it is important to note that using AD in the reverse pass is not viable when the loss function being AD'd contains a `diffrax.diffeqsolve`. Thus, the exact AD match to finite differences and the analytical approximation is a confirmation of the fidelity of the analytical IFT approximation rather than the ultimate solution. 
+The backward VJP function required some refinements related to scaling of the gradients. Fixes applied, the custom VJP closely matched the finite differences gradients associated with the 'easy' to fit model parameters*  using an analytical approximations of the IFT.  The custom vjp gradients exactly matched the finite differences gradients when AD was used in the reverse pass to construct the IFT. However, it is important to note that using AD in the reverse pass is not viable when the loss function being AD'd contains a `diffrax.diffeqsolve`. Thus, the exact AD match to finite differences and the analytical approximation is a confirmation of the fidelity of the analytical IFT approximation rather than the ultimate solution. 
 
 *<sub>The population level effects for the ODE parameters and model error
 
@@ -191,33 +191,33 @@ The backward VJP function required some refinements related to scaling of the gr
 For the components of the between subject variability matrix (`omega` in PK jargon), my AD and analytical IFT implementations currently do not match the finite differences gradients . Interestingly, the IFT by AD estimated gradients matched the gradients generated by my IFT analytical implementation, but **did not** match the finite differences estimation of the omega gradient (or the gradient generated by jaxopt which we know matches finite differences based on MRE 3). 
 
 ## MRE Conclusion
-**Resolving the difference between my VJP IFT estimate of the omega gradient in MRE 4 is thus the outstanding unresolved issue which must be resolved in order to address the core problem demonstrated in MRE 1**. Cursory research suggests the solution may lie in a more advanced/precise implementation of the IFT. For example, one which differentiates the optmality condition of the inner loss (Karush-Kuhn-Tucker (KKT) conditions) rather than the inner loss itself (the diff of the inner loss is the 'textbook' IFT implementation, which clearly does not provide the appropriate resolution for estimating the omega gradient).   
+**Resolving the difference between my VJP IFT estimate of the omega gradient in MRE 4 is thus the outstanding unresolved issue which must be resolved in order to address the core problem demonstrated in MRE 1**. Cursory research suggests the solution may lie in a more advanced/precise implementation of the IFT. For example, one which differentiates the optimality condition of the inner loss (Karush-Kuhn-Tucker (KKT) conditions) rather than the inner loss itself (the diff of the inner loss is the 'textbook' IFT implementation, which clearly does not provide the appropriate resolution for estimating the omega gradient).   
 
 
 # Present State of the Project
-## Heirarchical Bayesian Estimation
-If you would like to use NiceODE in your work, this is the approach I would recommend. See the theoph_heirarchical.ipynb notebook for a demonstration of how to use this estimation method. 
+## Hierarchical Bayesian Estimation
+If you would like to use NiceODE in your work, this is the approach I would recommend. See the theoph_hierarchical.ipynb notebook for a demonstration of how to use this estimation method. 
 
 The bayesian implementation:
 - Generates an excellent and interpretable fit result to the toy Theoph dataset. 
     - This data is simple but representative.
 - Is more simple to understand and extend as compared to frequentist estimation. 
-    - For example, as stated above it is simple to extend the code to model multiple levels of heirarchy.
+    - For example, as stated above it is simple to extend the code to model multiple levels of hierarchy.
 - Has all three 'classic' error models available (proportional, combined, additive)
-- Is reasonably fast given the wealth of fit assesment information it provides by default. 
-    - The 'automatic' generation of uncertainty estimates for all model parameters and predictions is a killer feature for research applications (assesment of model quality) and production applications (bayesian forecasting). 
+- Is reasonably fast given the wealth of fit assessment information it provides by default. 
+    - The 'automatic' generation of uncertainty estimates for all model parameters and predictions is a killer feature for research applications (assessment of model quality) and production applications (bayesian forecasting). 
 
 ### Next Steps
-Those familar with PyMC will be able to perform some minor refactors to make the code suitable for use in production. 
+Those familiar with PyMC will be able to perform some minor refactors to make the code suitable for use in production. 
 
-The most obvious production use-case seems to be a clinical product trained and validated on your organization's PK data and clinical outcomes to provide an in-network dose optimization dashboard similar to the one discussed by Xong et al. (http://dx.doi.org/10.1002/cpt.2148) and the commerical product developed by Dervieux et al. (https://prometheuslabs.com/about_predictrpk/). 
+The most obvious production use-case seems to be a clinical product trained and validated on your organization's PK data and clinical outcomes to provide an in-network dose optimization dashboard similar to the one discussed by Xong et al. (http://dx.doi.org/10.1002/cpt.2148) and the commercial product developed by Dervieux et al. (https://prometheuslabs.com/about_predictrpk/). 
 
 ## Documentation
-The documentation is admitedly lacking, the API is still in a state transition between versions, and the 'bones' of various attempted fixes are present throughout which may be confusing to others. This project was more about me learning some new skills, honing existing skills, and creating a framework which I can further adapt in furture project and employment rather than open sourcing something immediately suitable for use in your production environment. If you are using the repository as intended in a VSCode Dev Environment it should be completely possible for you to jump around the code with the exploration features provided by VSCode. The recommended bayesian approach is compact and modular as compared to the frequentist implementation.  
+The documentation is admittedly lacking, the API is still in a state transition between versions, and the 'bones' of various attempted fixes are present throughout which may be confusing to others. This project was more about me learning some new skills, honing existing skills, and creating a framework which I can further adapt in future project and employment rather than open sourcing something immediately suitable for use in your production environment. If you are using the repository as intended in a VSCode Dev Environment it should be completely possible for you to jump around the code with the exploration features provided by VSCode. The recommended bayesian approach is compact and modular as compared to the frequentist implementation.  
 
 ## Help for Academia
-If you are working in academia and would like to use this project in your work, please feel to reach out and we can schedule a video demo and potentially start an ongoing correspondance. I'm happy to provide a bit of support and direction to enable you to use NiceODE in your work. 
+If you are working in academia and would like to use this project in your work, please feel to reach out and we can schedule a video demo and potentially start an ongoing correspondence. I'm happy to provide a bit of support and direction to enable you to use NiceODE in your work. 
 
-## Help for Commerical Applications
-Obviously the MIT license permits you to use this project and the code therin for free. I'm happy to provide a bit of support and a demo. In the long term I do have plans to improve the documentation and API such that you can more reasonably be left to your own initiative. Ongoing support or explicit help with integration into a commerical product will require negotiation of a consulting relationship.  
+## Help for Commercial Applications
+Obviously the MIT license permits you to use this project and the code therein for free. I'm happy to provide a bit of support and a demo. In the long term I do have plans to improve the documentation and API such that you can more reasonably be left to your own initiative. Ongoing support or explicit help with integration into a commercial product will require negotiation of a consulting relationship.  
 
