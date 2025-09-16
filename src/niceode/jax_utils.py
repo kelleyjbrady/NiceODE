@@ -496,12 +496,15 @@ def predict_with_params(pop_coeff,
     time_mask_J,
     compiled_augdyn_ivp_solver_arr,
     compiled_augdyn_ivp_solver_novmap_arr,
+    compiled_2ndorder_augdyn_ivp_solver_arr,
+    compiled_2ndorder_augdyn_ivp_solver_novmap_arr,
     compiled_ivp_solver_arr,
     compiled_ivp_solver_novmap_arr,
     ode_t0_vals, 
     pop_coeff_for_J_idx,
     use_surrogate_neg2ll,
-    b_i):
+    b_i, 
+    raw_incoming_optimizer_vals):
 
     n_subjects = time_mask_y.shape[0]
     n_coeffs = pop_coeff.shape[0]
@@ -2810,7 +2813,7 @@ def approx_neg2ll_loss_jax(
     # )
     no_foce_log_coeffs = data_contribution + pop_coeff
     is_bad_state_0 = jnp.any(no_foce_log_coeffs > 700) | jnp.any(no_foce_log_coeffs < -20)
-    jax.debug.print('PRE FOCE b_i bad state status: {s}', s = is_bad_state_0)
+    #jax.debug.print('PRE FOCE b_i bad state status: {s}', s = is_bad_state_0)
     
     b_i, hessian_i, inner_loss_i = compiled_estimate_b_i_foce(
         initial_b_i_batch=b_i,
@@ -2925,7 +2928,10 @@ def approx_neg2ll_loss_jax(
             'padded_pred_y':padded_pred_y,
             #'padded_pred_full':padded_full_preds,
             'model_coeffs_i':log_coeffs, 
-            'per_subject_loss':per_subject_loss
+            'per_subject_loss':per_subject_loss, 
+            #'J_mask':J, 
+            
+            
         }
         return outer_objective_for_grad_out, value_out
     

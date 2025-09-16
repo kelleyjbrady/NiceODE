@@ -4159,6 +4159,8 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 mlflow.log_param('loss_definition_hash',
                                 generate_class_contents_hash(loss_str))
                 mlflow.log_param('loss_definition_name', mlflow_loss.__name__)
+            else:
+                self.fit_objective_name_ = mlflow_loss.__name__
                     
                 
             mlf_callback = MLflowCallback(objective_name=self.fit_objective_name_, 
@@ -4320,7 +4322,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                             res = run_opt(jnp.array(_opt_params))
                             fitted_params, fitted_state = res
                             self.fit_result_ = FitResult(
-                                fit_method = 'optax', 
+                                fit_method = 'jaxopt', 
                                 x = fitted_params, 
                                 state = fitted_state, 
                                 fun = fitted_state.fun_val,
@@ -4357,7 +4359,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                             res = run_opt(jnp.array(_opt_params, dtype = jnp.float64))
                             fitted_params, fitted_state = res
                             self.fit_result_ = FitResult(
-                                fit_method = 'optax', 
+                                fit_method = 'jaxopt-scipy', 
                                 x = fitted_params, 
                                 state = fitted_state,
                                 fun = fitted_state.fun_val,
@@ -4479,12 +4481,12 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                             np.exp(
                                 fit_result_summary.loc[filt, f"fitted_params_lower_ci{alpha_label}"]
                             )
-                        )
+                        ) if ci_level is not None else None
                         fit_result_summary.loc[filt, f"back_transformed_upper_ci{alpha_label}"] = (
                             np.exp(
                                 fit_result_summary.loc[filt, f"fitted_params_upper_ci{alpha_label}"]
                             )
-                        )
+                        ) if ci_level is not None else None
                         #When the loss is not FOCEi the cols in this for omega related rows and sigma should be 
                         #set to None as they are not reliable and not worth thinking about deeply 
                         self.fit_result_summary_ = fit_result_summary.copy()
