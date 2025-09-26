@@ -50,6 +50,11 @@ class InitValsPdCols:
     fix_param_value:str = "fix_param_value"
     fix_subject_level_effect:str = "fix_subject_level_effect"
     
+    aux_hierarchy_levels:str = 'aux_hierarchy_levels'
+    aux_hierarchy_names:str = 'aux_hierarchy_names'
+    aux_hierarchy_group_by_cols:str = 'aux_hierarchy_group_by_cols'
+    aux_hierarchy_init_vals:str = 'aux_hierarchy_init_vals'
+    
     def __post_init__(self, ):
         self.pd_dtypes = [
         pd.StringDtype(),
@@ -69,7 +74,11 @@ class InitValsPdCols:
         pd.Float64Dtype(), 
         pd.Float64Dtype(), 
         pd.BooleanDtype(), 
-        pd.BooleanDtype()  
+        pd.BooleanDtype(), 
+        # Placeholder: aux_hierarchy_levels
+        # Placeholder: aux_hierarchy_names
+        # Placeholder: aux_hierarchy_group_by_cols
+        # Placeholder: aux_hierarchy_init_vals
         ]
     def validate_df_row(self,df_row_dict:dict):
         new_keys = [i for i in df_row_dict]
