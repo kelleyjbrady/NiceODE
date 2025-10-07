@@ -44,7 +44,18 @@ from niceode.jax_utils import FO_approx_neg2ll_loss_jax
 
 df =  pd.read_csv(r"/workspaces/PK-Analysis/data/CP1805/CP1805Data.csv").iloc[1:, :]
 df = df.loc[~df['Conc'].isnull(), :]
-df = df.loc[df['Day'] == 1.0, :].reset_index(drop = True)
+df = df.loc[df['Day'] == 1.0, :]
+numeric_cols = ['Time', 'Dose', 'Conc']
+for c in numeric_cols:
+    df[c] = df[c].astype(pd.Float64Dtype())
+#df['Time'] = df['Time'].astype(pd.Float32Dtype())
+df = df.loc[df['Route'].isin(['Oral', 'Dermal'])]
+df = df.sort_values(by = ['Subject', 'Day', 'Time']).reset_index(drop = True)
+#%%
+df_tmp = df.loc[df['Route'] == 'Oral', :]
+
+
+
 #%%
 me_mod_fo =  CompartmentalModel(
         model_name = "debug_cp1805_multiple_hierarchy",
@@ -52,6 +63,8 @@ me_mod_fo =  CompartmentalModel(
             conc_at_time_col = 'Conc',
             subject_id_col = 'Subject', 
             time_col = 'Time',
+            dose_col='Dose',
+            ode_t0_time_val=0,
             population_coeff=[
                                 PopulationCoeffcient('ka', 
                                                     optimization_init_val=1.6, 

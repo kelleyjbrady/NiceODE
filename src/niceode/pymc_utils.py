@@ -143,19 +143,34 @@ def make_pymc_model(model_obj,
     all_sub_tp = np.tile(model_obj.global_tp_eval, (len(time_mask),1))
     timepoints = model_obj.global_tp_eval
     dose_t0 = model_obj.dose_t0.to_numpy()
-    nondim_ode_t0_vals = model_obj.ode_t0_vals_nondim.to_numpy()
+    nondim_ode_t0_vals = model_obj.ode_t0_vals_nondim.to_numpy(dtype = np.float64)
     n_ode_params = len(model_params)
     model_obj = deepcopy(model_obj)
     model_obj.stiff_ode = True
     t1 = model_obj.global_tf_eval
     t0 = model_obj.global_t0_eval 
     dt0 = 0.1
+    
+    
     coords = {'subject':list(pm_subj_df[model_obj.groupby_col].values), 
           'obs_id': list(pm_df.index.values), 
           'global_time':timepoints, 
           'ode_output':list(model_obj.ode_t0_vals.columns)
           }
     
+    aux_coord_df = model_params.loc[model_params['aux_hierarchy_levels']] 
+    aux_coords = {}
+    subject_aux_maps = {}
+    for idx, row in aux_coord_df.iterrows():
+        current_groups = [i for i in aux_coords]
+        tmp_groups = row['aux_hierarchy_group_by_cols']
+        new_groups = [i for i in tmp_groups if i not in current_groups]
+        for g in new_groups:
+            subject_aux_map = pm_subj_df[g].values
+            aux_coords[g] = list(np.unique(pm_subj_df[g].values))
+            #subject_aux_map = pd.get_dummies(subject_aux_map)
+            subject_aux_maps[g] = pd.get_dummies(subject_aux_map).to_numpy()
+    coords.update(aux_coords)
     #jax_odeint_op = JaxOdeintOp(one_compartment_model)
     #ode_func = ytp_ode_from_typ(one_compartment_diffrax2)
     
@@ -176,12 +191,14 @@ def make_pymc_model(model_obj,
         tp_data = pm.Data('timepoints', all_sub_tp, dims = ('subject', 'global_time'))
         tp_data_vector = pm.Data('timepoints_vector', timepoints.flatten(), dims = 'global_time')
         #subject_init_conc = pm.Data('c0', pm_subj_df[model_obj.conc_at_time_col].values, dims = 'subject')
-        subject_init_y0 = pm.Data('y0', model_obj.ode_t0_vals.to_numpy(), dims = ('subject', 'ode_output'))
+        subject_init_y0 = pm.Data('y0', model_obj.ode_t0_vals.to_numpy(dtype = np.float64), dims = ('subject', 'ode_output'))
         subject_init_y0_nondim = pm.Data('y0_nondim',
                                          nondim_ode_t0_vals,
                                          dims = ('subject', 'ode_output'))
         dose_t0 = pm.Data('dose_t0', dose_t0, dims = 'subject')
-
+        pm_subj_aux_maps = {}
+        for g  in subject_aux_maps:
+            pm_subj_aux_maps[g] = pm.Data(f'subject_{g}_map', subject_aux_maps[g], dims = ("subject", g ))
         subject_data = {}
         thetas = {}
         seen_coeff = []
@@ -208,6 +225,11 @@ def make_pymc_model(model_obj,
         coeff_intercept_sigma = {}
         coeff_intercept_i = {}
         z_coeff = {}
+        
+        coeff_aux_mu = {}
+        coeff_aux_sigma = {}
+        coeff_aux_i = {}
+        
         pm_model_params = []
         nondim_params_list = []
         hybrid_params_list = []
@@ -215,36 +237,76 @@ def make_pymc_model(model_obj,
         for idx, row in model_params.iterrows():
             coeff_name = row['model_coeff']
             coeff_has_subject_intercept = row['subject_level_intercept']
-                         
+            coeff_has_aux_levels = row['aux_hierarchy_levels']
+            aux_levels = row['aux_hierarchy_group_by_cols']
+            coeff_intercept_mu[coeff_name] = {}
+            coeff_intercept_sigma[coeff_name] = {}
+            z_coeff[coeff_name] = {}
+            coeff_intercept_i[coeff_name] = {}   
             #prior for population coeff
             population_coeff[coeff_name]=pm.Normal(f"{coeff_name}_pop", mu = row['init_val'], sigma = row['sigma'], initval=row['init_val'])
             #if the ODE parameter (row['model_coeff']) has subject level effects, include them in the ODE parameter
             if coeff_has_subject_intercept:
-                #one average subject level effect 
-                coeff_intercept_mu[coeff_name] = pm.Normal(f"{coeff_name}_intercept_mu", mu = 0, sigma = 2)
+                #one average subject level effect
+                
+                coeff_intercept_mu[coeff_name]['subject'] = pm.Normal(f"{coeff_name}_subject_intercept_mu", mu = 0, sigma = 2)
                 #one sd of subject level effect
-                coeff_intercept_sigma[coeff_name] = pm.HalfNormal(f"{coeff_name}_intercept_sigma",
+                
+                coeff_intercept_sigma[coeff_name]['subject'] = pm.HalfNormal(f"{coeff_name}_subject_intercept_sigma",
                                                                   sigma = row['subject_level_intercept_sd_init_val'], initval= row['subject_level_intercept_sd_init_val'])
                 #per subject deviation from coeff_intercept_mu
                 # Non-centered subject-level deviations (standard normal prior)
-                z_coeff[coeff_name] = pm.Normal(
-                    f"z_{coeff_name}", mu=0, sigma=1, dims="subject"
+                
+                z_coeff[coeff_name]['subject'] = pm.Normal(
+                    f"z_subject_{coeff_name}", mu=0, sigma=1, dims="subject"
                 )
 
                 # Subject-level effect (non-centered)
-                coeff_intercept_i[coeff_name] = pm.Deterministic(
-                    f"{coeff_name}_intercept",
-                    coeff_intercept_mu[coeff_name]
-                    + z_coeff[coeff_name] * coeff_intercept_sigma[coeff_name],
+                
+                coeff_intercept_i[coeff_name]['subject'] = pm.Deterministic(
+                    f"{coeff_name}_subject_intercept",
+                    coeff_intercept_mu[coeff_name]['subject']
+                    + z_coeff[coeff_name]['subject'] * coeff_intercept_sigma[coeff_name]['subject'],
                     dims="subject",
                 )
 
                 #debug_print(f"Shape of coeff_intercept_i[{coeff_name}]: {coeff_intercept_i[coeff_name].shape.eval()}")
-                model_coeff = (population_coeff[coeff_name] + coeff_intercept_i[coeff_name])
+                model_coeff = (population_coeff[coeff_name] + coeff_intercept_i[coeff_name]['subject'])
             #if the ODE parameter (row['model_coeff']) DOES NOT have subject level effects
             #and thus The ODE parameter (model_coeff) remains the pop_coeff
             else:
                 model_coeff = population_coeff[coeff_name]
+            
+            if coeff_has_aux_levels:
+                aux_init_sigmas = row['aux_hierarchy_init_vals']
+                for aux_level_idx, aux_level in enumerate(aux_levels):
+                    init_sigma = aux_init_sigmas[aux_level_idx]
+                    init_sigma = init_sigma if init_sigma > 0 else 2
+                    #one average of current aux level effect 
+                    coeff_intercept_mu[coeff_name][aux_level] = pm.Normal(f"{coeff_name}_{aux_level}_intercept_mu", mu = 0, sigma = 2)
+                    #one sd of current aux level effect
+                    coeff_intercept_sigma[coeff_name][aux_level] = pm.HalfNormal(f"{coeff_name}_{aux_level}_intercept_sigma",
+                                                                    sigma = init_sigma, initval= init_sigma)
+                    # current aux level  deviation from coeff_intercept_mu
+                    # Non-centered current aux-level deviations (standard normal prior)
+                    z_coeff[coeff_name][aux_level] = pm.Normal(
+                        f"z_{aux_level}_{coeff_name}", mu=0, sigma=1, dims=aux_level
+                    )
+
+                    # Current aux-level effect (non-centered)
+                    coeff_intercept_i[coeff_name][aux_level] = pm.Deterministic(
+                        f"{coeff_name}_{aux_level}_intercept",
+                        coeff_intercept_mu[coeff_name][aux_level]
+                        + z_coeff[coeff_name][aux_level] * coeff_intercept_sigma[coeff_name][aux_level],
+                        dims=aux_level,
+                    )
+                    
+                    subject_to_aux_map = pm_subj_aux_maps[aux_level]
+                    aligned_aux_effect = (coeff_intercept_i[coeff_name][aux_level] * subject_to_aux_map).sum(axis = 1)
+
+                    #debug_print(f"Shape of coeff_intercept_i[{coeff_name}]: {coeff_intercept_i[coeff_name].shape.eval()}")
+                    model_coeff = (model_coeff + aligned_aux_effect)
+            
             #if the ODE parameter includes fixed effects, include those
             if coeff_name not in thetas:
                 thetas[coeff_name] = {}
