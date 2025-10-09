@@ -175,6 +175,11 @@ class PopulationCoeffcient:
     subject_level_intercept_init_vals_column_name: str = None
     fix_param_value:bool = False
     fix_subject_level_effect:bool = False
+    
+    aux_hierarchy_levels: bool = False
+    aux_hierarchy_names: list[str] = field(default_factory=list)
+    aux_hierarchy_group_by_cols: list[str] = field(default_factory=list)
+    aux_hierarchy_init_vals: list[np.float64] = field(default_factory=list)
     def __post_init__(self):
         self.log_name = (self.coeff_name + "_pop" 
                          if self.log_name is None 
@@ -194,6 +199,13 @@ class PopulationCoeffcient:
             self.subject_level_intercept_sd_name = f"omega2_{self.coeff_name}"
         if c1 and c2:
             self.subject_level_intercept_sd_init_val = np.random.rand() + 1e-6
+        
+        required_aux_fields = [self.aux_hierarchy_names, self.aux_hierarchy_init_vals, self.aux_hierarchy_group_by_cols]
+        len_aux0 = len(required_aux_fields[0])
+        aux_lens_match = [len(i) == len_aux0 for i in required_aux_fields]
+        if not aux_lens_match:
+            raise ValueError("""The number of provided `aux_hierarchy_names` does not match the number of `aux_hierarchy_init_vals`
+                             and/or `aux_hierarchy_group_by_cols`.""")
 
     def to_pandas(self):
         cols = InitValsPdCols()
@@ -1539,6 +1551,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self,
         model_name: str = None,
         subject_id_col: str = "SUBJID",
+        aux_group_by_cols:str|List[str] = None,
         conc_at_time_col: str = "DV",
         dose_col:str = 'AMT',
         time_col="TIME",
@@ -1682,6 +1695,7 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         self.ode_output_size = determine_ode_output_size(self.pk_model_function)
         self.ode_t0_cols = self._validate_ode_t0_vals_size(ode_t0_cols)
         self.groupby_col = subject_id_col
+        self.aux_group_by_cols = self.initialize_aux_group_by_cols(aux_group_by_cols)
         self.conc_at_time_col = conc_at_time_col
         self.time_col = time_col
         self.solve_ode_at_time_col = solve_ode_at_time_col
@@ -1736,7 +1750,15 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
         
         # helper attributes possibly defined later
         self.fit_result_ = None
-
+        
+    def initialize_aux_group_by_cols(self, aux_group_by_cols):
+        if aux_group_by_cols is not None:
+            warn(f"""Multiple hierarchy levels are only valid for MCMC analysis.
+                 The levels {aux_group_by_cols} will be ignored for frequentisit analysis.""")
+            if isinstance(aux_group_by_cols, str):
+                aux_group_by_cols = [aux_group_by_cols]
+        return aux_group_by_cols
+    
     def _initialize_tols(self, significant_digits):
         
         self.optimizer_tol = 10**(-significant_digits - 1)
@@ -1932,6 +1954,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                 cols.subject_level_intercept_init_vals_column_name: pop_coeff.subject_level_intercept_init_vals_column_name,
                 cols.subject_level_intercect_sd_lower_bound: pop_coeff.subject_level_intercept_sd_lower_bound,
                 cols.subject_level_intercect_sd_upper_bound: pop_coeff.subject_level_intercept_sd_upper_bound,
+                cols.aux_hierarchy_levels: pop_coeff.aux_hierarchy_levels,
+                cols.aux_hierarchy_names: pop_coeff.aux_hierarchy_names,
+                cols.aux_hierarchy_group_by_cols: pop_coeff.aux_hierarchy_group_by_cols,
+                cols.aux_hierarchy_init_vals: pop_coeff.aux_hierarchy_init_vals,
                 }
             )
         if subject_intercept_detected or self.no_me_loss_needs_sigma:
@@ -1955,6 +1981,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                     cols.subject_level_intercept_init_vals_column_name: self.model_error_sigma.subject_level_intercept_init_vals_column_name,
                     cols.subject_level_intercect_sd_lower_bound: self.model_error_sigma.subject_level_intercept_sd_lower_bound,
                     cols.subject_level_intercect_sd_upper_bound: self.model_error_sigma.subject_level_intercept_sd_upper_bound,
+                    cols.aux_hierarchy_levels: self.model_error_sigma.aux_hierarchy_levels,
+                    cols.aux_hierarchy_names: self.model_error_sigma.aux_hierarchy_names,
+                    cols.aux_hierarchy_group_by_cols: self.model_error_sigma.aux_hierarchy_group_by_cols,
+                    cols.aux_hierarchy_init_vals: self.model_error_sigma.aux_hierarchy_init_vals,
                 }
             )
         # unpack the dep vars for the population coeffs
@@ -1990,6 +2020,10 @@ class CompartmentalModel(RegressorMixin, BaseEstimator):
                         cols.subject_level_intercept_init_vals_column_name: None,
                         cols.subject_level_intercect_sd_lower_bound: None,
                         cols.subject_level_intercect_sd_upper_bound: None,
+                        cols.aux_hierarchy_levels: None,
+                        cols.aux_hierarchy_names: None,
+                        cols.aux_hierarchy_group_by_cols: None,
+                        cols.aux_hierarchy_init_vals: None,
                     }
                 )
         self.init_vals_pd = pd.DataFrame(init_vals_pd)
